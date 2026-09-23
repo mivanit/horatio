@@ -396,10 +396,6 @@ h1 {
   color: var(--text-secondary);
 }
 
-/* GPU error styles */
-.gpu-error-title { color: var(--color-error-light); }
-.gpu-error-detail { color: #9ca3af; font-size: 0.85em; margin-top: 4px; }
-
 /* System Info overrides */
 .system-info-hostname { font-size: 18px; font-weight: 600; color: var(--text-primary); margin-bottom: 8px; }
 .system-info-details { margin-bottom: 8px; }

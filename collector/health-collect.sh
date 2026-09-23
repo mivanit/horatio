@@ -51,13 +51,15 @@ trap 'rm -rf "$tmp"' EXIT
 # longer because in-band IPMI fetches one record per round trip.
 # `|| echo "exit $?"` records a non-zero exit in the sidecar: `timeout` kills
 # silently (124), so without it a wedged BMC would look like an empty SEL.
-# No BMC (a laptop, a desktop): skip the IPMI capture instead of alarming on a
-# missing tool; the python notes it once as `info`. `command -v` is a presence
+# No BMC (a laptop, a desktop): skip the IPMI capture instead of alarming; the
+# python notes it once as `info`. The tool AND the device node: ipmitool
+# installed on a box without a BMC fails every run with "Could not open device
+# at /dev/ipmi0 ...", and that is not a fault. `command -v` is a presence
 # test, its stdout is the path, not an error.
-if command -v ipmitool > /dev/null; then
+if command -v ipmitool > /dev/null && [ -e /dev/ipmi0 ]; then
     timeout 180 ipmitool sel list          > "$tmp/sel.txt"  2> "$tmp/sel.err"  || echo "exit $?" >> "$tmp/sel.err"
 else
-    : > "$tmp/sel.txt"; : > "$tmp/sel.err"; : > "$tmp/no-ipmitool"
+    : > "$tmp/sel.txt"; : > "$tmp/sel.err"; : > "$tmp/no-bmc"
 fi
 # Fans, temperatures and power are NOT here: health-sensors.sh snapshots them
 # every minute into sensors.json (this run checks that file is fresh, below).
@@ -182,8 +184,8 @@ sel_fault_patterns = [p.lower() for p in config.get("sel_fault_patterns", SEL_FA
 grown_defect_baseline = config.get("grown_defect_baseline", {})
 if os.path.exists(os.path.join(tmp, "no-smartctl")):
     alarms.append("smartmontools not installed: drives are not monitored")
-if os.path.exists(os.path.join(tmp, "no-ipmitool")):
-    info.append("ipmitool not installed: no BMC event log")
+if os.path.exists(os.path.join(tmp, "no-bmc")):
+    info.append("no BMC (ipmitool or /dev/ipmi0 missing): no event log")
 
 # ---- SEL, memory events ------------------------------------------------------
 # Dell SEL lines look like (this script runs under LC_ALL=C, where ipmitool's

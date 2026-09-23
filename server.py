@@ -1707,24 +1707,33 @@ async def ping() -> Response:
     )
 
 
-def _get_gpu_info() -> list[dict[str, int | float | str | None]] | dict[str, str]:
-    """Get detailed GPU info from nvidia-smi (sync, called from thread pool).
+def _get_gpu_info() -> list[dict[str, int | float | str | None]]:
+    """Detailed GPU info from nvidia-smi (sync, called from thread pool).
 
-    Returns a list of GPU dicts on success, or an error dict on failure.
+    One shape: a list of GPU dicts, empty when nvidia-smi is missing, times out
+    or fails (like get_gpu_stats); the reason goes to the log. The UI's cache
+    readers and test.py rely on always getting a list.
     """
-    result = subprocess.run(
-        [
-            "nvidia-smi",
-            "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit,driver_version",
-            "--format=csv,noheader,nounits",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit,driver_version",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except FileNotFoundError:
+        logger.debug("nvidia-smi not found")
+        return []
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.warning("nvidia-smi error: %s", e)
+        return []
     if result.returncode != 0:
-        error_msg = result.stderr.strip() or f"Exit code {result.returncode}"
-        return {"error": "nvidia-smi failed", "detail": error_msg}
+        logger.warning("nvidia-smi failed: %s", result.stderr.strip() or f"exit {result.returncode}")
+        return []
 
     # Get CUDA version from nvidia-smi header
     cuda_version: str = ""
@@ -1783,38 +1792,8 @@ def _get_gpu_info() -> list[dict[str, int | float | str | None]] | dict[str, str
 
 @APP.get("/api/gpu-info")
 async def gpu_info() -> Response:
-    """Get detailed GPU info from nvidia-smi."""
-    try:
-        result = await asyncio.to_thread(_get_gpu_info)
-    except FileNotFoundError:
-        logger.debug("nvidia-smi not found")
-        return Response(
-            content=json.dumps(
-                {
-                    "error": "nvidia-smi not found",
-                    "detail": "NVIDIA drivers may not be installed",
-                }
-            ),
-            media_type="application/json",
-        )
-    except subprocess.TimeoutExpired:
-        logger.warning("nvidia-smi timed out")
-        return Response(
-            content=json.dumps(
-                {
-                    "error": "nvidia-smi timeout",
-                    "detail": "Command took longer than 5s",
-                }
-            ),
-            media_type="application/json",
-        )
-    except Exception as e:
-        logger.warning("nvidia-smi error: %s", e)
-        return Response(
-            content=json.dumps({"error": "GPU info unavailable", "detail": str(e)}),
-            media_type="application/json",
-        )
-
+    """Detailed GPU info from nvidia-smi; [] when it is unavailable."""
+    result = await asyncio.to_thread(_get_gpu_info)
     return Response(content=json.dumps(result), media_type="application/json")
 
 

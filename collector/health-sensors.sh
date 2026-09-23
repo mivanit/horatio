@@ -40,15 +40,17 @@ trap 'rm -rf "$tmp"' EXIT
 #   Fan1 | 30h | ok | 7.1 | 17640 RPM
 # `|| echo "exit $?"` records a non-zero exit in the sidecar: `timeout` kills
 # silently (124), so without it a wedged BMC would look like an empty table.
-# No BMC (a laptop, a desktop): skip the IPMI captures instead of alarming on a
-# missing tool; the python notes it once as `info`.
-if command -v ipmitool > /dev/null; then
+# No BMC (a laptop, a desktop): skip the IPMI captures instead of alarming; the
+# python notes it once as `info`. The tool AND the device node: ipmitool
+# installed on a box without a BMC fails every run with "Could not open device
+# at /dev/ipmi0 ...", and that is not a fault.
+if command -v ipmitool > /dev/null && [ -e /dev/ipmi0 ]; then
     timeout 60 ipmitool sdr type fan          > "$tmp/fan.txt"   2> "$tmp/fan.err"   || echo "exit $?" >> "$tmp/fan.err"
     timeout 60 ipmitool sdr type temperature  > "$tmp/temp.txt"  2> "$tmp/temp.err"  || echo "exit $?" >> "$tmp/temp.err"
     timeout 60 ipmitool sdr type current      > "$tmp/power.txt" 2> "$tmp/power.err" || echo "exit $?" >> "$tmp/power.err"
 else
     for f in fan temp power; do : > "$tmp/$f.txt"; : > "$tmp/$f.err"; done
-    : > "$tmp/no-ipmitool"
+    : > "$tmp/no-bmc"
 fi
 
 # RAPL. First line: the read time (seconds, fractional); then one line per
@@ -90,8 +92,8 @@ except FileNotFoundError:
     config = {}
 
 state = {"ts": int(time.time()), "info": []}
-if os.path.exists(os.path.join(tmp, "no-ipmitool")):
-    state["info"].append("ipmitool not installed: no BMC sensors")
+if os.path.exists(os.path.join(tmp, "no-bmc")):
+    state["info"].append("no BMC (ipmitool or /dev/ipmi0 missing): no BMC sensors")
 
 # ---- IPMI sensors ------------------------------------------------------------
 def sensors(text, what):

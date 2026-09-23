@@ -359,18 +359,7 @@ function renderGpuInfo(data) {
   const gpuInfoContent = document.getElementById('gpu-info-content');
   gpuInfoCard.style.display = '';
 
-  // Handle error response
-  if (data && data.error) {
-    gpuInfoContent.innerHTML = `<div class="info-item gpu-error">
-      <div class="gpu-error-title">${escapeHtml(data.error)}</div>
-      ${data.detail ? `<div class="gpu-error-detail">${escapeHtml(data.detail)}</div>` : ''}
-    </div>`;
-    updateCardNoData('gpu-info', false);
-    updateCacheDisplay('gpu-info', 'gpuInfo');
-    return;
-  }
-
-  // Handle valid GPU data
+  // /api/gpu-info is always a list: empty when nvidia-smi is missing or failed.
   if (data && Array.isArray(data) && data.length > 0) {
     gpuInfoContent.innerHTML = data.map(g => {
       const shortName = escapeHtml(abbreviateGpuName(g.name));
@@ -1423,6 +1412,14 @@ async function fetchData() {
   fetchInFlight = true;
   try { await fetchDataOnce(); } finally { fetchInFlight = false; }
 }
+// One card's processing bug must not skip the cards after it. The card goes
+// red like a failed fetch (header shows Partial); the error still hits the console.
+function guard(cardId, fn) {
+  try { fn(); } catch (err) {
+    console.error(`${cardId}: processing error`, err);
+    updateCardNoData(cardId, false);
+  }
+}
 async function fetchDataOnce() {
   // Build fetch promises - skip cached endpoints
   const fetchPromises = [
@@ -1442,8 +1439,7 @@ async function fetchDataOnce() {
 
   const [cpu, percpu, mem, swap, gpu, network, diskio, sensors, load, processlist, gpuProcesses, ping] = await Promise.all(fetchPromises);
 
-  try {
-
+  guard('cpu', () => {
     // CPU
     const cpuValueEl = document.getElementById('cpu-value');
     if (cpu.ok) {
@@ -1458,7 +1454,9 @@ async function fetchDataOnce() {
       // Don't plot anything - skip history update
       updateCardNoData('cpu', false);
     }
+  });
 
+  guard('cpu-cores', () => {
     // Per-CPU cores
     const cpuCoresValueEl = document.getElementById('cpu-cores-value');
     if (percpu.ok && Array.isArray(percpu.data) && percpu.data.length > 0) {
@@ -1513,7 +1511,9 @@ async function fetchDataOnce() {
       updateCardNoData('cpu-cores', false);
       updateCardNoData('cpu-cores-spread', false);
     }
+  });
 
+  guard('mem', () => {
     // Memory
     const memUsedEl = document.getElementById('mem-used-value');
     const memTotalEl = document.getElementById('mem-total-value');
@@ -1535,7 +1535,9 @@ async function fetchDataOnce() {
     } else {
       updateCardNoData('mem', false);
     }
+  });
 
+  guard('swap', () => {
     // Swap
     const swapUsedEl = document.getElementById('swap-used-value');
     const swapTotalEl = document.getElementById('swap-total-value');
@@ -1554,7 +1556,9 @@ async function fetchDataOnce() {
     } else {
       updateCardNoData('swap', false);
     }
+  });
 
+  guard('gpu', () => {
     // GPU (handle multiple GPUs)
     if (gpu.ok) {
       const gpuArray = Array.isArray(gpu.data) ? gpu.data : (gpu.data ? [gpu.data] : []);
@@ -1664,7 +1668,9 @@ async function fetchDataOnce() {
       updateCardNoData('gpu', false);
       updateCardNoData('gpu-mem', false);
     }
+  });
 
+  guard('network', () => {
     // Network (sum all interfaces, use rate)
     const netInEl = document.getElementById('net-in-value');
     const netOutEl = document.getElementById('net-out-value');
@@ -1690,7 +1696,9 @@ async function fetchDataOnce() {
     } else {
       updateCardNoData('network', false);
     }
+  });
 
+  guard('disk', () => {
     // Disk I/O (sum all disks, use rate)
     const diskReadEl = document.getElementById('disk-read-value');
     const diskWriteEl = document.getElementById('disk-write-value');
@@ -1810,7 +1818,10 @@ async function fetchDataOnce() {
       updateCardNoData('disk', false);
       updateCardNoData('disk-drives', false);
     }
+  });
 
+  // Temps, fans and power share the collected arrays, so they are one unit.
+  guard('temps', () => {
     // Sensors (temperatures and fans). Three independent sources feed these two
     // cards: Glances core sensors, GPU temps (/api/gpu), and the root
     // collector's IPMI snapshot. Each contributes only if it has data, and each
@@ -1981,7 +1992,9 @@ async function fetchDataOnce() {
     } else {
       powerCard.style.display = 'none';
     }
+  });
 
+  guard('load', () => {
     // System Load
     if (load.ok && load.data) {
       const cpuCores = load.data.cpucore || 1;
@@ -2006,7 +2019,9 @@ async function fetchDataOnce() {
     } else {
       updateCardNoData('load', false);
     }
+  });
 
+  guard('ping', () => {
     // Ping (config-driven targets)
     const cfgTargets = dashboardConfig.ping_targets || DEFAULT_PING_TARGETS;
     if (ping.ok && ping.data.disabled) {
@@ -2053,7 +2068,9 @@ async function fetchDataOnce() {
     } else {
       updateCardNoData('ping', false);
     }
+  });
 
+  guard('processes', () => {
     // Store GPU processes for unified table joining
     if (gpuProcesses.ok && Array.isArray(gpuProcesses.data)) {
       lastGpuProcesses = gpuProcesses.data;
@@ -2069,19 +2086,13 @@ async function fetchDataOnce() {
     } else {
       updateCardNoData('processes', false);
     }
+  });
 
-    // Update connection status based on all card states
-    updateConnectionStatus();
+  // Update connection status based on all card states
+  updateConnectionStatus();
 
-    // Clear any previous errors on success
-    hideError();
-
-  } catch (err) {
-    // This catches processing errors after fetch completes, not connection errors.
-    // Individual cards handle their own fetch failures via safeFetch's ok:false.
-    console.error('Data processing error:', err);
-    showError('Data processing error \u2014 check browser console');
-  }
+  // Clear any previous errors on success
+  hideError();
 }
 
 // Toggle connection (pause/resume polling)
