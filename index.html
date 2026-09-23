@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Loading...</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+</head>
+<body>
+  <div class="top-controls">
+    <div class="toolbar-left">
+      <div class="layout-controls" id="layout-controls">
+        <button class="reset-btn" id="reset-layout-btn" title="Reset cards to default layout">Reset Layout</button>
+        <label class="poll-label">Columns:</label>
+        <button class="dropdown-trigger" id="max-columns" title="Number of grid columns">3</button>
+      </div>
+      <div class="history-controls-group">
+        <span class="history-controls-label">History</span>
+        <div class="history-controls-buttons">
+          <button class="history-icon-btn history-icon-btn--show" id="show-all-history-btn" title="Show history for all metrics">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3,6 8,11 13,6"/></svg>
+          </button>
+          <button class="history-icon-btn history-icon-btn--refresh" id="refresh-history-btn" title="Refresh all history cards">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 2.5v4h-4"/><path d="M2.5 13.5v-4h4"/><path d="M3.5 6a5.5 5.5 0 0 1 9.2-1.5l.8 1"/><path d="M12.5 10a5.5 5.5 0 0 1-9.2 1.5l-.8-1"/></svg>
+          </button>
+          <button class="history-icon-btn history-icon-btn--hide" id="hide-all-history-btn" title="Hide all history cards">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3,10 8,5 13,10"/></svg>
+          </button>
+          <button class="history-icon-btn history-icon-btn--time" id="history-default-time-btn" title="Default time range for history cards">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.5"/><polyline points="8,4 8,8 11,10"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+    <h1 id="dashboard-title">Loading...</h1>
+    <div class="toolbar-right">
+      <label class="poll-label">Live Samples:</label>
+      <button class="dropdown-trigger" id="history-length" title="Number of data points in live charts">60</button>
+      <div class="status" id="status">
+        <label class="poll-label">Refresh:</label>
+        <button class="dropdown-trigger" id="poll-select" title="Live data polling interval">2s</button>
+        <button class="toggle-btn" id="toggle-btn" title="Pause or resume live polling">Disconnect</button>
+        <span class="status-text">Connected</span>
+        <div class="spinner"></div>
+      </div>
+      <!-- Immediate sibling of #status so `.status:hover + .status-tooltip` matches
+           (it's position:fixed, so its DOM location doesn't affect placement). -->
+      <div class="status-tooltip" id="status-tooltip"></div>
+    </div>
+  </div>
+  <div class="toast" id="error-toast">
+    <span class="toast-icon">⚠</span>
+    <span class="toast-message" id="error-message">Error connecting to API</span>
+  </div>
+
+  <div class="grid">
+    <!-- OVERVIEW -->
+    <div class="card" id="system-info-card" data-card-id="system-info">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>System Info</h2>
+        <div class="cache-info">
+          <span class="cache-time"></span>
+          <button class="refresh-btn" data-refresh="systemInfo">↻</button>
+        </div>
+      </div>
+      <div class="info-content" id="system-info-content">
+        Loading...
+      </div>
+    </div>
+
+    <div class="card" id="mail-card" data-card-id="mail">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>System Mail</h2>
+        <div class="cache-info">
+          <span class="cache-time"></span>
+          <button class="refresh-btn" data-refresh="mail">↻</button>
+        </div>
+      </div>
+      <div class="info-content" id="mail-content">
+        Loading...
+      </div>
+    </div>
+
+    <div class="card" data-card-id="load">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>System Load</h2>
+        <button class="history-btn" data-history-metric="load">H</button>
+        <span class="value" id="load-value">--</span>
+      </div>
+      <div class="load-values" id="load-values">
+        <div class="load-item">
+          <span class="load-label">1m</span>
+          <span class="load-num" id="load-1m">--</span>
+        </div>
+        <div class="load-item">
+          <span class="load-label">5m</span>
+          <span class="load-num" id="load-5m">--</span>
+        </div>
+        <div class="load-item">
+          <span class="load-label">15m</span>
+          <span class="load-num" id="load-15m">--</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- CPU DETAILS -->
+    <div class="card" id="cpu-info-card" data-card-id="cpu-info">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>CPU Info</h2>
+        <div class="cache-info">
+          <span class="cache-time"></span>
+          <button class="refresh-btn" data-refresh="cpuInfo">↻</button>
+        </div>
+      </div>
+      <div class="info-content" id="cpu-info-content">
+        Loading...
+      </div>
+    </div>
+
+    <!-- KEY METRICS -->
+    <div class="card" data-card-id="cpu">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>CPU Usage</h2>
+        <button class="history-btn" data-history-metric="cpu">H</button>
+        <span class="value" id="cpu-value">--%</span>
+      </div>
+      <div class="chart-container"><canvas id="cpu-chart"></canvas></div>
+    </div>
+
+    <div class="card" data-card-id="mem">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>Memory</h2>
+        <button class="history-btn" data-history-metric="memory">H</button>
+        <span class="value"><span id="mem-used-value">--</span> / <span id="mem-total-value">--</span> GB</span>
+      </div>
+      <div class="chart-container"><canvas id="mem-chart"></canvas></div>
+    </div>
+
+    <div class="card" data-card-id="network">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>Network</h2>
+        <button class="history-btn" data-history-metric="network">H</button>
+        <span class="value"><span class="color-download">↓</span><span id="net-in-value">--</span> <span class="color-upload">↑</span><span id="net-out-value">--</span> MB/s</span>
+      </div>
+      <div class="chart-container"><canvas id="net-chart"></canvas></div>
+      <div class="legend">
+        <span class="legend-item"><span class="legend-dot bg-download"></span><span class="color-download">↓</span> In</span>
+        <span class="legend-item"><span class="legend-dot bg-upload"></span><span class="color-upload">↑</span> Out</span>
+      </div>
+    </div>
+
+    <div class="card" data-card-id="ping">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>Ping</h2>
+        <button class="history-btn" data-history-metric="ping">H</button>
+        <span class="value" id="ping-value">--</span>
+      </div>
+      <div class="chart-container"><canvas id="ping-chart"></canvas></div>
+      <div id="ping-legend" class="legend"></div>
+    </div>
+
+    <div class="card" data-card-id="cpu-cores">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>CPU Cores</h2>
+        <span class="value" id="cpu-cores-value">-- cores</span>
+      </div>
+      <div class="chart-container"><canvas id="cpu-cores-chart"></canvas></div>
+    </div>
+
+    <div class="card" data-card-id="cpu-cores-spread">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>Core Spread</h2>
+        <button class="history-btn" data-history-metric="cpu_cores">H</button>
+        <span class="value" id="cpu-cores-spread-value">--</span>
+      </div>
+      <div class="chart-container"><canvas id="cpu-cores-spread-chart"></canvas></div>
+    </div>
+
+    <!-- GPU DETAILS -->
+    <div class="card" id="gpu-info-card" data-card-id="gpu-info">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>GPU Info</h2>
+        <div class="cache-info">
+          <span class="cache-time"></span>
+          <button class="refresh-btn" data-refresh="gpuInfo">↻</button>
+        </div>
+      </div>
+      <div class="info-content" id="gpu-info-content">
+        Loading...
+      </div>
+    </div>
+
+    <div class="card" data-card-id="gpu">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>GPU Usage</h2>
+        <button class="history-btn" data-history-metric="gpu">H</button>
+        <span class="value" id="gpu-value">--%</span>
+      </div>
+      <div class="chart-container"><canvas id="gpu-chart"></canvas></div>
+      <div class="legend" id="gpu-legend"></div>
+    </div>
+
+    <div class="card" data-card-id="gpu-mem">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>GPU Memory</h2>
+        <button class="history-btn" data-history-metric="gpu-mem">H</button>
+        <span class="value" id="gpu-mem-value">-- / -- GB</span>
+      </div>
+      <div class="chart-container"><canvas id="gpu-mem-chart"></canvas></div>
+      <div class="legend" id="gpu-mem-legend"></div>
+    </div>
+
+    <!-- THERMALS -->
+    <div class="card" id="temps-card" data-card-id="temps">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>Temperatures</h2>
+        <button class="history-btn" data-history-metric="temps">H</button>
+        <span class="value" id="temps-value">--</span>
+        <div class="cache-info">
+          <span class="cache-time"></span>
+          <button class="refresh-btn" data-refresh="sensors">↻</button>
+        </div>
+      </div>
+      <div class="chart-container"><canvas id="temps-chart"></canvas></div>
+    </div>
+
+    <div class="card" id="fans-card" data-card-id="fans" style="display: none;">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>Fan Speeds</h2>
+        <button class="history-btn" data-history-metric="fans">H</button>
+        <span class="value" id="fans-value">--</span>
+        <div class="cache-info">
+          <span class="cache-time"></span>
+          <button class="refresh-btn" data-refresh="sensors">↻</button>
+        </div>
+      </div>
+      <div class="chart-container"><canvas id="fans-chart"></canvas></div>
+    </div>
+
+    <div class="card" id="power-card" data-card-id="power" style="display: none;">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>Power</h2>
+        <button class="history-btn" data-history-metric="power">H</button>
+        <span class="value" id="power-value">--</span>
+        <div class="cache-info">
+          <span class="cache-time"></span>
+          <button class="refresh-btn" data-refresh="sensors">↻</button>
+        </div>
+      </div>
+      <!-- one stacked bar of the BMC total: GPUs, CPUs, DRAM, other; PSU line -->
+      <div id="power-bar"></div>
+    </div>
+
+    <!-- SECONDARY -->
+    <div class="card" data-card-id="swap">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>Swap</h2>
+        <button class="history-btn" data-history-metric="swap">H</button>
+        <span class="value"><span id="swap-used-value">--</span> / <span id="swap-total-value">--</span> GB</span>
+      </div>
+      <div class="chart-container"><canvas id="swap-chart"></canvas></div>
+    </div>
+
+    <div class="card" data-card-id="disk">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>Disk I/O</h2>
+        <button class="history-btn" data-history-metric="disk">H</button>
+        <span class="value"><span class="color-read">↑</span><span id="disk-read-value">--</span> <span class="color-write">↓</span><span id="disk-write-value">--</span> MB/s</span>
+      </div>
+      <div class="chart-container"><canvas id="disk-chart"></canvas></div>
+      <div class="legend">
+        <span class="legend-item"><span class="legend-dot bg-read"></span><span class="color-read">↑</span> Read</span>
+        <span class="legend-item"><span class="legend-dot bg-write"></span><span class="color-write">↓</span> Write</span>
+      </div>
+    </div>
+
+    <div class="card" data-card-id="disk-drives">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>Disk I/O (Per-Drive)</h2>
+        <button class="history-btn" data-history-metric="disk-drives">H</button>
+      </div>
+      <div class="chart-container"><canvas id="disk-drives-chart"></canvas></div>
+      <div id="disk-drives-legend" class="legend"></div>
+    </div>
+
+    <div class="card" id="drive-usage-card" data-card-id="drive-usage">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>Drive Usage</h2>
+        <button class="history-btn" data-history-metric="drive-usage">H</button>
+        <div class="cache-info">
+          <span class="cache-time"></span>
+          <button class="refresh-btn" data-refresh="drives">↻</button>
+        </div>
+      </div>
+      <div class="drive-usage-content" id="drive-usage-content">
+        Loading...
+      </div>
+    </div>
+
+    <!-- Drive Health: per PHYSICAL drive (SMART verdict, temp, defects) and what it holds;
+         mounts live on Drive Usage, but md0 is two drives and / is an LVM volume -->
+    <div class="card" id="drive-health-card" data-card-id="drive-health">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>Drive Health</h2>
+        <div class="cache-info">
+          <span class="cache-time"></span>
+          <button class="refresh-btn" data-refresh="storageHealth">↻</button>
+        </div>
+      </div>
+      <div class="info-content" id="drive-health-content">
+        Loading...
+      </div>
+    </div>
+
+    <div class="card" id="ip-info-card" data-card-id="ip-info">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>IP Info</h2>
+        <div class="cache-info">
+          <span class="cache-time"></span>
+          <button class="refresh-btn" data-refresh="ipInfo">↻</button>
+        </div>
+      </div>
+      <div class="info-content" id="ip-info-content">
+        Loading...
+      </div>
+    </div>
+
+    <!-- Hardware health: the collector's alarms + memory/backup lines; drives are on Drive Health -->
+    <div class="card" id="hardware-card" data-card-id="hardware">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>Hardware health</h2>
+        <span class="value" id="hardware-value">--</span>
+        <div class="cache-info">
+          <span class="cache-time"></span>
+          <button class="refresh-btn" data-refresh="storageHealth">↻</button>
+        </div>
+      </div>
+      <div class="info-content" id="hardware-content">
+        Loading...
+      </div>
+    </div>
+
+    <div class="card card-full-width" data-card-id="processes">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>Processes <span class="info-icon" title="CPU % is relative to total system capacity (all cores). A process using one full core on an 8-core system shows ~12.5%. Values won't sum to 100%.">ⓘ</span></h2>
+        <div class="cache-info">
+          <span class="cache-time"></span>
+          <button class="refresh-btn" data-refresh="processes">↻</button>
+        </div>
+        <div class="process-count-control">
+          <button class="dropdown-trigger dropdown-trigger-small" id="process-count-select" title="Number of processes to display">8</button>
+          <span class="value" id="processes-value">shown</span>
+        </div>
+      </div>
+      <div class="table-container" id="processes-table"></div>
+    </div>
+  </div>
+
+  <script src="/static/chart.umd.min.js"></script>
+  <script src="/static/util.js"></script>
+  <script src="/static/config.js"></script>
+  <script src="/static/charts.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "_comment": "Per-machine collector config. install.sh installs it once to /etc/horatio/config.json and never overwrites it; edit it there. Keys are documented in README.md (Config section).",
+  "sel_fault_patterns": [
+    "AC lost",
+    "Redundancy Lost",
+    "Lower Critical going",
+    "Upper Critical going",
+    "Drive Fault",
+    "failure",
+    "failed"
+  ],
+  "grown_defect_baseline": {},
+  "fan_rpm_alarm_above": null,
+  "backup_timer": null
+}

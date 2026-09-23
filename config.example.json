@@ -1,0 +1,29 @@
+{
+  "_comment": "Copied to config.json by install.sh on first run; config.json is gitignored and never overwritten. power_max_watts is the bar's right edge, power_psu_watts the dashed line, power_warn_fraction the orange threshold as a fraction of the PSU.",
+  "title": "Horatio",
+  "title_emoji": "🔭 Horatio",
+  "ping_targets": [
+    { "address": "8.8.8.8" },
+    { "address": "192.168.1.1" }
+  ],
+  "history": {
+    "record_interval": 600,
+    "sample_duration": 10,
+    "sample_count": 5
+  },
+  "thresholds": {
+    "cpu_percent": 50,
+    "memory_percent": 75,
+    "gpu_util_percent": 80,
+    "gpu_memory_percent": 80,
+    "temp_celsius": 60,
+    "power_max_watts": 1200,
+    "power_psu_watts": 1100,
+    "power_warn_fraction": 0.8,
+    "network_mbps": 3,
+    "disk_percent": 80,
+    "disk_io_mbps": 50,
+    "swap_percent": 10,
+    "ping_ms": 100
+  }
+}

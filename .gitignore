@@ -1,0 +1,11 @@
+.venv/
+logs/
+static/chart.umd.min.js
+.password
+# per-machine configs: created from the *.example.json files by install.sh
+config.json
+collector/health-config.json
+nginx/*.services
+!nginx/example.services
+__pycache__/
+*.pyc

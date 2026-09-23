@@ -1,0 +1,35 @@
+[Unit]
+Description=Horatio: homelab dashboard (Glances + custom UI)
+After=network.target
+
+[Service]
+# install.sh rewrites the checkout path in the three path lines below and User=
+# at install time; /opt/horatio and User=horatio are placeholders. The venv's
+# own python is run, not `uv run`: uv writes to ~/.cache/uv on every start,
+# which ProtectSystem=strict forbids (EROFS, exit 2, restart loop).
+WorkingDirectory=/opt/horatio
+ExecStart=/opt/horatio/.venv/bin/python server.py
+Restart=always
+RestartSec=5
+User=horatio
+
+# Read-only filesystem except the app dir (logs, history JSONL, .password).
+ProtectSystem=strict
+ReadWritePaths=/opt/horatio
+PrivateTmp=yes
+ProtectControlGroups=yes
+# Deliberately NO NoNewPrivileges= and NO seccomp-backed option (PrivateDevices,
+# ProtectKernel*, ProtectClock, ProtectHostname, Restrict*, SystemCall*,
+# LockPersonality, MemoryDenyWriteExecute; see context_has_seccomp() in systemd's
+# src/core/exec-invoke.c): for a User= service any of those turns no_new_privs on,
+# and the kernel then ignores the file capabilities install.sh puts on nethogs,
+# which kills the Network Processes card. The four mount-namespace options above
+# are fine. The server itself runs with no capabilities; this bounding set is the
+# ceiling for a setcap'd child (nethogs, ping) and must stay a superset of the
+# setcap list in install.sh (a missing cap makes execve fail with EPERM). Not
+# AmbientCapabilities=, which would hand read-any-file + ptrace to the
+# unauthenticated web process.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH CAP_SYS_PTRACE
+
+[Install]
+WantedBy=multi-user.target

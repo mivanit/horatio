@@ -1,0 +1,19 @@
+[Unit]
+Description=Horatio: snapshot hardware health (SEL/ECC, SMART, md, backup) every 15 min
+Documentation=https://github.com/mivanit/horatio/blob/main/collector/README.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/health-collect.sh
+Nice=19
+IOSchedulingClass=idle
+# Every command in the script has its own timeout(1); their sum is 15 min. A run
+# past that is stuck in uninterruptible I/O that timeout could not kill. Without
+# this Type=oneshot has no start timeout and the timer's OnUnitActiveSec= would
+# never re-fire.
+TimeoutStartSec=20min
+# Mail root the tail of a failed run; $SERVICE_RESULT is "exit-code" for a crash,
+# "timeout" for the above. Needs a local MTA and /usr/bin/mail (bsd-mailx);
+# without them "sh: mail: not found" lands in this unit's journal and nothing
+# is sent.
+ExecStopPost=/bin/sh -c '[ "$SERVICE_RESULT" = success ] || journalctl --unit %n --lines 30 | mail -s "[horatio] health collector FAILED: $SERVICE_RESULT" root'

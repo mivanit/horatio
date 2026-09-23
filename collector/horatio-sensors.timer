@@ -1,0 +1,13 @@
+[Unit]
+Description=Horatio: snapshot fans, temperatures and power every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=60s
+# systemd's default AccuracySec of 1 min would let this fire anywhere 60-120 s
+# after the last run; the history sampler and the "every 60 s" promise want 60.
+AccuracySec=5s
+# No Persistent=true: a missed sensor sample is worthless after the fact.
+
+[Install]
+WantedBy=timers.target

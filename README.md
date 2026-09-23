@@ -1,0 +1,178 @@
+# Horatio
+
+Horatio watches, listens and records: a self-hosted dashboard for one Linux box.
+
+- **Live cards**: CPU, memory, swap, load, per-core spread, GPUs (utilisation, memory, temps,
+  power), network and disk I/O, per-process CPU / memory / GPU / disk / network, sensors,
+  ping to configured targets, drive usage, IP addresses.
+- **Hardware health** (optional root collector): SMART per drive with what each drive holds,
+  md arrays, ECC counters, the BMC event log (memory events and hardware faults), a backup
+  timer, failed units, error-level journal lines, fans, chassis temperatures, and power as one
+  stacked bar (GPUs, CPU and DRAM sockets, the rest). One `alarms` list drives the red cards.
+- **System mail**: count and subjects of the local root mail (smartd, mdadm, cron).
+- **History**: a JSONL recorder with charts over any range, per-metric min/max bands, stacked
+  power, a range mode for the fans.
+
+Backend: FastAPI wrapping a [Glances](https://github.com/nicolargo/glances) subprocess plus
+`nvidia-smi`, `ping`, `nethogs`, `pidstat`. Frontend: vanilla JS and Chart.js, no build step.
+
+## Requirements
+
+- Linux with systemd and `sudo`; [uv](https://docs.astral.sh/uv/) (it installs the Python in
+  `pyproject.toml`); `curl` (fetches Chart.js at install, pinned and checksummed); `python3`
+  and `iproute2` on the box (the collector, the IP card). The optional-tool offers use
+  `apt-get`; on other distros install `nethogs` + `libcap2-bin` and `sysstat` by hand.
+- Optional, per card:
+
+| Card | Needs |
+|---|---|
+| GPUs | an NVIDIA driver (`nvidia-smi`) |
+| Network Processes | `nethogs` with file capabilities (the installer offers to set it up) |
+| Disk I/O Processes | `sysstat` (`pidstat`) |
+| System Mail | a local MTA delivering root's mail to the service user's spool: `postfix` ("Local only") plus `bsd-mailx`, with `root: <user>` in `/etc/aliases` and `newaliases` |
+| Hardware health, Drive Health, Fan Speeds, Temperatures, Power | the root collector (`--collector`): `smartmontools` (required: without it the Hardware card alarms); optionally `ipmitool` + a BMC for fans/temps/system watts and Intel RAPL for CPU/DRAM watts, skipped when absent. See [`collector/README.md`](collector/README.md) |
+
+## Install
+
+```bash
+git clone https://github.com/mivanit/horatio ~/horatio
+cd ~/horatio
+./install.sh               # web service on :8080; run as your user, it calls sudo where needed
+./install.sh --collector   # the same, plus the root hardware collector
+```
+
+It offers nethogs and sysstat until they are installed (`--no-optional` silences the offers).
+Then edit `config.json` (created from `config.example.json`: title, ping targets, thresholds)
+and `sudo systemctl restart horatio`; with the collector, also the collector's config at
+`/etc/horatio/config.json` (see the collector README; it takes effect on the next 15-min run).
+Open `http://<host>:8080`. The checkout can live anywhere writable by the user who runs it (no
+spaces in the path); the service file is rendered from `horatio.service` with that path and user.
+
+A second, foreground instance (after `./install.sh` has run once: it fetches Chart.js and
+creates `config.json`):
+
+```bash
+uv run python server.py --port 9000            # --glances-port, --host 127.0.0.1
+```
+
+After install, `uv run python server.py --set-password` sets the password for the raw history
+download and the settings endpoint (stored hashed in `.password`).
+
+## Update
+
+```bash
+git pull && ./install.sh
+```
+
+Idempotent: re-syncs the venv, re-fetches Chart.js, re-renders the unit, restarts the service,
+and re-installs the collector when it is installed on this box (its first run is synchronous,
+a minute or three on a box with many drives). The optional-tool offers repeat until the tool
+is installed, or pass `--no-optional`. `config.json`, `/etc/horatio/config.json`, `.password`
+and `logs/` are never touched.
+
+## Uninstall
+
+```bash
+./install.sh --uninstall
+```
+
+Removes the service, the collector's units, scripts and snapshots. The checkout, its
+`config.json`, `logs/` and `/etc/horatio/config.json` stay; delete them by hand.
+
+## Configuration
+
+`config.json` (per machine, gitignored):
+
+| key | meaning |
+|---|---|
+| `title`, `title_emoji` | page title and heading |
+| `ping_targets` | `[{address}]` pinged every poll and recorded to history |
+| `history.record_interval` | seconds between history records (default 600) |
+| `history.sample_duration`, `history.sample_count` | each record averages `sample_count` samples over `sample_duration` seconds |
+| `thresholds.*_percent`, `temp_celsius`, `network_mbps`, `disk_io_mbps`, `ping_ms` | orange-card thresholds |
+| `thresholds.power_max_watts`, `power_psu_watts`, `power_warn_fraction` | the power bar's right edge, its dashed PSU line, and the orange threshold as a fraction of the PSU |
+
+Runtime settings (poll interval, chart length, grid columns, card order) live in the browser.
+History recording settings can also be changed from the page with the password; they revert to
+`config.json` on restart.
+
+## Security
+
+Meant for a trusted LAN. The dashboard binds to all interfaces and is unauthenticated except
+the raw history download and the settings endpoint. Unauthenticated data includes local IP
+addresses, mail subjects, drive models and serials, and the Glances metrics; the Glances
+process views that carry full command lines are blocked (`/api/4/all`, `/api/4/processlist*`,
+`/api/4/processes*`), and the dashboard's own process list strips arguments. The web process
+runs as an unprivileged user under `ProtectSystem=strict` and never runs `sudo`, `smartctl` or
+`ipmitool`: the collector runs as root on its own timers and the web process only reads the
+JSON it writes. The IP card and each history record ask `api.ipify.org` for the public address.
+
+## API
+
+| Endpoint                     | Description                                 |
+| ---------------------------- | ------------------------------------------- |
+| `GET /`                      | Dashboard UI                                |
+| `/api/4/*` (any method)      | Proxied to the Glances REST API (except the blocked process views above) |
+| `GET /api/4/fs`              | Glances filesystems, deduplicated by device (bind mounts collapse) |
+| `GET /api/processlist`       | Process list with arguments stripped (the one the UI uses) |
+| `GET /api/list-endpoints`    | Which file-backed endpoints exist on this box (mail, storage-health, sensors) |
+| `GET /api/gpu-info`          | NVIDIA GPU details                          |
+| `GET /api/cpu-info`          | CPU details from /proc/cpuinfo              |
+| `GET /api/gpu-processes`     | GPU process list                            |
+| `GET /api/network-processes` | Per-process network bandwidth (nethogs)     |
+| `GET /api/disk-processes`    | Per-process disk I/O (pidstat)              |
+| `GET /api/ping`              | Ping the configured targets                 |
+| `GET /api/ip-info`           | LAN, public, and Tailscale IP addresses     |
+| `GET /api/mail`              | Local system mail: `count` and the newest 10 `{date_epoch, subject}`; always 200 with `status` ok/missing/error |
+| `GET /api/storage-health`    | The 15-min collector snapshot (`alarms`, `info`, drives, md, ECC, SEL, backup, failed units, journal errors) with `status` ok/stale/missing/error and `age_sec`; always 200 |
+| `GET /api/sensors`           | The 60 s sensors snapshot (`fans`, `temps`, `power`, `alarms`), same shape, stale after 300 s |
+| `GET /api/history`           | History records (query: `hours`, default 24) |
+| `POST /api/history/record`   | Record now (rate-limited)                   |
+| `GET /api/history/raw`       | Raw `history.jsonl` download (password)     |
+| `GET /api/history/settings`  | Current recording settings                  |
+| `POST /api/history/settings` | Update recording settings (password)        |
+| `GET /config.json`           | The config                                  |
+
+## Layout
+
+```
+horatio/
+├── server.py                    # FastAPI server + Glances subprocess + history recorder
+├── test.py                      # Integration tests (starts its own server)
+├── index.html, static/          # Frontend: app.js (polling, cards, history), config.js, charts.js, util.js, style.css
+├── config.example.json          # -> config.json (per machine, gitignored)
+├── horatio.service              # systemd unit template (path and user rendered by install.sh)
+├── install.sh                   # install / update / --collector / --uninstall
+├── collector/                   # root collectors, their units, config example, alarm table
+├── nginx/                       # optional reverse proxy with subdomains per service
+├── openwrt/                     # Lua backend serving the same frontend on OpenWrt routers
+├── logs/                        # runtime: history.jsonl, server.log, glances.log
+└── pyproject.toml, uv.lock
+```
+
+## Development
+
+```bash
+cp config.example.json config.json   # once
+uv sync
+uv run python test.py                # integration tests: starts a server, records into logs/
+uv run ruff check .
+```
+
+The collectors are tested against hand-written fixture directories; recipe in
+[`collector/README.md`](collector/README.md).
+
+### OpenWrt
+
+A small Lua backend serves the same frontend on OpenWrt routers without Python or Glances,
+reading `/proc` and `/sys` directly:
+
+```bash
+cd openwrt
+sh install.sh             # install and start on port 8080 (LAN only)
+sh install.sh --uninstall
+```
+
+Requires `uhttpd-mod-lua` and `luci-lib-jsonc` (installed by the script).
+
+Chart.js (MIT) is fetched at install time; Glances (LGPL) is a Python dependency.

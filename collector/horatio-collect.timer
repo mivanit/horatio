@@ -1,0 +1,12 @@
+[Unit]
+Description=Horatio: collect hardware health snapshot every 15 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+# No Persistent=true: a snapshot that was missed while the box was off is
+# worthless (it would just re-read the present), and OnBootSec already
+# covers the reboot case.
+
+[Install]
+WantedBy=timers.target
