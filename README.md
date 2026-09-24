@@ -1,26 +1,11 @@
-# Horatio
-
-Horatio watches, listens and records: a self-hosted dashboard for one Linux box.
-
-- **Live cards**: CPU, memory, swap, load, per-core spread, GPUs (utilisation, memory, temps,
-  power), network and disk I/O, per-process CPU / memory / GPU / disk / network, sensors,
-  ping to configured targets, drive usage, IP addresses.
-- **Hardware health** (optional root collector): SMART per drive with what each drive holds,
-  md arrays, ECC counters, the BMC event log (memory events and hardware faults), a backup
-  timer, failed units, error-level journal lines, fans, chassis temperatures, and power as one
-  stacked bar (GPUs, CPU and DRAM sockets, the rest). One `alarms` list drives the red cards.
-- **System mail**: count and subjects of the local root mail (smartd, mdadm, cron).
-- **History**: a JSONL recorder with charts over any range, per-metric min/max bands, stacked
-  power, a range mode for the fans.
+Dashboard/logging of basic system info (cpu/ram/temps/disk io/network/etc) for homelabs.
 
 Backend: FastAPI wrapping a [Glances](https://github.com/nicolargo/glances) subprocess plus
 `nvidia-smi`, `ping`, `nethogs`, `pidstat`. Frontend: vanilla JS and Chart.js, no build step.
 
-## Requirements
+# Requirements
 
-- Linux with systemd and `sudo`; [uv](https://docs.astral.sh/uv/) (it installs the Python in
-  `pyproject.toml`); `curl` (fetches Chart.js at install, pinned and checksummed); `python3`
-  and `iproute2` on the box (the collector, the IP card). The optional-tool offers use
+- Linux with systemd; [uv](https://docs.astral.sh/uv/). The optional-tool offers use
   `apt-get`; on other distros install `nethogs` + `libcap2-bin` and `sysstat` by hand.
 - Optional, per card:
 
@@ -48,17 +33,10 @@ and `sudo systemctl restart horatio`; with the collector, also the collector's c
 Open `http://<host>:8080`. The checkout can live anywhere writable by the user who runs it (no
 spaces in the path); the service file is rendered from `horatio.service` with that path and user.
 
-A second, foreground instance (after `./install.sh` has run once: it fetches Chart.js and
-creates `config.json`):
-
-```bash
-uv run python server.py --port 9000            # --glances-port, --host 127.0.0.1
-```
-
 After install, `uv run python server.py --set-password` sets the password for the raw history
 download and the settings endpoint (stored hashed in `.password`).
 
-## Update
+### Update
 
 ```bash
 git pull && ./install.sh
@@ -98,7 +76,7 @@ History recording settings can also be changed from the page with the password; 
 
 ## Security
 
-Meant for a trusted LAN. The dashboard binds to all interfaces and is unauthenticated except
+Meant for a trusted LAN, not public interfaces. probably has many security holes. The dashboard binds to all interfaces and is unauthenticated except
 the raw history download and the settings endpoint. Unauthenticated data includes local IP
 addresses, mail subjects, drive models and serials, and the Glances metrics; the Glances
 process views that carry full command lines are blocked (`/api/4/all`, `/api/4/processlist*`,
@@ -106,6 +84,8 @@ process views that carry full command lines are blocked (`/api/4/all`, `/api/4/p
 runs as an unprivileged user under `ProtectSystem=strict` and never runs `sudo`, `smartctl` or
 `ipmitool`: the collector runs as root on its own timers and the web process only reads the
 JSON it writes. The IP card and each history record ask `api.ipify.org` for the public address.
+
+again, don't put this on anything besides a trusted LAN!
 
 ## API
 
