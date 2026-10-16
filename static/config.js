@@ -401,12 +401,14 @@ let defaultHistoryHours = parseFloat(localStorage.getItem('defaultHistoryHours')
 const HISTORY_METRICS = {
   cpu: { name: 'CPU', color: getCssColor('--color-accent'), unit: '%', hasMinMax: true },
   cpu_cores: { name: 'CPU Cores', color: getCssColor('--color-cpu-cores'), unit: '%', hasMinMax: true, centerLabel: 'Median', showMinMaxByDefault: true },
+  cpu_freq: { name: 'CPU Clock', color: getCssColor('--color-cpu-freq'), unit: ' MHz', hasMinMax: true, centerLabel: 'Median', showMinMaxByDefault: true },
   memory: { name: 'Memory', color: getCssColor('--color-success'), unit: '%', hasUnitToggle: true, altUnit: ' GB' },
   network: { name: 'Network', color: getCssColor('--color-download'), unit: 'MB/s', dual: true, colors: [getCssColor('--color-download'), getCssColor('--color-upload')], hasMinMax: true },
   disk: { name: 'Disk I/O', color: getCssColor('--color-read'), unit: 'MB/s', dual: true, colors: [getCssColor('--color-read'), getCssColor('--color-write')], hasMinMax: true },
   gpu: { name: 'GPU', color: getCssColor('--color-gpu'), unit: '%', perDevice: true },
   'gpu-mem': { name: 'GPU Memory', color: getCssColor('--color-gpu-mem'), unit: '%', hasUnitToggle: true, altUnit: ' GB', perDevice: true },
-  temps: { name: 'Temperatures', color: getCssColor('--color-warning'), unit: '°C', perDevice: true },
+  // sideField: /api/history leaves this record field out (it is heavy); the card fetches it alone.
+  temps: { name: 'Temperatures', color: getCssColor('--color-warning'), unit: '°C', perDevice: true, sideField: 'temps' },
   // modeToggle: one button that switches the card into an alternative drawing (app.js createHistoryChart).
   fans: { name: 'Fan Speeds', color: getCssColor('--color-download'), unit: ' RPM', perDevice: true,
           modeToggle: { mode: 'range', title: 'One band: min / median / mean / max of all fans' } },
@@ -436,6 +438,19 @@ const HISTORY_METRICS = {
     perDevice: true
   },
   ping: { name: 'Ping', color: getCssColor('--color-ping-0'), unit: ' ms', multiLine: true, hasMinMax: true },
+  // Needs per-process logging on (History Settings); one line per process name.
+  // fieldSelect: a dropdown picks which per-process stat is drawn (the card's unitType holds its key).
+  processes: {
+    name: 'Top Processes', color: getCssColor('--color-accent'), unit: '%', perDevice: true, sideField: 'processes',
+    fieldSelect: [
+      { key: 'cpu_percent', label: 'CPU %', unit: '%' },
+      { key: 'rss_mb', label: 'Memory (MB)', unit: ' MB' },
+      { key: 'gpu_mem_mib', label: 'GPU memory (MiB)', unit: ' MiB' },
+      { key: 'disk_read_kbps', label: 'Disk read (KB/s)', unit: ' KB/s' },
+      { key: 'disk_write_kbps', label: 'Disk write (KB/s)', unit: ' KB/s' },
+      { key: 'threads', label: 'Threads', unit: '' },
+    ],
+  },
 };
 
 // Track active history cards

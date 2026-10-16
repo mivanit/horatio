@@ -59,6 +59,10 @@ HISTORY_INITIAL_TAIL_READ: Final[int] = 1024 * 1024
 # cap before covering its cutoff returns truncated=True (see _read_history). 64 MiB
 # comfortably covers the UI's 30-day max even at a dense recording cadence.
 HISTORY_MAX_TAIL_READ: Final[int] = 64 * 1024 * 1024
+# Record fields /api/history leaves out because they dwarf the rest (a 72-core
+# box writes ~70 temps per record; the process rows are several KB): a card
+# that draws one asks for it alone via /api/history/field/<name>.
+HISTORY_SIDE_FIELDS: Final[frozenset[str]] = frozenset({"processes", "temps"})
 PASSWORD_FILE: Final[Path] = Path(__file__).parent / ".password"
 CONFIG_FILE: Final[Path] = Path(__file__).parent / "config.json"
 DEFAULT_PORT: Final[int] = 8080
@@ -137,6 +141,20 @@ DEFAULT_HISTORY_SAMPLE_DURATION: Final[int] = _cfg_int(
 DEFAULT_HISTORY_SAMPLE_COUNT: Final[int] = _cfg_int(
     _history_cfg, "sample_count", 5, 1, 100
 )
+# Per-process history: off unless config.json (or the settings popup) turns it
+# on; each record then carries the top `process_count` processes by CPU and by
+# RSS plus every process holding GPU memory (see build_process_records).
+DEFAULT_HISTORY_PROCESS_COUNT: Final[int] = _cfg_int(
+    _history_cfg, "process_count", 10, 1, 50
+)
+_processes_enabled: Any = _history_cfg.get("processes_enabled", False)
+if not isinstance(_processes_enabled, bool):
+    logging.getLogger("dashboard").warning(
+        "config.json history.processes_enabled=%r is not a boolean; using false",
+        _processes_enabled,
+    )
+    _processes_enabled = False
+DEFAULT_HISTORY_PROCESSES_ENABLED: Final[bool] = _processes_enabled
 
 
 # Password hashing
@@ -304,7 +322,9 @@ def get_sanitized_process_info(
         # Regular executable - just show the executable
         return {"name": exe_name, "path": exe}
 
-    except (OSError, PermissionError, FileNotFoundError, IndexError) as e:
+    except (OSError, PermissionError, FileNotFoundError, IndexError, ValueError) as e:
+        # ValueError covers UnicodeDecodeError: an argv with non-UTF-8 bytes is
+        # one process's problem, not the whole process list's.
         logger.debug("PID %d cmdline read failed: %s", pid, e)
         return {"name": fallback_name, "path": fallback_path}
 
@@ -353,7 +373,8 @@ def stop_glances(process: subprocess.Popen[bytes]) -> None:
 
 
 def _parse_gpu_stats(stdout: str) -> list[dict[str, Any]]:
-    """Parse nvidia-smi --query-gpu CSV (index,util,mem.used,mem.total,temp,power).
+    """Parse nvidia-smi --query-gpu CSV (index,util,mem.used,mem.total,temp,power,
+    mem temp, sw/hw thermal slowdown counters).
 
     Each metric field degrades to None on '[N/A]'/'[Not Supported]' (nvidia-smi's
     tokens for unreadable fields) rather than dropping the whole GPU row; only an
@@ -390,6 +411,12 @@ def _parse_gpu_stats(stdout: str) -> list[dict[str, Any]]:
                 # The history power record reads this; an older 5-column line is
                 # tolerated so the parser's unit tests stay valid.
                 "power_draw": _f(parts[5]) if len(parts) > 5 else None,
+                # Memory (HBM) temperature: N/A on GDDR cards (the P40). The
+                # counters are microseconds of thermal slowdown since driver load.
+                # Absent on an older 5/6-column line, like power_draw.
+                "temperature_memory": _f(parts[6]) if len(parts) > 6 else None,
+                "throttle_sw_thermal_us": _f(parts[7]) if len(parts) > 7 else None,
+                "throttle_hw_thermal_us": _f(parts[8]) if len(parts) > 8 else None,
             }
         )
     return gpus
@@ -407,7 +434,9 @@ def get_gpu_stats() -> list[dict[str, Any]]:
         result = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu=index,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
+                "--query-gpu=index,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,"
+                "temperature.memory,clocks_event_reasons_counters.sw_thermal_slowdown,"
+                "clocks_event_reasons_counters.hw_thermal_slowdown",
                 "--format=csv,noheader,nounits",
             ],
             capture_output=True,
@@ -511,14 +540,20 @@ def _dedupe_fs_by_device(fs_entries: list[dict[str, Any]]) -> list[dict[str, Any
     filesystem: same device_name (psutil reads /proc/mounts, which shows the
     source device with no subpath) and identical size/used as the parent mount.
     Two entries are the same physical filesystem only when resolved device AND
-    size AND used all match; among those we keep the shortest real mount path
-    ('/' over '/tmp', non-empty preferred, lexicographic tie-break). The size/used
-    check keeps genuinely distinct same-device mounts (btrfs subvolumes etc.)
-    separate. Entries lacking a device_name are kept as-is. Order is preserved.
+    size match and used agrees to within 0.1% of size; among those we keep the
+    shortest real mount path ('/' over '/tmp', non-empty preferred, lexicographic
+    tie-break). The tolerance is for a busy fs whose `used` moves by a few blocks
+    between Glances' statvfs of the two mounts; an exact match let '/' and '/tmp'
+    both through now and then. The size/used check keeps genuinely distinct
+    same-device mounts separate. Entries lacking a device_name are kept as-is.
+    Order is preserved.
     """
 
     def _key(fs: dict[str, Any]) -> tuple[str, Any, Any]:
-        return (os.path.realpath(fs["device_name"]), fs.get("size"), fs.get("used"))
+        size, used = fs.get("size"), fs.get("used")
+        if isinstance(size, (int, float)) and isinstance(used, (int, float)) and size > 0:
+            used = round(used / (size * 0.001))  # bucket: 0.1% of the fs
+        return (os.path.realpath(fs["device_name"]), size, used)
 
     def _rank(mnt: str) -> tuple[bool, int, str]:
         return (mnt == "", len(mnt), mnt)  # non-empty first, then shortest
@@ -603,7 +638,7 @@ def _gpu_mem_fields(st: dict[str, Any]) -> dict[str, float | None]:
 def build_gpu_records(
     gpu_stats: list[dict[str, Any]], gpu_data: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Assemble per-GPU history records (utilization + memory).
+    """Assemble per-GPU history records (utilization + memory + thermal slowdown).
 
     nvidia-smi (``gpu_stats``) is the primary source — it reads GPUs that
     Glances' pynvml binding reports as null (some datacenter GPUs, e.g. the Tesla P40). Glances ``proc``
@@ -624,8 +659,18 @@ def build_gpu_records(
             util = _num(st.get("util_percent"))
             if util is None:  # nvidia-smi had no util; try Glances for this GPU
                 util = glances_util.get(idx)
+            sw_us = _num(st.get("throttle_sw_thermal_us"))
+            hw_us = _num(st.get("throttle_hw_thermal_us"))
             gpus.append(
-                {"index": idx, "util_percent": _round(util, 1), **_gpu_mem_fields(st)}
+                {
+                    "index": idx,
+                    "util_percent": _round(util, 1),
+                    **_gpu_mem_fields(st),
+                    # Seconds of thermal slowdown since driver load (cumulative:
+                    # a rise between two records is slowdown in that interval).
+                    "throttle_sw_thermal_s": _round(sw_us / 1e6, 1) if sw_us is not None else None,
+                    "throttle_hw_thermal_s": _round(hw_us / 1e6, 1) if hw_us is not None else None,
+                }
             )
     elif gpu_data:
         # nvidia-smi unavailable: Glances utilization only, memory unknown.
@@ -637,6 +682,8 @@ def build_gpu_records(
                     "mem_used_gb": None,
                     "mem_total_gb": None,
                     "mem_percent": None,
+                    "throttle_sw_thermal_s": None,
+                    "throttle_hw_thermal_s": None,
                 }
             )
     return gpus
@@ -645,10 +692,12 @@ def build_gpu_records(
 def gpu_temps(
     gpu_stats: list[dict[str, Any]], gpu_data: list[dict[str, Any]]
 ) -> dict[str, float | None]:
-    """{'GPU N': temperature|None} — nvidia-smi primary, Glances fallback.
+    """{'GPU N': temperature|None, 'GPU N mem': temperature} — nvidia-smi primary, Glances fallback.
 
-    Emits the key even when temperature is None so the temps chart shows a gap
-    for that GPU rather than dropping the series.
+    Emits the core key even when temperature is None so the temps chart shows a
+    gap for that GPU rather than dropping the series. 'GPU N mem' (memory/HBM,
+    nvidia-smi only) is emitted only when readable: a GDDR card (the P40) never
+    has one, and a permanent all-gap series would be noise.
     """
     temps: dict[str, float | None] = {}
     if gpu_stats:
@@ -656,6 +705,8 @@ def gpu_temps(
             idx = st.get("index")
             if idx is not None:
                 temps[f"GPU {idx}"] = _round(st.get("temperature"), 1)
+                if st.get("temperature_memory") is not None:
+                    temps[f"GPU {idx} mem"] = _round(st.get("temperature_memory"), 1)
     elif gpu_data:
         for gpu in gpu_data:
             temps[f"GPU {_parse_gpu_index(gpu)}"] = _round(gpu.get("temperature"), 1)
@@ -685,6 +736,212 @@ def aggregate_ping(
     return result
 
 
+CPUFREQ_DIR: Final[Path] = Path("/sys/devices/system/cpu/cpufreq")
+
+
+def _read_cpu_freqs() -> list[float]:
+    """Current clock of every cpufreq policy (one per logical core on most boxes), in MHz.
+
+    ``scaling_cur_freq`` is the kernel's last known frequency and world-readable
+    (``cpuinfo_cur_freq`` is root-only). A box without cpufreq (most VMs) has no
+    policies and yields [], so the caller omits the record key. Sync: thread pool.
+    """
+    freqs: list[float] = []
+    for path in CPUFREQ_DIR.glob("policy*/scaling_cur_freq"):
+        try:
+            freqs.append(int(path.read_text().strip()) / 1000)
+        except (OSError, ValueError):
+            continue
+    return freqs
+
+
+def _cpu_freq_limits() -> dict[str, float | None]:
+    """The hardware clock range (MHz) from policy0, None when unreadable."""
+    out: dict[str, float | None] = {}
+    for key, name in (("min_mhz", "cpuinfo_min_freq"), ("max_mhz", "cpuinfo_max_freq")):
+        try:
+            out[key] = int((CPUFREQ_DIR / "policy0" / name).read_text().strip()) / 1000
+        except (OSError, ValueError):
+            out[key] = None
+    return out
+
+
+def aggregate_cpu_freq(
+    freq_samples: list[float], limits: dict[str, float | None] | None = None
+) -> dict[str, float | None] | None:
+    """min/median/avg/max MHz over every (core, sample) reading of the burst.
+
+    Per-core readings are pooled rather than averaged first: the point is to see
+    whether some cores sit at idle clocks while others boost, which an all-core
+    mean (Glances' quicklook ``cpu_hz_current``) blurs away. None when nothing
+    was readable, so the caller omits the key; the hardware range rides along.
+    """
+    vals = sorted(v for v in (_num(s) for s in freq_samples) if v is not None)
+    if not vals:
+        return None
+    return {
+        "min": round(vals[0], 1),
+        "median": round(statistics.median(vals), 1),
+        "avg": round(sum(vals) / len(vals), 1),
+        "max": round(vals[-1], 1),
+        **(limits or {}),
+    }
+
+
+_CLK_TCK: Final[int] = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+
+
+def _read_boot_time() -> int | None:
+    """Boot time (epoch s) from /proc/stat ``btime``; None off Linux."""
+    try:
+        return next(
+            int(line.split()[1])
+            for line in Path("/proc/stat").read_text().splitlines()
+            if line.startswith("btime ")
+        )
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
+
+
+# Constant for the life of the process: read once, not per process row.
+_BOOT_TIME: Final[int | None] = _read_boot_time()
+
+
+def _proc_parent_and_start(pid: int) -> tuple[int | None, float | None]:
+    """(ppid, create_time epoch s) from /proc/<pid>/stat, (None, None) when gone.
+
+    Lets a pid be tied to a process tree after the fact (e.g. which coding agent
+    launched it): pids are recycled, so the start time disambiguates. Field 22 is
+    the start in clock ticks since boot, added to ``_BOOT_TIME``.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        # The comm field is in parentheses and may itself contain spaces/parens.
+        fields = stat[stat.rindex(")") + 2:].split()
+        ppid = int(fields[1])
+        start_ticks = int(fields[19])
+        create_time = (
+            round(_BOOT_TIME + start_ticks / _CLK_TCK, 2) if _BOOT_TIME is not None else None
+        )
+        return ppid, create_time
+    except (OSError, ValueError, IndexError):
+        return None, None
+
+
+def build_process_records(
+    processes: list[Any], gpu_processes: list[dict[str, Any]], count: int
+) -> list[dict[str, Any]]:
+    """The per-process slice of a history record (sync: reads /proc for names).
+
+    Keeps the top ``count`` processes by CPU and the top ``count`` by RSS (the
+    union, so between ``count`` and ``2*count`` rows) plus every process holding
+    GPU memory, with the sum of its memory over the GPUs it uses and their
+    indices. A GPU process missing from Glances' list (another pid namespace)
+    still gets a row, with its CPU/RSS unknown. Names are the sanitized display
+    name (executable / module / script, never the arguments), like /api/processlist.
+    ``ppid`` and ``create_time`` (epoch seconds) come from /proc so a row can be
+    attributed to a process tree later. Disk rates come from Glances' cumulative
+    ``io_counters`` over its own refresh interval. Rows are sparse: a key whose
+    value is unknown (None) or a rate that is zero is left out, so a row carries
+    only ``pid`` and ``name`` for sure. Sorted by CPU, GPU-only rows last.
+    """
+    gpu_by_pid: dict[int, dict[str, Any]] = {}
+    for g in gpu_processes:
+        pid = g.get("pid")
+        if not isinstance(pid, int):
+            continue
+        slot = gpu_by_pid.setdefault(pid, {"mem": 0.0, "gpus": set(), "name": g.get("name")})
+        slot["mem"] += _num(g.get("gpu_memory_mib")) or 0.0
+        if isinstance(g.get("gpu_index"), int):
+            slot["gpus"].add(g["gpu_index"])
+
+    valid = [
+        p for p in processes
+        if isinstance(p, dict) and isinstance(p.get("pid"), int) and not isinstance(p["pid"], bool)
+    ]
+
+    def cpu(p: dict[str, Any]) -> float:
+        return _num(p.get("cpu_percent")) or 0.0
+
+    def rss_bytes(p: dict[str, Any]) -> float | None:
+        info = p.get("memory_info")
+        return _num(info.get("rss")) if isinstance(info, dict) else None
+
+    def rss(p: dict[str, Any]) -> float:
+        return rss_bytes(p) or 0.0
+
+    def disk_kbps(p: dict[str, Any]) -> tuple[float | None, float | None]:
+        # Glances: io_counters = [read, write, read_old, write_old, io_tag] cumulative
+        # bytes, io_tag 1 when readable; the rate is over time_since_update.
+        io = p.get("io_counters")
+        dt = _num(p.get("time_since_update"))
+        if not (isinstance(io, list) and len(io) >= 5 and io[4] == 1 and dt):
+            return None, None
+        vals = [_num(x) for x in io[:4]]
+        if any(v is None for v in vals):
+            return None, None
+        return (vals[0] - vals[2]) / dt / 1024, (vals[1] - vals[3]) / dt / 1024
+
+    def sparse(row: dict[str, Any], rates: tuple[str, ...] = ()) -> dict[str, Any]:
+        # Drop unknowns, and the rate keys when zero or negative (counter reset).
+        return {
+            k: v for k, v in row.items()
+            if v is not None and not (k in rates and isinstance(v, (int, float)) and v <= 0)
+        }
+
+    chosen: dict[int, dict[str, Any]] = {}
+    for p in sorted(valid, key=cpu, reverse=True)[:count]:
+        chosen.setdefault(p["pid"], p)
+    for p in sorted(valid, key=rss, reverse=True)[:count]:
+        chosen.setdefault(p["pid"], p)
+    for p in valid:
+        if p["pid"] in gpu_by_pid:
+            chosen.setdefault(p["pid"], p)
+
+    rows: list[dict[str, Any]] = []
+    for pid, p in chosen.items():
+        info = get_sanitized_process_info(pid, str(p.get("name") or "unknown"))
+        ppid, create_time = _proc_parent_and_start(pid)
+        rd, wr = disk_kbps(p)
+        row: dict[str, Any] = {
+            "pid": pid,
+            "ppid": ppid,
+            "create_time": create_time,
+            "name": info["name"],
+            "user": p.get("username"),
+            "status": p.get("status"),
+            "cpu_percent": _round(p.get("cpu_percent"), 1),
+            "rss_mb": _round(rss_bytes(p) / (1024**2), 1) if rss_bytes(p) is not None else None,
+            "threads": p.get("num_threads") if isinstance(p.get("num_threads"), int) else None,
+            "disk_read_kbps": _round(rd, 1),
+            "disk_write_kbps": _round(wr, 1),
+        }
+        gpu = gpu_by_pid.get(pid)
+        if gpu and gpu["mem"] > 0:
+            row["gpu_mem_mib"] = round(gpu["mem"], 1)
+            row["gpus"] = sorted(gpu["gpus"])
+        rows.append(sparse(row, ("disk_read_kbps", "disk_write_kbps")))
+    # GPU processes Glances did not list (the join caveat of the live view)
+    for pid, gpu in gpu_by_pid.items():
+        if pid in chosen:
+            continue
+        ppid, create_time = _proc_parent_and_start(pid)
+        rows.append(
+            sparse(
+                {
+                    "pid": pid,
+                    "ppid": ppid,
+                    "create_time": create_time,
+                    "name": gpu["name"] or "unknown",
+                    "gpu_mem_mib": round(gpu["mem"], 1),
+                    "gpus": sorted(gpu["gpus"]),
+                }
+            )
+        )
+    rows.sort(key=lambda r: ("cpu_percent" not in r, -r.get("cpu_percent", 0.0)))
+    return rows
+
+
 async def collect_history_sample(glances_url: str) -> dict[str, Any]:
     """Collect a single history sample from all data sources.
 
@@ -704,6 +961,10 @@ async def collect_history_sample(glances_url: str) -> dict[str, Any]:
     # Keyed per iteration (not per disk) so a device that appears or vanishes
     # mid-window cannot shift another device's samples out of alignment.
     disk_iter_samples: list[dict[str, tuple[float, float]]] = []
+    # Per-core clocks, pooled over the burst (see aggregate_cpu_freq).
+    freq_samples: list[float] = []
+    processes_enabled: bool = APP.state.history_processes_enabled
+    process_count: int = APP.state.history_process_count
     ping_enabled: bool = APP.state.ping_enabled
     ping_samples: dict[str, list[float]] = (
         {t: [] for t in PING_TARGETS} if ping_enabled else {}
@@ -733,6 +994,9 @@ async def collect_history_sample(glances_url: str) -> dict[str, Any]:
                     percpu_data: Any = percpu_resp.json()
                     for idx, core in enumerate(percpu_data):
                         percpu_samples.setdefault(idx, []).append(core.get("total"))
+
+                # Per-core clock frequencies (sysfs; [] without cpufreq)
+                freq_samples.extend(await asyncio.to_thread(_read_cpu_freqs))
 
                 # Fetch network I/O
                 net_resp = await client.get(f"{glances_url}/api/4/network", timeout=5.0)
@@ -848,6 +1112,17 @@ async def collect_history_sample(glances_url: str) -> dict[str, Any]:
         except Exception as e:
             logger.warning("History: failed to fetch load: %s", e)
 
+        # Process list, only when per-process history is on: Glances' point-in-time
+        # view (cpu_percent is over its own refresh interval), sanitized below.
+        process_data: list = []
+        if processes_enabled:
+            try:
+                proc_resp = await client.get(f"{glances_url}/api/4/processlist", timeout=10.0)
+                if proc_resp.status_code == 200:
+                    process_data = proc_resp.json()
+            except Exception as e:
+                logger.warning("History: failed to fetch processlist: %s", e)
+
         # Fetch filesystem data for drive usage
         fs_data: list = []
         try:
@@ -889,6 +1164,13 @@ async def collect_history_sample(glances_url: str) -> dict[str, Any]:
     if cpu_cores is not None:
         record["cpu_cores"] = cpu_cores
 
+    # CPU clocks: min/median/avg/max MHz over every core and sample of the burst,
+    # with the hardware range. Omitted on a box without cpufreq.
+    if freq_samples:
+        cpu_freq = aggregate_cpu_freq(freq_samples, await asyncio.to_thread(_cpu_freq_limits))
+        if cpu_freq is not None:
+            record["cpu_freq"] = cpu_freq
+
     # Memory (point-in-time)
     if memory_data:
         record["memory"] = {
@@ -914,6 +1196,11 @@ async def collect_history_sample(glances_url: str) -> dict[str, Any]:
 
     # Disk I/O (with stats). Mapping from disk name to mount point, same logic
     # as app.js: resolve symlinks (e.g. /dev/mapper/xxx -> /dev/dm-0).
+    # One name per device: the shortest mount point ('/' over '/tmp'). Under the
+    # systemd unit the root fs is also visible as PrivateTmp's /tmp and /var/tmp
+    # and the ReadWritePaths bind mount; when the dedupe below did not merge
+    # them (their `used` differed by a block between two statvfs calls) a
+    # last-writer-wins dict labelled the root drive '/tmp' in some records.
     disk_to_mount: dict[str, str] = {}
     for fs in fs_data:
         device_name: str = fs.get("device_name", "")
@@ -921,7 +1208,9 @@ async def collect_history_sample(glances_url: str) -> dict[str, Any]:
         if device_name and mnt_point:
             resolved: str = os.path.realpath(device_name)
             if resolved.startswith("/dev/"):
-                disk_to_mount[resolved[5:]] = mnt_point
+                disk = resolved[5:]
+                if disk not in disk_to_mount or len(mnt_point) < len(disk_to_mount[disk]):
+                    disk_to_mount[disk] = mnt_point
     # The whole-box totals count the MOUNTED devices only: Glances' diskio rows are
     # one per block device including partitions and md/dm layers, so summing every
     # row counts a write on an md mirror three times (member, member, md). Without
@@ -1036,6 +1325,26 @@ async def collect_history_sample(glances_url: str) -> dict[str, Any]:
             "min5": _round(load_data.get("min5"), 2),
             "min15": _round(load_data.get("min15"), 2),
         }
+
+    # Top processes (point-in-time), only when enabled. GPU memory per process
+    # comes from nvidia-smi; a box without it just gets no GPU fields. Offloaded:
+    # nvidia-smi shells out and the sanitizer reads /proc per process.
+    # Like every other section, a failure here drops only this key: the record's
+    # cpu/memory/... must never be lost to one unreadable process.
+    if processes_enabled and isinstance(process_data, list) and process_data:
+        gpu_procs: list[dict[str, Any]] = []
+        try:
+            gpu_procs = await asyncio.to_thread(_get_gpu_processes)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning("History: failed to read GPU processes: %s", e)
+        try:
+            record["processes"] = await asyncio.to_thread(
+                build_process_records, process_data, gpu_procs, process_count
+            )
+        except Exception as e:
+            logger.warning("History: failed to build process records: %s", e)
 
     # Ping. A target with zero successful samples is recorded as None (all
     # attempts timed out) rather than omitted, so a failure is distinguishable
@@ -1191,6 +1500,8 @@ async def lifespan(app: FastAPI):
     app.state.history_last_success = None
     app.state.history_last_error = None
     app.state.ping_enabled = True
+    app.state.history_processes_enabled = DEFAULT_HISTORY_PROCESSES_ENABLED
+    app.state.history_process_count = DEFAULT_HISTORY_PROCESS_COUNT
 
     # Start background task for client disconnect detection
     disconnect_task = asyncio.create_task(check_disconnected_clients())
@@ -1422,8 +1733,11 @@ async def get_history(hours: float = 24) -> Response:
     # network-topology history to unauthenticated LAN clients. The password-gated
     # /api/history/raw still exposes it for deliberate export. Records are freshly
     # parsed per request, so popping in place touches nothing shared.
+    # The heavy per-record fields are served by /api/history/field/<name> on demand.
     for rec in records:
         rec.pop("ip", None)
+        for name in HISTORY_SIDE_FIELDS:
+            rec.pop(name, None)
     return Response(
         content=json.dumps(
             {
@@ -1432,6 +1746,47 @@ async def get_history(hours: float = 24) -> Response:
                 "skipped_lines": skipped,
                 "truncated": truncated,
                 "recording": _recording_health(),
+            }
+        ),
+        media_type="application/json",
+    )
+
+
+@APP.get("/api/history/field/{name}")
+async def get_history_field(name: str, hours: float = 24) -> Response:
+    """One heavy record field over the range: ``[{timestamp, <name>}, ...]``.
+
+    Only the names in HISTORY_SIDE_FIELDS (the ones /api/history leaves out) are
+    served; a record without the field keeps its timestamp so the chart's x-axis
+    matches /api/history and the missing field draws as a gap.
+    """
+    if name not in HISTORY_SIDE_FIELDS:
+        return Response(
+            content=json.dumps({"error": f"unknown field; one of {sorted(HISTORY_SIDE_FIELDS)}"}),
+            status_code=404,
+            media_type="application/json",
+        )
+    hours = max(0.1, min(hours, 8760))
+    result = await asyncio.to_thread(_read_history, hours)
+    if isinstance(result, str):
+        return Response(
+            content=json.dumps({"error": "Failed to read history", "detail": result}),
+            status_code=500,
+            media_type="application/json",
+        )
+    records, skipped, truncated = result
+    slim = [
+        {"timestamp": rec.get("timestamp"), **({name: rec[name]} if name in rec else {})}
+        for rec in records
+    ]
+    return Response(
+        content=json.dumps(
+            {
+                "field": name,
+                "records": slim,
+                "count": len(slim),
+                "skipped_lines": skipped,
+                "truncated": truncated,
             }
         ),
         media_type="application/json",
@@ -1527,12 +1882,16 @@ async def get_history_settings() -> Response:
                 "sample_count": APP.state.history_sample_count,
                 "min_record_interval": APP.state.manual_record_min_interval,
                 "ping_enabled": APP.state.ping_enabled,
+                "processes_enabled": APP.state.history_processes_enabled,
+                "process_count": APP.state.history_process_count,
                 "defaults": {
                     "record_interval": DEFAULT_HISTORY_RECORD_INTERVAL,
                     "sample_duration": DEFAULT_HISTORY_SAMPLE_DURATION,
                     "sample_count": DEFAULT_HISTORY_SAMPLE_COUNT,
                     "min_record_interval": DEFAULT_MANUAL_RECORD_MIN_INTERVAL,
                     "ping_enabled": True,
+                    "processes_enabled": DEFAULT_HISTORY_PROCESSES_ENABLED,
+                    "process_count": DEFAULT_HISTORY_PROCESS_COUNT,
                 },
                 "password_configured": PASSWORD_FILE.exists(),
             }
@@ -1572,6 +1931,7 @@ async def update_history_settings(request: Request) -> Response:
     sample_duration = body.get("sample_duration")
     sample_count = body.get("sample_count")
     min_record_interval = body.get("min_record_interval")
+    process_count = body.get("process_count")
     errors: list[str] = []
 
     if record_interval is not None:
@@ -1605,6 +1965,14 @@ async def update_history_settings(request: Request) -> Response:
                 errors.append("min_record_interval must be between 0 and 3600 seconds")
         except (ValueError, TypeError):
             errors.append("min_record_interval must be an integer")
+
+    if process_count is not None:
+        try:
+            process_count = int(process_count)
+            if not (1 <= process_count <= 50):
+                errors.append("process_count must be between 1 and 50")
+        except (ValueError, TypeError):
+            errors.append("process_count must be an integer")
 
     if errors:
         return Response(
@@ -1640,9 +2008,23 @@ async def update_history_settings(request: Request) -> Response:
         APP.state.manual_record_min_interval = min_record_interval
         changed = True
 
+    if (
+        process_count is not None
+        and process_count != APP.state.history_process_count
+    ):
+        APP.state.history_process_count = process_count
+        changed = True
+
     ping_enabled = body.get("ping_enabled")
     if ping_enabled is not None and APP.state.ping_enabled != (ping_enabled is True):
         APP.state.ping_enabled = ping_enabled is True
+        changed = True
+
+    processes_enabled = body.get("processes_enabled")
+    if processes_enabled is not None and APP.state.history_processes_enabled != (
+        processes_enabled is True
+    ):
+        APP.state.history_processes_enabled = processes_enabled is True
         changed = True
 
     # Restart history recorder task if interval/duration changed
@@ -1655,12 +2037,14 @@ async def update_history_settings(request: Request) -> Response:
         APP.state.history_task = asyncio.create_task(history_recorder())
     if changed:
         logger.info(
-            "History settings updated: interval=%ds, duration=%ds, count=%d, min_record=%ds, ping=%s",
+            "History settings updated: interval=%ds, duration=%ds, count=%d, min_record=%ds, ping=%s, processes=%s (top %d)",
             APP.state.history_record_interval,
             APP.state.history_sample_duration,
             APP.state.history_sample_count,
             APP.state.manual_record_min_interval,
             APP.state.ping_enabled,
+            APP.state.history_processes_enabled,
+            APP.state.history_process_count,
         )
 
     return Response(
@@ -1672,6 +2056,8 @@ async def update_history_settings(request: Request) -> Response:
                 "sample_count": APP.state.history_sample_count,
                 "min_record_interval": APP.state.manual_record_min_interval,
                 "ping_enabled": APP.state.ping_enabled,
+                "processes_enabled": APP.state.history_processes_enabled,
+                "process_count": APP.state.history_process_count,
             }
         ),
         media_type="application/json",
@@ -2535,6 +2921,7 @@ async def list_endpoints() -> Response:
         "/gpu-processes", "/disk-processes", "/network-processes",
         "/processlist",
         "/history", "/history/settings", "/history/record",
+        "/history/field/temps", "/history/field/processes",
         "/mail", "/storage-health", "/sensors",
         "/list-endpoints",
     ]
@@ -2618,8 +3005,14 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> Respo
 
 
 def is_port_available(port: int, host: str = "0.0.0.0") -> bool:
-    """Check if a port is available for binding."""
+    """Check if a port is available for binding.
+
+    SO_REUSEADDR, as uvicorn sets it: without it the probe fails for a minute
+    after a restart because the previous server's client connections are still
+    in TIME_WAIT, and systemd then loops on "already in use" with nobody listening.
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind((host, port))
             return True

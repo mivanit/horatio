@@ -464,7 +464,8 @@ else:
 
 # ---- the 60 s sensors snapshot (health-sensors.sh) ---------------------------
 # Its unit sends no failure mail (one per minute would be noise), so this run is
-# what notices a dead sensors timer and carries it to the dashboard and the mail.
+# what notices a dead sensors timer and carries it to the dashboard's Hardware
+# card and the MOTD. Nothing is mailed for it: this unit mails only when it fails.
 sensors_path = os.path.join(os.path.dirname(out), "sensors.json")
 try:
     sensors_age = int(time.time() - os.stat(sensors_path).st_mtime)

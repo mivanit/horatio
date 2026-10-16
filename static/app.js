@@ -200,7 +200,14 @@ const PROCESS_COLUMNS = [
     sortable: true,
     width: '90px',
     getValue: (p) => p.gpu_memory_mib || 0,
-    render: (p) => p.gpu_memory_mib ? formatBytes(p.gpu_memory_mib * 1024 * 1024) : '',
+    render: (p) => {
+      if (!p.gpu_memory_mib) return '';
+      // Hover names the GPU(s) this process holds memory on; the cell is the
+      // sum over them (gpu_indices is aggregated per pid in fetchDataOnce).
+      const gpus = [...new Set(p.gpu_indices ?? [p.gpu_index])].filter(i => i != null).sort((a, b) => a - b);
+      const tip = gpus.length ? `GPU ${gpus.join(', ')}` : 'GPU';
+      return `<span data-tip="${escapeHtml(tip)}">${formatBytes(p.gpu_memory_mib * 1024 * 1024)}</span>`;
+    },
     color: (p) => getMemoryColor(p.gpu_memory_mib * 1024 * 1024),  // MiB to bytes
     cssClass: 'num-cell'
   },
@@ -550,6 +557,9 @@ function renderMail(data) {
 // merged with `status` (ok / stale / missing / error), `detail` and `age_sec`.
 // The alarm rules live in the collector only; this prints its `alarms` /
 // `info` lists and one compact line per raw section. Any section may be absent.
+// The 60 s sensors snapshot's `alarms` (fans, BMC thresholds, GPU thermals;
+// collector/health-sensors.sh) are printed and counted with them, read from the
+// sensors cache that fetchSlowData fills just before this runs.
 function renderHardware(data) {
   const content = document.getElementById('hardware-content');
   const collector = 'horatio-collect.timer';
@@ -580,15 +590,22 @@ function renderHardware(data) {
     return;
   }
 
-  const alarms = Array.isArray(data?.alarms) ? data.alarms : [];
-  const info = Array.isArray(data?.info) ? data.info : [];
   const ageText = snapshotAgeText(data);
   const stale = data.status === 'stale';
+  // The sensors alarms count only from a fresh snapshot (same 5 min rule as the
+  // fans / temps / power cards). Stale, missing, errored or never fetched means
+  // its alarm list is unknown, not clear: flagged like a stale state.json.
+  const sen = getFreshCache('sensors', 300000);
+  const sensorsUnknown = sen?.status !== 'ok';
+  const alarms = [...(Array.isArray(data?.alarms) ? data.alarms : []),
+                  ...(!sensorsUnknown && Array.isArray(sen.alarms) ? sen.alarms : [])];
+  const info = Array.isArray(data?.info) ? data.info : [];
 
   // Header: the verdict, and the snapshot's OWN age (not when it was fetched).
   const valueEl = document.getElementById('hardware-value');
-  valueEl.textContent = stale ? 'stale' : alarms.length === 0 ? 'all clear' : `${alarms.length} issue${alarms.length === 1 ? '' : 's'}`;
-  valueEl.className = 'value ' + (stale ? 'text-warning' : alarms.length ? 'text-error' : 'text-success');
+  valueEl.textContent = stale ? 'stale' : alarms.length ? `${alarms.length} issue${alarms.length === 1 ? '' : 's'}` :
+    sensorsUnknown ? 'sensors stale' : 'all clear';
+  valueEl.className = 'value ' + (stale ? 'text-warning' : alarms.length ? 'text-error' : sensorsUnknown ? 'text-warning' : 'text-success');
   document.querySelector('#hardware-card .cache-time').textContent = ageText;
 
   // Issues: alarms in red, then the collector's info notes in grey. A stale
@@ -596,12 +613,16 @@ function renderHardware(data) {
   // Drive-specific notes ("sdb: no self-test on record") are on Drive Health.
   const issues = [];
   if (stale) issues.push(hwRow('text-warning', `${ageText} (stale); is ${collector} running?`));
+  if (sensorsUnknown) {
+    const why = sen ? `sensors snapshot ${sen.status}${sen.age_sec != null ? ` (${Math.round(sen.age_sec / 60)} min old)` : ''}` : 'no fresh sensors snapshot';
+    issues.push(hwRow('text-warning', `${why}: fan / GPU alarms unknown; is horatio-sensors.timer running?`));
+  }
   alarms.forEach(a => {
     issues.push(hwRow('text-error', a));
     const hint = hwHint(a, data);
     if (hint) issues.push(hwRow('hw-note', `check: ${hint}`));
   });
-  if (!stale && alarms.length === 0) issues.push(hwRow('text-success', 'no alarms'));
+  if (!stale && !sensorsUnknown && alarms.length === 0) issues.push(hwRow('text-success', 'no alarms'));
   info.filter(i => !/^(sd[a-z]+|nvme\d+n\d+):/.test(i)).forEach(i => issues.push(hwRow('hw-note', i)));
 
   const memory = [];
@@ -627,7 +648,7 @@ function renderHardware(data) {
   updateCardNoData('hardware', true);
   // Any alarm is red; a stale snapshot (alarms unknown, not clear) is orange.
   updateCardCritical('hardware', alarms.length > 0);
-  updateCardWarning('hardware', stale ? 1 : 0, 0);
+  updateCardWarning('hardware', stale || sensorsUnknown ? 1 : 0, 0);
 }
 
 // Shared by the Hardware health and Drive Health cards.
@@ -671,6 +692,7 @@ const HW_HINTS = [
   [/^unit failed: (\S+)/, m => `systemctl status ${m[1]}`],
   [/^collector: /, 'systemctl status horatio-collect.service horatio-sensors.service'],
   [/^fans: |: status /, 'sudo ipmitool sdr type fan; sudo ipmitool sdr type temperature'],
+  [/^GPU \d+: /, 'nvidia-smi -q -d TEMPERATURE,PERFORMANCE'],
 ];
 function hwHint(alarm, data) {
   for (const [re, hint] of HW_HINTS) {
@@ -1721,7 +1743,10 @@ async function fetchDataOnce() {
           if (fs.device_name) {
             // Extract disk name: "/dev/sda1" -> "sda1"
             const match = fs.device_name.match(/\/dev\/(.+)/);
-            if (match) deviceToMount[match[1]] = fs.mnt_point;
+            // Shortest mount names the device ('/' over a bind mount of it), as in server.py.
+            if (match && (!deviceToMount[match[1]] || fs.mnt_point.length < deviceToMount[match[1]].length)) {
+              deviceToMount[match[1]] = fs.mnt_point;
+            }
           }
         });
         const allowedDisks = new Set(Object.keys(deviceToMount));
@@ -1843,6 +1868,16 @@ async function fetchDataOnce() {
       sensors.data.filter(s => s.type === 'fan_speed' && s.value != null).forEach(s => fans.push(s));
     }
 
+    // Chassis fans, temps and power from the 60 s sensors snapshot (IPMI and
+    // RAPL are root-only, so Glances cannot see them). Only a fresh snapshot is
+    // drawn -- a stale/missing one is skipped so old values are never shown as
+    // live -- and its own age (not the fetch time) goes in the three headers.
+    // Fetched every 30 s; after 5 min of failed refetches (the server's own stale
+    // threshold) the cards go away rather than showing an old reading as live.
+    const sen = getFreshCache('sensors', 300000);
+    // The driver's own per-GPU limits (nvidia-smi -q, via the same snapshot), by index.
+    const gpuLimits = new Map(sen?.status === 'ok' ? (sen.gpus ?? []).map(g => [g.index, g.limits ?? {}]) : []);
+
     // GPU temps come from /api/gpu, so they render whenever gpu.ok -- independent
     // of whether Glances /sensors succeeded.
     if (gpu.ok) {
@@ -1858,23 +1893,32 @@ async function fetchDataOnce() {
           } else if (typeof gpuId === 'number') {
             idx = gpuId;
           }
-          // Datasheet limits by model substring; unlisted models get 80 / 90.
+          // Warn at the driver's max operating temp (where its software slowdown
+          // starts), critical at its hardware slowdown temp. Either one missing (no
+          // fresh sensors snapshot, or N/A: the P40 has no max operating temp) falls
+          // back to datasheet limits by model substring; unlisted models get 80 / 90.
           const GPU_TEMP_LIMITS = { P40: [85, 95] };
           const [warn, crit] = Object.entries(GPU_TEMP_LIMITS).find(([m]) => (g.name || '').includes(m))?.[1] ?? [80, 90];
-          temps.push({ label: 'GPU ' + idx, value: g.temperature, warning: warn, critical: crit });
+          const lim = gpuLimits.get(idx) ?? {};
+          temps.push({ label: 'GPU ' + idx, value: g.temperature, warning: lim.max_op ?? warn, critical: lim.slowdown ?? crit });
         }
       });
     }
 
-    // Chassis fans, temps and power from the 60 s sensors snapshot (IPMI and
-    // RAPL are root-only, so Glances cannot see them). Only a fresh snapshot is
-    // drawn -- a stale/missing one is skipped so old values are never shown as
-    // live -- and its own age (not the fetch time) goes in the three headers.
-    // Fetched every 30 s; after 5 min of failed refetches (the server's own stale
-    // threshold) the cards go away rather than showing an old reading as live.
-    const sen = getFreshCache('sensors', 300000);
     const power = [];
     if (sen?.status === 'ok') {
+      // GPU memory (HBM) temps: nvidia-smi only, so from the snapshot, placed right
+      // after that GPU's core row. The memory has no throttle of its own: warn
+      // 3 C under its max operating temp, critical at it. N/A (the P40) = no row.
+      (sen.gpus ?? []).forEach(g => {
+        if (g.mem_c == null) return;
+        const top = g.limits?.mem_max_op;
+        const at = temps.findIndex(t => t.label === 'GPU ' + g.index);
+        temps.splice(at < 0 ? temps.length : at + 1, 0, {
+          label: `GPU ${g.index} mem`, value: g.mem_c,
+          warning: top != null ? top - 3 : 80, critical: top ?? 90
+        });
+      });
       (sen.temps ?? []).forEach(t => t.value != null && temps.push({ label: t.label, value: t.value, warning: thresholds.temp_celsius, critical: 90 }));
       (sen.fans ?? []).forEach(f => f.value != null && fans.push({ label: f.label, value: f.value }));
       // Watts rows only: the BMC total ("Pwr Consumption", the one non-RAPL Watts row)
@@ -2674,25 +2718,30 @@ function _historyCacheSet(hours, data) {
   }
 }
 
-function fetchHistoryData(hours = defaultHistoryHours, { force = false } = {}) {
+// field: a heavy record field /api/history leaves out (HISTORY_METRICS[..].sideField);
+// fetched alone from /api/history/field/<name>, cached under its own key.
+function fetchHistoryData(hours = defaultHistoryHours, { force = false, field = null } = {}) {
+  const key = field ? `${field}:${hours}` : hours;
   if (force) {
-    historyCache.delete(hours);
+    historyCache.delete(key);
     historyTruncatedWarned = false;  // an explicit refresh re-surfaces a persistent truncation/skip
     historySkippedWarned = false;
   } else {
-    const cached = _historyCacheGet(hours);
+    const cached = _historyCacheGet(key);
     if (cached) return Promise.resolve(cached);
-    if (historyFetchInflight.has(hours)) return historyFetchInflight.get(hours);
+    if (historyFetchInflight.has(key)) return historyFetchInflight.get(key);
   }
   const fallback = { records: [], count: 0 };
-  const promise = safeFetch(`/api/history?hours=${hours}`, fallback, HISTORY_FETCH_TIMEOUT_MS)
+  const url = field ? `/api/history/field/${encodeURIComponent(field)}?hours=${hours}` : `/api/history?hours=${hours}`;
+  const promise = safeFetch(url, fallback, HISTORY_FETCH_TIMEOUT_MS)
     .then(response => {
       // Preserve success/failure so callers can tell a real fetch failure apart
       // from genuinely-empty history (both would otherwise look like records: []).
       const data = response.data || fallback;
       data.ok = response.ok;
       data.errorType = response.errorType;
-      if (response.ok) {
+      // The toasts below are about the file as a whole; the main fetch raises them.
+      if (response.ok && !field) {
         // Latch the corrupt-lines / truncated toasts so cache-miss refreshes
         // don't re-spam; reset when the condition clears (and on a forced refresh).
         if (data.skipped_lines > 0) {
@@ -2722,14 +2771,14 @@ function fetchHistoryData(hours = defaultHistoryHours, { force = false } = {}) {
             historyStaleWarned = false;
           }
         }
-        _historyCacheSet(hours, data);  // cache successful reads only (never a failure)
+        _historyCacheSet(key, data);  // cache successful reads only (never a failure)
       }
       return data;
     })
     // Identity check: a forced refresh replaces the map entry with a newer
     // promise, and an older one settling later must not delete it.
-    .finally(() => { if (historyFetchInflight.get(hours) === promise) historyFetchInflight.delete(hours); });
-  historyFetchInflight.set(hours, promise);
+    .finally(() => { if (historyFetchInflight.get(key) === promise) historyFetchInflight.delete(key); });
+  historyFetchInflight.set(key, promise);
   return promise;
 }
 
@@ -2759,6 +2808,12 @@ function extractHistoryValue(record, metric, rangeType = 'avg') {
       const c = record.cpu_cores;
       if (!c) return null;
       return rangeType === 'avg' ? (c.median ?? null) : (c[rangeType] ?? null);
+    }
+    case 'cpu_freq': {
+      // Per-core clocks pooled over the burst: median line, min/max band (MHz).
+      const f = record.cpu_freq;
+      if (!f) return null;
+      return rangeType === 'avg' ? (f.median ?? null) : (f[rangeType] ?? null);
     }
     case 'memory':
       return record.memory ? {
@@ -2804,6 +2859,9 @@ function extractHistoryValue(record, metric, rangeType = 'avg') {
       const { cores, rest } = aggregateCoreTemps(Object.entries(t).map(([label, value]) => ({ label, value })));
       const out = cores ? { 'Cores min': cores.min, 'Cores max': cores.max, 'Cores median': cores.median, 'Cores mean': cores.mean } : {};
       rest.forEach(e => { out[e.label] = e.value; });
+      // The hottest reading of the record, whatever sensor it was (cores, board, GPUs).
+      const all = Object.values(t).filter(v => typeof v === 'number' && Number.isFinite(v));
+      out['Max'] = all.length ? Math.max(...all) : null;
       return out;
     }
     case 'fans':
@@ -2822,6 +2880,8 @@ function extractHistoryValue(record, metric, rangeType = 'avg') {
       } : null;
     case 'disk-drives':
       return record.disk_io?.drives ?? null;  // array of {name, read_mbps, write_mbps}
+    case 'processes':
+      return record.processes ?? null;  // array of {pid, name, cpu_percent, rss_mb, ...}, only when logging is on
     case 'drive-usage':
       // Return both percent and gb for each drive
       return record.drives?.map(d => ({
@@ -2856,7 +2916,10 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
   const isTriple = metricInfo.triple;
   const isMultiLine = metricInfo.multiLine;
   const isPerDevice = metricInfo.perDevice;
-  const displayUnit = metricInfo.hasUnitToggle ? (unitType === 'gb' ? metricInfo.altUnit : metricInfo.unit) : metricInfo.unit;
+  const selectedField = metricInfo.fieldSelect
+    ? (metricInfo.fieldSelect.find(f => f.key === unitType) || metricInfo.fieldSelect[0]) : null;
+  const displayUnit = selectedField ? selectedField.unit
+    : metricInfo.hasUnitToggle ? (unitType === 'gb' ? metricInfo.altUnit : metricInfo.unit) : metricInfo.unit;
 
   // Extract data
   const labels = records.map(r => new Date(r.timestamp));
@@ -2972,6 +3035,35 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
           spanGaps: false
         };
       });
+    } else if (metric === 'processes') {
+      // One line per process NAME (same-named pids summed: two wasmtime workers
+      // are one line), for the 8 names with the largest total over the range;
+      // more would only bury the legend. A record where the name is not among
+      // the logged top-N is a gap, not a zero. The field comes from the card's
+      // dropdown (its key rides in unitType); rows are sparse, a missing key is a gap.
+      const key = selectedField.key;
+      const perRecord = records.map(r => {
+        const v = extractHistoryValue(r, metric);
+        if (!Array.isArray(v)) return null;
+        const sums = {};
+        v.forEach(p => { if (p?.name && p[key] != null) sums[p.name] = (sums[p.name] || 0) + p[key]; });
+        return sums;
+      });
+      const totals = {};
+      perRecord.forEach(s => s && Object.entries(s).forEach(([n, x]) => { totals[n] = (totals[n] || 0) + x; }));
+      const names = Object.keys(totals).sort((a, b) => totals[b] - totals[a]).slice(0, 8);
+      datasets = names.map((name, i) => ({
+        label: name,
+        data: perRecord.map(s => s ? (s[name] ?? null) : null),
+        borderColor: colors[i % colors.length],
+        backgroundColor: 'transparent',
+        fill: false,
+        tension: 0,
+        pointRadius: 2,
+        pointHoverRadius: 6,
+        borderWidth: 2,
+        spanGaps: false
+      }));
     } else if (metric === 'gpu') {
       // One line per GPU (dict format like temps: { "GPU 0": value, ... })
       const gpuNames = new Set();
@@ -3462,9 +3554,13 @@ async function createHistoryCard(metric, hours = defaultHistoryHours) {
 
   // Build unit toggle if applicable (GB/% toggle for memory metrics)
   const unitToggle = metricInfo.hasUnitToggle ? `
-        <button class="unit-toggle-btn" data-unit="percent" title="Toggle GB/%">%</button>` : '';
+        <button class="unit-toggle-btn" data-unit="percent" title="Toggle ${escapeHtml(metricInfo.altUnit.trim())}/${escapeHtml(metricInfo.unit.trim())}">${escapeHtml(metricInfo.unit.trim())}</button>` : '';
   const modeToggle = metricInfo.modeToggle ? `
         <button class="mode-toggle-btn" title="${escapeHtml(metricInfo.modeToggle.title)}">${escapeHtml(metricInfo.modeToggle.mode)}</button>` : '';
+  // Which per-process stat to draw (HISTORY_METRICS[..].fieldSelect).
+  const fieldSelect = metricInfo.fieldSelect ? `
+        <select class="field-select" title="Which stat to draw">${metricInfo.fieldSelect.map(f =>
+          `<option value="${escapeHtml(f.key)}">${escapeHtml(f.label)}</option>`).join('')}</select>` : '';
   // Trace selection: "none" then a legend click is the quick way to look at one trace.
   const traceButtons = `
         <button class="trace-btn" data-traces="none" title="Hide every trace (click a legend entry to show one)">none</button>
@@ -3475,7 +3571,7 @@ async function createHistoryCard(metric, hours = defaultHistoryHours) {
     <div class="card-header">
       <h2>${metricInfo.name} History</h2>
       <div class="history-controls">
-        ${rangeToggles}${unitToggle}${modeToggle}${traceButtons}<label class="history-range-label">hours:</label>
+        ${rangeToggles}${unitToggle}${modeToggle}${fieldSelect}${traceButtons}<label class="history-range-label">hours:</label>
         <input type="number" class="history-range-input" data-metric="${metric}"
                value="${hours}" min="0.1" step="any" max="8760" list="${datalistId}" title="Time range in hours">
         <datalist id="${datalistId}">${presetOptions}</datalist>
@@ -3504,7 +3600,8 @@ async function createHistoryCard(metric, hours = defaultHistoryHours) {
   // Create entry early so we can store debounce timer for cleanup.
   // loadSeq: monotonic per-card counter; loadHistoryData drops any response
   // that is no longer the newest request for this card (see there).
-  const entry = { card, chart: null, debounceTimer: null, unitType: 'percent', mode: '', loadSeq: 0 };
+  // unitType: 'percent' | 'gb' for hasUnitToggle metrics, the selected field's key for fieldSelect ones.
+  const entry = { card, chart: null, debounceTimer: null, unitType: metricInfo.fieldSelect ? metricInfo.fieldSelect[0].key : 'percent', mode: '', loadSeq: 0 };
   historyCards.set(metric, entry);
 
   const rangeInput = card.querySelector('.history-range-input');
@@ -3567,9 +3664,17 @@ async function createHistoryCard(metric, hours = defaultHistoryHours) {
       const currentUnit = unitBtn.dataset.unit;
       const newUnit = currentUnit === 'percent' ? 'gb' : 'percent';
       unitBtn.dataset.unit = newUnit;
-      unitBtn.textContent = newUnit === 'percent' ? '%' : 'GB';
+      unitBtn.textContent = (newUnit === 'percent' ? metricInfo.unit : metricInfo.altUnit).trim();
       entry.unitType = newUnit;
       // loadHistoryData reads entry.unitType when it rebuilds the chart.
+      const hours = parseFloat(card.querySelector('.history-range-input').value) || defaultHistoryHours;
+      await loadHistoryData(metric, hours);
+    });
+  }
+
+  if (metricInfo.fieldSelect) {
+    card.querySelector('.field-select').addEventListener('change', async (e) => {
+      entry.unitType = e.target.value;
       const hours = parseFloat(card.querySelector('.history-range-input').value) || defaultHistoryHours;
       await loadHistoryData(metric, hours);
     });
@@ -3615,7 +3720,7 @@ async function loadHistoryData(metric, hours, data) {
   if (!entry) return;
   const mySeq = ++entry.loadSeq;
 
-  if (!data) data = await fetchHistoryData(hours);
+  if (!data) data = await fetchHistoryData(hours, { field: HISTORY_METRICS[metric].sideField || null });
 
   // Stale-response gate. Requests for one card can resolve out of order (a
   // 720 h fetch is slower than the 1 h fetch typed after it), and a load that
@@ -3760,16 +3865,20 @@ async function refreshAllHistory() {
 
   try {
     fetch('/api/history/record', { method: 'POST' }).catch(e => console.warn('history record failed:', e));
-    const byHours = new Map();
+    // One fetch per distinct (range, side field): a side-field card cannot share
+    // the main result, which leaves its field out.
+    const groups = new Map();
     for (const [metric, entry] of historyCards) {
       const hours = parseFloat(entry.card.querySelector('.history-range-input')?.value) || defaultHistoryHours;
-      if (!byHours.has(hours)) byHours.set(hours, []);
-      byHours.get(hours).push(metric);
+      const field = HISTORY_METRICS[metric].sideField || null;
+      const key = `${field || ''}|${hours}`;
+      if (!groups.has(key)) groups.set(key, { hours, field, metrics: [] });
+      groups.get(key).metrics.push(metric);
     }
-    await Promise.all([...byHours].map(async ([hours, metrics]) => {
-      // Force a fresh read per distinct range (bypass the cache), then redraw
-      // every card at that range from the one shared result.
-      const data = await fetchHistoryData(hours, { force: true });
+    await Promise.all([...groups.values()].map(async ({ hours, field, metrics }) => {
+      // Force a fresh read (bypass the cache), then redraw every card in the
+      // group from the one shared result.
+      const data = await fetchHistoryData(hours, { force: true, field });
       await Promise.all(metrics.map(m => loadHistoryData(m, hours, data)));
     }));
   } catch (err) {
@@ -3837,6 +3946,15 @@ function createHistorySettingsPopup() {
       <input type="checkbox" class="history-settings-checkbox" id="hs-ping-enabled" checked>
     </div>
     <div class="history-settings-row">
+      <label class="history-settings-label" title="Record the top N processes by CPU and by memory (plus any using a GPU) in each history record">Log top processes</label>
+      <input type="checkbox" class="history-settings-checkbox" id="hs-processes-enabled">
+    </div>
+    <div class="history-settings-row">
+      <label class="history-settings-label">Top N processes</label>
+      <input type="number" class="history-settings-input" id="hs-process-count"
+             min="1" max="50" placeholder="10">
+    </div>
+    <div class="history-settings-row">
       <label class="history-settings-label">Password</label>
       <input type="password" class="history-settings-input" id="hs-password"
              placeholder="Required">
@@ -3895,6 +4013,8 @@ async function loadHistorySettings() {
   document.getElementById('hs-duration').value = data.sample_duration;
   document.getElementById('hs-min-interval').value = data.min_record_interval;
   document.getElementById('hs-ping-enabled').checked = data.ping_enabled;
+  document.getElementById('hs-processes-enabled').checked = !!data.processes_enabled;
+  document.getElementById('hs-process-count').value = data.process_count ?? '';
 
   if (!data.password_configured) {
     const status = document.getElementById('hs-status');
@@ -3921,6 +4041,9 @@ async function submitHistorySettings() {
   if (duration) body.sample_duration = parseInt(duration);
   if (minInterval !== '') body.min_record_interval = parseInt(minInterval);
   body.ping_enabled = document.getElementById('hs-ping-enabled').checked;
+  body.processes_enabled = document.getElementById('hs-processes-enabled').checked;
+  const processCount = document.getElementById('hs-process-count').value;
+  if (processCount) body.process_count = parseInt(processCount);
 
   try {
     const resp = await fetch('/api/history/settings', {
@@ -3938,6 +4061,8 @@ async function submitHistorySettings() {
       document.getElementById('hs-interval').value = data.record_interval;
       document.getElementById('hs-duration').value = data.sample_duration;
       document.getElementById('hs-min-interval').value = data.min_record_interval;
+      document.getElementById('hs-processes-enabled').checked = !!data.processes_enabled;
+      document.getElementById('hs-process-count').value = data.process_count ?? '';
       setTimeout(closeHistorySettingsPopup, 1200);
     } else {
       const msg = data.details ? data.details.join(', ') : data.error;
@@ -3957,6 +4082,8 @@ async function resetHistorySettings() {
   document.getElementById('hs-duration').value = data.defaults.sample_duration;
   document.getElementById('hs-min-interval').value = data.defaults.min_record_interval;
   document.getElementById('hs-ping-enabled').checked = data.defaults.ping_enabled;
+  document.getElementById('hs-processes-enabled').checked = !!data.defaults.processes_enabled;
+  document.getElementById('hs-process-count').value = data.defaults.process_count ?? '';
   const status = document.getElementById('hs-status');
   status.textContent = 'Defaults loaded \u2014 enter password and confirm';
   status.className = 'history-settings-status history-settings-status--info';

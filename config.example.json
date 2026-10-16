@@ -9,7 +9,9 @@
   "history": {
     "record_interval": 600,
     "sample_duration": 10,
-    "sample_count": 5
+    "sample_count": 5,
+    "processes_enabled": false,
+    "process_count": 10
   },
   "thresholds": {
     "cpu_percent": 50,

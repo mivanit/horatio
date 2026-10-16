@@ -15,7 +15,7 @@ Backend: FastAPI wrapping a [Glances](https://github.com/nicolargo/glances) subp
 | Network Processes | `nethogs` with file capabilities (the installer offers to set it up) |
 | Disk I/O Processes | `sysstat` (`pidstat`) |
 | System Mail | a local MTA delivering root's mail to the service user's spool: `postfix` ("Local only") plus `bsd-mailx`, with `root: <user>` in `/etc/aliases` and `newaliases` |
-| Hardware health, Drive Health, Fan Speeds, Temperatures, Power | the root collector (`--collector`): `smartmontools` (required: without it the Hardware card alarms); optionally `ipmitool` + a BMC for fans/temps/system watts and Intel RAPL for CPU/DRAM watts, skipped when absent. See [`collector/README.md`](collector/README.md) |
+| Hardware health, Drive Health, Fan Speeds, Temperatures, Power | the root collector (`--collector`): `smartmontools` (required: without it the Hardware card alarms); optionally `ipmitool` + a BMC for fans/temps/system watts, Intel RAPL for CPU/DRAM watts and `nvidia-smi` for GPU memory temperatures and thermal alarms, skipped when absent. See [`collector/README.md`](collector/README.md) |
 
 ## Install
 
@@ -67,6 +67,7 @@ Removes the service, the collector's units, scripts and snapshots. The checkout,
 | `ping_targets` | `[{address}]` pinged every poll and recorded to history |
 | `history.record_interval` | seconds between history records (default 600) |
 | `history.sample_duration`, `history.sample_count` | each record averages `sample_count` samples over `sample_duration` seconds |
+| `history.processes_enabled`, `history.process_count` | log the top `process_count` processes by CPU and by memory, plus any holding GPU memory, in each history record (`processes`: pid, name always; ppid, create_time, user, status, threads, cpu_percent, rss_mb, disk_read_kbps, disk_write_kbps, gpu_mem_mib + gpus when known and non-zero); default off, 10. Roughly doubles a record's size at 10, so the 64 MB history tail covers fewer days |
 | `thresholds.*_percent`, `temp_celsius`, `network_mbps`, `disk_io_mbps`, `ping_ms` | orange-card thresholds |
 | `thresholds.power_max_watts`, `power_psu_watts`, `power_warn_fraction` | the power bar's right edge, its dashed PSU line, and the orange threshold as a fraction of the PSU |
 
@@ -105,8 +106,9 @@ again, don't put this on anything besides a trusted LAN!
 | `GET /api/ip-info`           | LAN, public, and Tailscale IP addresses     |
 | `GET /api/mail`              | Local system mail: `count` and the newest 10 `{date_epoch, subject}`; always 200 with `status` ok/missing/error |
 | `GET /api/storage-health`    | The 15-min collector snapshot (`alarms`, `info`, drives, md, ECC, SEL, backup, failed units, journal errors) with `status` ok/stale/missing/error and `age_sec`; always 200 |
-| `GET /api/sensors`           | The 60 s sensors snapshot (`fans`, `temps`, `power`, `alarms`), same shape, stale after 300 s |
-| `GET /api/history`           | History records (query: `hours`, default 24) |
+| `GET /api/sensors`           | The 60 s sensors snapshot (`fans`, `temps`, `power`, `gpus` with nvidia-smi temperatures, driver limits, thermal slowdown and ECC, `alarms`), same shape, stale after 300 s |
+| `GET /api/history`           | History records (query: `hours`, default 24) without the heavy fields (`temps`, `processes`) and `ip`. Each record also carries `cpu_freq` (min/median/avg/max MHz over every core and burst sample, plus the hardware range) where cpufreq sysfs exists |
+| `GET /api/history/field/{name}` | One heavy field over the range, `[{timestamp, <name>}]`: `temps` (every sensor) or `processes` (the per-process rows, when logging is on). The history cards that draw these ask for them alone |
 | `POST /api/history/record`   | Record now (rate-limited)                   |
 | `GET /api/history/raw`       | Raw `history.jsonl` download (password)     |
 | `GET /api/history/settings`  | Current recording settings                  |

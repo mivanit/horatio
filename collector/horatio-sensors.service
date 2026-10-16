@@ -1,5 +1,5 @@
 [Unit]
-Description=Horatio: snapshot fans, temperatures and power (IPMI + RAPL) every minute
+Description=Horatio: snapshot fans, temperatures and power (IPMI, RAPL, nvidia-smi) every minute
 Documentation=https://github.com/mivanit/horatio/blob/main/collector/README.md
 
 [Service]
@@ -7,8 +7,9 @@ Type=oneshot
 ExecStart=/usr/local/bin/health-sensors.sh
 Nice=19
 IOSchedulingClass=idle
-# Three BMC table walks plus a 1 s RAPL sample; a run past this is wedged.
+# Three BMC table walks, a 1 s RAPL sample and two nvidia-smi reads; a run past this is wedged.
 # Without it Type=oneshot has no start timeout and OnUnitActiveSec= never re-fires.
 TimeoutStartSec=2min
 # No failure mail here: it would be one per minute. health-collect.sh alarms when
-# sensors.json is more than 5 minutes old, and that run does mail.
+# sensors.json is more than 5 minutes old; that alarm shows on the dashboard's
+# Hardware card and the MOTD, and is not mailed (only a failed collect run mails).

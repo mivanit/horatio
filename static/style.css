@@ -40,6 +40,7 @@
   --color-write: #ef4444;
   --color-gpu: #8b5cf6;
   --color-cpu-cores: #14b8a6;
+  --color-cpu-freq: #0ea5e9;
   --color-gpu-mem: #ec4899;
   --color-swap: #a855f7;
   --color-ping-0: #f59e0b;
@@ -331,8 +332,9 @@ h1 {
 
 .legend {
   display: flex;
+  flex-wrap: wrap;           /* a second row when the entries don't fit one */
   justify-content: center;
-  gap: 20px;
+  gap: 4px 20px;
   margin-top: 10px;
   font-size: 12px;
   color: var(--text-secondary);
@@ -1398,6 +1400,7 @@ h1 {
 /* Unit toggle button (GB/% toggle for memory metrics) */
 .unit-toggle-btn,
 .mode-toggle-btn,
+.field-select,
 .trace-btn {
   background: #1a1a1a;
   border: 1px solid #333;
@@ -1412,6 +1415,7 @@ h1 {
 
 .unit-toggle-btn:hover,
 .mode-toggle-btn:hover,
+.field-select:hover,
 .trace-btn:hover {
   background: #252525;
   color: #fff;

@@ -11,5 +11,6 @@
   ],
   "grown_defect_baseline": {},
   "fan_rpm_alarm_above": null,
+  "gpu_temp_alarm_margin_c": 3,
   "backup_timer": null
 }

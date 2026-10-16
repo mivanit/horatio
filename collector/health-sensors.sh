@@ -9,8 +9,9 @@
 # a .err sidecar, which becomes a `collector:` alarm (a partial snapshot must not
 # read as healthy); output is written to a per-pid temp file and renamed into
 # place, mode 0644, so the dashboard (an ordinary user) reads it without privileges. The
-# alarms here (sensor status nc/cr/nr, fan ceiling) are printed by the dashboard
-# (and any MOTD script) alongside state.json's.
+# alarms here (sensor status nc/cr/nr, fan ceiling, GPU thermals and ECC) are printed
+# by the dashboard's Hardware card while this snapshot is fresh (a stale one is shown
+# as unknown, not clear) and by the MOTD script, alongside state.json's.
 #
 # Sources:
 #   - ipmitool sdr type fan / temperature / current: the BMC's own readings. Dell
@@ -19,6 +20,11 @@
 #   - Intel RAPL energy counters (/sys/class/powercap, root-only): two reads 1 s
 #     apart give per-socket CPU and DRAM watts. A box without RAPL gets no rows
 #     and no alarm.
+#   - nvidia-smi: per-GPU core and memory (HBM) temperature, the driver's own
+#     thermal limits, thermal slowdown state and counters, ECC. The core throttles
+#     itself at its max operating temperature; the memory has no throttle of its
+#     own, so it can run past its limit while the core looks fine. A box without
+#     nvidia-smi gets no rows and no alarm.
 #
 # Usage: sudo systemctl start horatio-sensors.service
 # (the timer runs it every 60 s). Optional argv: output path, for testing.
@@ -71,6 +77,21 @@ rapl > "$tmp/rapl1.txt" 2> "$tmp/rapl.err"  || echo "exit $?" >> "$tmp/rapl.err"
 sleep 1
 rapl > "$tmp/rapl2.txt" 2>> "$tmp/rapl.err" || echo "exit $?" >> "$tmp/rapl.err"
 
+# GPUs. The CSV is one line per GPU, in the order the query names the fields
+# (the python's GPU_FIELDS); unreadable fields come back as "[N/A]", "N/A" or
+# "[Not Supported]". The throttle counters are microseconds since driver load.
+# The limits are not query fields, so they come from the -q text, one block per
+# GPU headed by its PCI bus id (the CSV's pci.bus_id, which pairs the two).
+# nvidia-smi installed but the driver not loaded fails both captures: a
+# `collector:` alarm, on purpose. No nvidia-smi at all: no rows, no alarm.
+if command -v nvidia-smi > /dev/null; then
+    timeout 30 nvidia-smi --query-gpu=index,pci.bus_id,name,temperature.gpu,temperature.memory,clocks_event_reasons.sw_thermal_slowdown,clocks_event_reasons.hw_thermal_slowdown,clocks_event_reasons.hw_slowdown,clocks_event_reasons_counters.sw_thermal_slowdown,clocks_event_reasons_counters.hw_thermal_slowdown,ecc.errors.uncorrected.volatile.total,retired_pages.pending,power.draw,power.limit \
+        --format=csv,noheader,nounits > "$tmp/gpu.txt" 2> "$tmp/gpu.err" || echo "exit $?" >> "$tmp/gpu.err"
+    timeout 30 nvidia-smi -q -d TEMPERATURE > "$tmp/gpu-temp.txt" 2> "$tmp/gpu-temp.err" || echo "exit $?" >> "$tmp/gpu-temp.err"
+else
+    for f in gpu gpu-temp; do : > "$tmp/$f.txt"; : > "$tmp/$f.err"; done
+fi
+
 python3 - "$tmp" "$OUT" <<'PY'
 import glob, json, os, sys, time
 
@@ -84,7 +105,7 @@ def read(name):
         return f.read()
 
 # Same per-machine config file as health-collect.sh; only fan_rpm_alarm_above
-# is read here. A missing file means defaults; malformed JSON crashes on purpose.
+# and gpu_temp_alarm_margin_c are read here. A missing file means defaults; malformed JSON crashes on purpose.
 try:
     with open(os.environ.get("HEALTH_CONFIG", "/etc/horatio/config.json")) as f:
         config = json.load(f)
@@ -146,12 +167,96 @@ sensor_alarms(state["power"])
 # `fan_rpm_alarm_above` in the config, for a BMC fan profile changed by hand
 # (e.g. Dell's third-party PCIe fan boost turned off): the setting may not
 # survive a power-cycle, and a silent revert to full speed is otherwise `status: ok`.
-# Absent/null = off.
+# It also fires while the fans are held at a manual speed above the ceiling, or
+# when the BMC spins them up because the box is hot. Absent/null = off.
 ceiling = config.get("fan_rpm_alarm_above")
 if ceiling is not None:
     over = [r for r in state["fans"] if r["value"] is not None and r["value"] > ceiling]
     if over:
-        alarms.append(f"fans: {len(over)} over {ceiling} RPM (boost back on?), e.g. {over[0]['label']} {int(over[0]['value'])}")
+        alarms.append(f"fans: {len(over)} over {ceiling} RPM (boost back on, manual override, or box hot), "
+                      f"e.g. {over[0]['label']} {int(over[0]['value'])}")
+
+# ---- GPUs (nvidia-smi) ---------------------------------------------------------
+# The --query-gpu fields of the bash stage, in order.
+GPU_FIELDS = ["index", "bus_id", "name", "core_c", "mem_c", "sw_thermal", "hw_thermal", "hw_slowdown",
+              "sw_thermal_us", "hw_thermal_us", "ecc_uncorrected", "retired_pending", "power_w", "power_limit_w"]
+
+def num(s):
+    # "83", "26.25" -> number; "[N/A]", "N/A", "[Not Supported]" -> None.
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+def short_model(name):
+    # "Tesla V100-PCIE-32GB" -> "V100", "Tesla P40" -> "P40", "NVIDIA RTX A6000" -> "RTX A6000":
+    # the vendor / product-line words dropped, then the form factor and memory size.
+    words = [w for w in name.split() if w not in ("NVIDIA", "Tesla", "GeForce", "Quadro")]
+    return " ".join(words).split("-")[0] or name
+
+def gpu_limits(text):
+    # `nvidia-smi -q -d TEMPERATURE`: one block per GPU, headed by its bus id at
+    # column 0 ("GPU 00000000:82:00.0"), then indented "Key : value" lines such as
+    #   "        GPU Max Operating Temp            : 83 C"
+    #   "        Memory Max Operating Temp         : N/A"
+    # -> {bus_id: {shutdown, slowdown, max_op, mem_max_op}}, a value None when N/A.
+    keys = {"GPU Shutdown Temp": "shutdown", "GPU Slowdown Temp": "slowdown",
+            "GPU Max Operating Temp": "max_op", "Memory Max Operating Temp": "mem_max_op"}
+    limits, cur = {}, None
+    for line in text.splitlines():
+        if line.startswith("GPU "):
+            cur = limits.setdefault(line.split()[1].upper(), dict.fromkeys(keys.values()))
+            continue
+        key, _, value = line.partition(":")
+        if cur is not None and key.strip() in keys:
+            cur[keys[key.strip()]] = num(value.split()[0]) if value.split() else None
+    return limits
+
+def deg(x):
+    return f"{x:g}"         # 86.0 -> "86"
+
+limits = gpu_limits(read("gpu-temp.txt"))
+# Absent = 3; null = no temperature rules (the slowdown, ECC and page rules still run).
+margin = config.get("gpu_temp_alarm_margin_c", 3)
+state["gpus"] = []
+for line in read("gpu.txt").splitlines():
+    if not line.strip():
+        continue
+    parts = [p.strip() for p in line.split(",")]
+    if len(parts) != len(GPU_FIELDS) or num(parts[0]) is None:
+        alarms.append(f"collector: gpu: unparsed line: {line.strip()!r}")
+        continue
+    f = dict(zip(GPU_FIELDS, parts))
+    n = int(num(f["index"]))
+    # "Active" / "Not Active"; N/A counts as not active. sw is the driver's own
+    # capping at max operating temp, hw the board's emergency halving of the clocks.
+    # sw_power_cap is deliberately not here: an idle, capped card sits in it.
+    throttle = [r for r in ("sw_thermal", "hw_thermal") if f[r] == "Active"]
+    us = lambda k: round(num(f[k]) / 1e6, 1) if num(f[k]) is not None else None
+    ecc = num(f["ecc_uncorrected"])
+    row = {"index": n, "name": f["name"], "label": f"GPU {n} ({short_model(f['name'])})",
+           "core_c": num(f["core_c"]), "mem_c": num(f["mem_c"]),
+           "limits": limits.get(f["bus_id"].upper(), {"shutdown": None, "slowdown": None, "max_op": None, "mem_max_op": None}),
+           "throttle": throttle, "hw_slowdown": f["hw_slowdown"] == "Active",
+           "sw_thermal_s": us("sw_thermal_us"), "hw_thermal_s": us("hw_thermal_us"),
+           "ecc_uncorrected": int(ecc) if ecc is not None else None,
+           "retired_pending": {"Yes": True, "No": False}.get(f["retired_pending"]),
+           "power_w": num(f["power_w"]), "power_limit_w": num(f["power_limit_w"])}
+    state["gpus"].append(row)
+
+    lim = row["limits"]
+    if margin is not None:
+        # The memory has no throttle of its own: the core can sit under its limit
+        # while the memory is already past its own.
+        for what, temp, top in (("memory", row["mem_c"], lim["mem_max_op"]), ("core", row["core_c"], lim["max_op"])):
+            if temp is not None and top is not None and temp >= top - margin:
+                alarms.append(f"GPU {n}: {what} {deg(temp)} C >= max operating {deg(top)} C - {deg(margin)}")
+    if throttle:
+        alarms.append(f"GPU {n}: thermal slowdown active ({', '.join(r.split('_')[0] for r in throttle)})")
+    if row["ecc_uncorrected"]:
+        alarms.append(f"GPU {n}: {row['ecc_uncorrected']} uncorrected ECC errors since driver load")
+    if row["retired_pending"]:
+        alarms.append(f"GPU {n}: retired pages pending")
 
 # ---- RAPL: CPU and DRAM watts per socket --------------------------------------
 # Emitted in the same row shape as the IPMI power rows, so the dashboard's

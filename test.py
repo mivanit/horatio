@@ -43,8 +43,18 @@ SCHEMAS: dict[str, object] = {
         isinstance(d, dict) and {"min1", "min5", "min15"} <= d.keys()
     ),
     "/api/4/gpu": lambda d: isinstance(d, list),
+    # The heavy fields are left out here and served by /api/history/field/<name>.
     "/api/history": lambda d: (
         isinstance(d, dict) and {"records", "count", "skipped_lines"} <= d.keys()
+        and not any(k in r for r in d["records"] for k in ("temps", "processes", "ip"))
+    ),
+    "/api/history/field/temps": lambda d: (
+        isinstance(d, dict) and d.get("field") == "temps" and isinstance(d.get("records"), list)
+        and all(set(r.keys()) <= {"timestamp", "temps"} for r in d["records"])
+    ),
+    "/api/history/field/processes": lambda d: (
+        isinstance(d, dict) and d.get("field") == "processes" and isinstance(d.get("records"), list)
+        and all(set(r.keys()) <= {"timestamp", "processes"} for r in d["records"])
     ),
     "/api/cpu-info": lambda d: (
         isinstance(d, dict) and "model" in d and "logical_cores" in d
@@ -64,10 +74,13 @@ SCHEMAS: dict[str, object] = {
             "sample_duration",
             "sample_count",
             "ping_enabled",
+            "processes_enabled",
+            "process_count",
             "defaults",
             "password_configured",
         }
         <= d.keys()
+        and {"processes_enabled", "process_count"} <= d["defaults"].keys()
     ),
     "/api/ping": lambda d: isinstance(d, dict) and ("disabled" in d or "targets" in d),
     "/api/gpu-processes": lambda d: isinstance(d, list),
@@ -400,6 +413,10 @@ def test_null_metrics_unit() -> None:
             "memory_total_mb": 24576.0,
             "temperature": 50.0,
             "power_draw": 120.5,
+            # an older 6-column line: the newer columns are absent, not an error
+            "temperature_memory": None,
+            "throttle_sw_thermal_us": None,
+            "throttle_hw_thermal_us": None,
         }
         and stats[1]["index"] == 1
         and stats[1]["util_percent"] is None
@@ -407,6 +424,41 @@ def test_null_metrics_unit() -> None:
         and stats[1]["power_draw"] is None,
         "_parse_gpu_stats: [N/A] fields -> None, row kept (index required)",
         describe(stats),
+    )
+
+    # _parse_gpu_stats: the full 9-column line (mem temp + thermal slowdown
+    # counters). The P40 reports memory temp "N/A" (no brackets) and its sw
+    # counter "[N/A]"; the V100 reads all of them.
+    stats = server._parse_gpu_stats(
+        "0, 0, 0, 24576, 22, 9.94, N/A, [N/A], 0\n"
+        "1, 97, 30000, 32768, 79, 199.5, 86, 2391391956, 0"
+    )
+    check(
+        len(stats) == 2
+        and stats[0]["temperature"] == 22.0
+        and stats[0]["temperature_memory"] is None
+        and stats[0]["throttle_sw_thermal_us"] is None
+        and stats[0]["throttle_hw_thermal_us"] == 0.0
+        and stats[1]["temperature_memory"] == 86.0
+        and stats[1]["throttle_sw_thermal_us"] == 2391391956.0,
+        "_parse_gpu_stats: 9 columns, P40 memory N/A -> None",
+        describe(stats),
+    )
+    # ... and into the history: counters in seconds, "GPU N mem" only when readable
+    recs = server.build_gpu_records(stats, [])
+    check(
+        recs[0]["throttle_sw_thermal_s"] is None
+        and recs[0]["throttle_hw_thermal_s"] == 0.0
+        and recs[1]["throttle_sw_thermal_s"] == 2391.4
+        and json.loads(json.dumps(recs)) == recs,
+        "build_gpu_records: thermal slowdown counters us -> s, None kept",
+        describe(recs),
+    )
+    check(
+        server.gpu_temps(stats, [])
+        == {"GPU 0": 22.0, "GPU 1": 79.0, "GPU 1 mem": 86.0},
+        "gpu_temps: 'GPU N mem' when readable, no key for the P40's N/A",
+        describe(server.gpu_temps(stats, [])),
     )
 
     # build_gpu_records: nvidia-smi with all metric fields [N/A] (P40-via-nvidia
@@ -510,6 +562,82 @@ def test_null_metrics_unit() -> None:
     )
 
 
+def test_process_history_unit() -> None:
+    """build_process_records / aggregate_cpu_freq: pure record shaping."""
+    print(f"\n{BOLD}Unit: per-process history and CPU clocks{RESET}\n")
+    import server
+
+    def proc(pid: int, cpu: float, rss: int, name: str = "x") -> dict:
+        return {"pid": pid, "name": name, "username": "u", "status": "S",
+                "cpu_percent": cpu, "memory_info": {"rss": rss}, "num_threads": 2}
+
+    # pids above the kernel's pid_max ceiling (2**22) can never exist, so the
+    # sanitizer falls back to Glances' name and /proc yields no ppid/create_time.
+    P = 2**31 - 100
+    procs = [proc(P + 1, 50.0, 10 << 20, "hog"), proc(P + 2, 1.0, 900 << 20, "fat"),
+             proc(P + 3, 0.5, 1 << 20, "idle"), proc(P + 4, 20.0, 5 << 20, "mid"),
+             {"pid": P + 5, "name": "nomem", "cpu_percent": 0.0},
+             {"pid": True, "cpu_percent": 99}, "junk"]
+    gpu = [{"pid": P + 3, "gpu_index": 1, "gpu_memory_mib": 100.0, "name": "idle"},
+           {"pid": P + 3, "gpu_index": 0, "gpu_memory_mib": 50.0, "name": "idle"},
+           {"pid": P + 99, "gpu_index": 0, "gpu_memory_mib": 7.0, "name": "ghost"}]
+    rows = server.build_process_records(procs, gpu, 2)
+    by_pid = {r["pid"]: r for r in rows}
+    check(
+        [r["pid"] for r in rows] == [P + 1, P + 4, P + 2, P + 3, P + 99]
+        and by_pid[P + 1]["name"] == "hog"
+        and by_pid[P + 2]["rss_mb"] == 900.0
+        and by_pid[P + 3]["gpu_mem_mib"] == 150.0
+        and by_pid[P + 3]["gpus"] == [0, 1]
+        and "gpus" not in by_pid[P + 1]
+        and "cpu_percent" not in by_pid[P + 99]
+        and by_pid[P + 99]["gpu_mem_mib"] == 7.0
+        and all("ppid" not in r and "create_time" not in r for r in rows)  # pids gone -> omitted
+        and all(v is not None for r in rows for v in r.values())  # sparse: no nulls
+        and json.loads(json.dumps(rows)) == rows,
+        "build_process_records: top-2 cpu + top-2 rss + GPU holders, sorted, GPU-only last",
+        describe(rows),
+    )
+    check(
+        server.build_process_records([], [], 5) == []
+        and server.build_process_records(procs[:1], [], 5)[0]["pid"] == P + 1,
+        "build_process_records: empty and single",
+    )
+    nomem = {r["pid"]: r for r in server.build_process_records(procs, [], 5)}[P + 5]
+    check("rss_mb" not in nomem and nomem["cpu_percent"] == 0.0,
+          "build_process_records: missing memory_info -> no rss_mb key, cpu 0.0 kept", describe(nomem))
+    # disk rates from Glances' cumulative io_counters; zero / unreadable -> no key
+    busy = proc(P + 6, 2.0, 1 << 20, "cp")
+    busy.update({"io_counters": [10 * 1024 * 1024, 4 * 1024 * 1024, 0, 4 * 1024 * 1024, 1], "time_since_update": 5.0})
+    quiet = proc(P + 7, 1.0, 1 << 20, "idle")
+    quiet.update({"io_counters": [5, 5, 5, 5, 1], "time_since_update": 5.0})
+    nodata = proc(P + 8, 1.0, 1 << 20, "noio")
+    nodata.update({"io_counters": [0, 0, 0, 0, 0], "time_since_update": 5.0})
+    io = {r["pid"]: r for r in server.build_process_records([busy, quiet, nodata], [], 5)}
+    check(
+        io[P + 6]["disk_read_kbps"] == 2048.0 and "disk_write_kbps" not in io[P + 6]
+        and "disk_read_kbps" not in io[P + 7] and "disk_write_kbps" not in io[P + 7]
+        and "disk_read_kbps" not in io[P + 8],
+        "build_process_records: disk KB/s from io_counters, zero and unreadable omitted",
+        describe([io[P + 6], io[P + 7], io[P + 8]]),
+    )
+    f = server.aggregate_cpu_freq([1200.0, 3600.0, None, 2400.0, "x"], {"min_mhz": 1200.0, "max_mhz": 3600.0})
+    check(
+        f == {"min": 1200.0, "median": 2400.0, "avg": 2400.0, "max": 3600.0, "min_mhz": 1200.0, "max_mhz": 3600.0},
+        "aggregate_cpu_freq: pooled min/median/avg/max, junk dropped, limits carried",
+        describe(f),
+    )
+    check(server.aggregate_cpu_freq([]) is None and server.aggregate_cpu_freq([None]) is None,
+          "aggregate_cpu_freq: nothing readable -> None")
+    me = server.build_process_records([proc(os.getpid(), 1.0, 1 << 20, "me")], [], 1)[0]
+    check(
+        me.get("ppid") == os.getppid() and isinstance(me.get("create_time"), float)
+        and abs(me["create_time"] - time.time()) < 86400,
+        "build_process_records: ppid/create_time from /proc for a live pid",
+        describe(me),
+    )
+
+
 def test_dedupe_fs_unit() -> None:
     """Unit tests for filesystem de-dup by backing device (no server needed).
 
@@ -557,6 +685,19 @@ def test_dedupe_fs_unit() -> None:
         _mounts(subvol) == ["/data/a", "/data/b"],
         "dedupe: same device, different used -> both kept (no over-collapse)",
         describe(_mounts(subvol)),
+    )
+
+    # Same device, `used` a few blocks apart (a busy root fs statvfs'd twice, for
+    # '/' and PrivateTmp's '/tmp'): within 0.1% of size it is one fs, '/' wins.
+    GB = 1024**3
+    jitter = [
+        {"device_name": "/dev/nvme0n1p2", "mnt_point": "/tmp", "size": 900 * GB, "used": 400 * GB + 65536},
+        {"device_name": "/dev/nvme0n1p2", "mnt_point": "/", "size": 900 * GB, "used": 400 * GB},
+    ]
+    check(
+        _mounts(jitter) == ["/"],
+        "dedupe: same device, used differs by a few KB -> one fs, shortest mount wins",
+        describe(_mounts(jitter)),
     )
 
     # Empty device_name -> always kept (nothing to dedupe against).
@@ -703,6 +844,7 @@ def main() -> int:
     global passes, fails
     test_read_history_unit()
     test_null_metrics_unit()
+    test_process_history_unit()
     test_dedupe_fs_unit()
     test_mail_and_health_unit()
     port = free_port()
@@ -763,6 +905,8 @@ def main() -> int:
         optional_endpoints = ["/api/4/gpu"]
         custom_endpoints = [
             "/api/history",
+            "/api/history/field/temps",
+            "/api/history/field/processes",
             "/api/cpu-info",
             "/api/ip-info",
             "/api/processlist",
@@ -933,6 +1077,32 @@ def main() -> int:
                     "history cpu_cores has ordered min<=median<=max",
                     describe(cc),
                 )
+
+            # CPU clocks are optional (cpufreq sysfs); when present, ordered and in MHz.
+            if "cpu_freq" in record:
+                cf = record["cpu_freq"]
+                check(
+                    isinstance(cf, dict)
+                    and {"min", "median", "avg", "max"} <= cf.keys()
+                    and cf["min"] <= cf["median"] <= cf["max"]
+                    and cf["min"] <= cf["avg"] <= cf["max"]
+                    and cf["min"] > 0,
+                    "history cpu_freq has ordered min<=median/avg<=max",
+                    describe(cf),
+                )
+            # Per-process history: the key is there exactly when the setting is on
+            # (off unless this box's config.json enables it).
+            try:
+                hs = httpx.get(f"{base}/api/history/settings", timeout=10).json()
+                on = hs.get("processes_enabled") is True
+                check(
+                    ("processes" in record) == on
+                    and (not on or all({"pid", "name"} <= r.keys() and None not in r.values()
+                                       for r in record["processes"])),
+                    f"history processes present iff enabled (enabled={on}); rows sparse",
+                )
+            except Exception as e:
+                fail("history processes presence", str(e))
 
             # Verify per-drive stats structure
             drives_io = dio.get("drives", [])
