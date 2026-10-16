@@ -66,6 +66,7 @@ Removes the service, the collector's units, scripts and snapshots. The checkout,
 | `title`, `title_emoji` | page title and heading |
 | `ping_targets` | `[{address}]` pinged every poll and recorded to history |
 | `history.record_interval` | seconds between history records (default 600) |
+| `history.min_record_interval` | minimum seconds between manual "record now" requests, 0 to disable (default 60) |
 | `history.sample_duration`, `history.sample_count` | each record averages `sample_count` samples over `sample_duration` seconds |
 | `history.processes_enabled`, `history.process_count` | log the top `process_count` processes by CPU and by memory, plus any holding GPU memory, in each history record (`processes`: pid, name always; ppid, create_time, user, status, threads, cpu_percent, rss_mb, disk_read_kbps, disk_write_kbps, gpu_mem_mib + gpus when known and non-zero); default off, 10. Roughly doubles a record's size at 10, so the 64 MB history tail covers fewer days |
 | `thresholds.*_percent`, `temp_celsius`, `network_mbps`, `disk_io_mbps`, `ping_ms` | orange-card thresholds |

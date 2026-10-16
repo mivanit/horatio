@@ -192,7 +192,11 @@ _nethogs_lock: asyncio.Lock = asyncio.Lock()
 _disk_lock: asyncio.Lock = asyncio.Lock()
 
 # Rate limiting for manual history recording
-DEFAULT_MANUAL_RECORD_MIN_INTERVAL: Final[int] = 60  # seconds
+# Minimum gap between manual "record now" requests; 0 disables the limit. Read
+# from config.json like the other history settings so it survives restarts.
+DEFAULT_MANUAL_RECORD_MIN_INTERVAL: Final[int] = _cfg_int(
+    _history_cfg, "min_record_interval", 60, 0, 3600
+)
 _last_manual_record_time: float = 0.0
 
 

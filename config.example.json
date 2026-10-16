@@ -8,6 +8,7 @@
   ],
   "history": {
     "record_interval": 600,
+    "min_record_interval": 60,
     "sample_duration": 10,
     "sample_count": 5,
     "processes_enabled": false,
