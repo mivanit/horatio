@@ -29,6 +29,7 @@ import mailbox
 import math
 import os
 import posixpath
+import re
 import secrets
 import socket
 import statistics
@@ -2983,6 +2984,428 @@ async def proxy_api(path: str, request: Request) -> Response:
                 status_code=502,
                 media_type="application/json",
             )
+
+
+# ── Console text view (/text) ────────────────────────────────────────────────
+# A curl-able rendering of the history file: the latest record as a snapshot
+# and/or a downsampled table of recent records. "ascii" is plain 7-bit text;
+# "unicode" adds block bars and sparklines.
+
+TEXT_BAR_WIDTH: Final[int] = 20
+TEXT_WIDTH: Final[int] = 78
+_SPARK_CHARS: Final[str] = "▁▂▃▄▅▆▇█"
+# The frontend's metric colours (static/style.css variables, as mapped in
+# static/config.js), drawn with 24-bit ANSI escapes when colour is on.
+TEXT_COLORS: Final[dict[str, str]] = {
+    "cpu": "#3b82f6",  # --color-accent
+    "memory": "#10b981",  # --color-success
+    "swap": "#a855f7",  # --color-swap
+    "gpu": "#8b5cf6",  # --color-gpu
+    "drive": "#84cc16",  # --color-read (drive usage card)
+    "load": "#f59e0b",  # --color-warning (1-minute load)
+    "net_in": "#06b6d4",  # --color-download
+    "net_out": "#f97316",  # --color-upload
+    "read": "#84cc16",  # --color-read
+    "write": "#ef4444",  # --color-write
+    "temp": "#f59e0b",  # --color-warning
+    "ping": "#f59e0b",  # --color-ping-0
+    "error": "#ef4444",  # --color-error
+    "warning": "#f59e0b",  # --color-warning (the orange-card threshold)
+    "ok": "#10b981",  # --color-success
+    "temp_mid": "#eab308",  # --color-temp-mid
+    "gpu_mem": "#ec4899",  # --color-gpu-mem
+    "load_5m": "#eab308",  # --color-load-5m
+    "load_15m": "#ca8a04",  # --color-load-15m
+    "ping_0": "#f59e0b",  # --color-ping-0
+    "ping_1": "#8b5cf6",  # --color-ping-1
+    "ping_2": "#06b6d4",  # --color-ping-2
+    "title": "#f0f0f0",  # --text-primary
+    "muted": "#808080",
+}
+
+
+def _paint(text: str, key: str, on: bool) -> str:
+    if not on or not text:
+        return text
+    h = TEXT_COLORS[key].lstrip("#")
+    r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+    bold = "1;" if key == "title" else ""
+    return f"\033[{bold}38;2;{r};{g};{b}m{text}\033[0m"
+
+
+def _fmt(value: Any, spec: str = ".1f", none: str = "-") -> str:
+    v = _num(value)
+    return none if v is None else format(v, spec)
+
+
+def _bar(
+    percent: Any, unicode: bool, key: str = "cpu", color: bool = False,
+    width: int = TEXT_BAR_WIDTH,
+) -> str:
+    p = _num(percent)
+    filled = 0 if p is None else round(max(0.0, min(p, 100.0)) / 100 * width)
+    if unicode:
+        return _paint("█" * filled, key, color) + _paint("░" * (width - filled), "muted", color)
+    return "[" + _paint("#" * filled, key, color) + "." * (width - filled) + "]"
+
+
+def _sparkline(values: list[float | None]) -> str:
+    nums = [v for v in values if v is not None]
+    if not nums:
+        return ""
+    lo, hi = min(nums), max(nums)
+    span = (hi - lo) or 1.0
+    top = len(_SPARK_CHARS) - 1
+    return "".join(
+        " " if v is None else _SPARK_CHARS[round((v - lo) / span * top)]
+        for v in values
+    )
+
+
+def _record_time(record: dict[str, Any]) -> datetime | None:
+    try:
+        ts = str(record.get("timestamp", "")).replace("Z", "+00:00")
+        return datetime.fromisoformat(ts).astimezone()
+    except ValueError:
+        return None
+
+
+def _age(then: datetime | None, now: datetime) -> str:
+    if then is None:
+        return "?"
+    sec = max(0, int((now - then).total_seconds()))
+    if sec < 120:
+        return f"{sec}s ago"
+    if sec < 7200:
+        return f"{sec // 60}m ago"
+    return f"{sec / 3600:.1f}h ago"
+
+
+def _get(record: dict[str, Any], *path: str) -> Any:
+    cur: Any = record
+    for key in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+
+def _gpu_field(record: dict[str, Any], i: int, field: str) -> Any:
+    gpus = record.get("gpus") or []
+    return gpus[i].get(field) if i < len(gpus) and isinstance(gpus[i], dict) else None
+
+
+def _section(name: str, unicode: bool, color: bool, extra: str = "") -> str:
+    dash = "─" if unicode else "-"
+    head = f"{dash * 2} {_paint(name, 'title', color)} "
+    tail = f" {extra}" if extra else ""
+    pad = max(2, TEXT_WIDTH - len(name) - 4 - len(_strip_ansi(tail)))
+    return head + _paint(dash * pad, "muted", color) + tail
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\033\[[0-9;]*m", "", text)
+
+
+def _level(value: Any, threshold: Any, key: str) -> str:
+    """The value's own colour, or the warning colour at/over the card threshold."""
+    v, t = _num(value), _num(threshold)
+    return "warning" if v is not None and t is not None and v >= t else key
+
+
+def _temp_key(value: Any, threshold: Any) -> str:
+    v, t = _num(value), _num(threshold) or 60.0
+    if v is None:
+        return "muted"
+    return "ok" if v < t - 10 else "temp_mid" if v < t else "error"
+
+
+def _render_latest(
+    record: dict[str, Any],
+    unicode: bool,
+    now: datetime,
+    color: bool = False,
+    thresholds: dict[str, Any] | None = None,
+) -> list[str]:
+    th = thresholds or {}
+    then = _record_time(record)
+    when = then.strftime("%Y-%m-%d %H:%M %Z") if then else "?"
+    deg = "°C" if unicode else " C"
+    lines = [
+        _section("Snapshot", unicode, color, f"{when} " + _paint(f"({_age(then, now)})", "muted", color)),
+    ]
+
+    def row(label: str, percent: Any, detail: str, key: str, thr: Any = None) -> None:
+        pct = _paint(f"{_fmt(percent):>5}%", _level(percent, thr, key), color)
+        lines.append(
+            _paint(f"{label:<10}", key, color)
+            + f" {_bar(percent, unicode, key, color)} {pct}  {detail}"
+        )
+
+    def gb(m: dict[str, Any], used: str = "used_gb", total: str = "total_gb") -> str:
+        return _paint(f"{_fmt(m.get(used))} / {_fmt(m.get(total))} GB", "muted", color)
+
+    cpu = record.get("cpu") or {}
+    row("CPU", cpu.get("avg"), _paint(f"max {_fmt(cpu.get('max'))}%", "muted", color),
+        "cpu", th.get("cpu_percent"))
+
+    load = record.get("load") or {}
+    cores = os.cpu_count() or 1
+    load_pct = None if _num(load.get("min1")) is None else 100 * _num(load.get("min1")) / cores
+    row(
+        "Load",
+        load_pct,
+        "  ".join(
+            _paint(f"{label} {_fmt(load.get(k), '.2f')}", key, color)
+            for label, k, key in (("1m", "min1", "load"), ("5m", "min5", "load_5m"), ("15m", "min15", "load_15m"))
+        )
+        + _paint(f"  / {cores} cores", "muted", color),
+        "load",
+    )
+    for key, label in (("memory", "Memory"), ("swap", "Swap")):
+        m = record.get(key) or {}
+        row(label, m.get("percent"), gb(m), key, th.get(f"{key}_percent"))
+
+    temps = record.get("temps") or {}
+    gpus = record.get("gpus") or []
+    if gpus:
+        lines.append(_section("GPUs", unicode, color))
+    for gpu in gpus:
+        idx = gpu.get("index")
+        t = temps.get(f"GPU {idx}")
+        temp = "" if t is None else _paint(f"{_fmt(t, '.0f')}{deg}", _temp_key(t, th.get("temp_celsius")), color)
+        row(f"GPU {idx}", gpu.get("util_percent"), temp, "gpu", th.get("gpu_util_percent"))
+        row("  memory", gpu.get("mem_percent"), gb(gpu, "mem_used_gb", "mem_total_gb"),
+            "gpu_mem", th.get("gpu_memory_percent"))
+
+    drives = record.get("drives") or []
+    if drives:
+        lines.append(_section("Drives", unicode, color))
+    for d in drives:
+        mount = str(d.get("mount", "?"))
+        row(mount if len(mount) <= 10 else "…" + mount[-9:] if unicode else ".." + mount[-8:],
+            d.get("percent"), gb(d), "drive", th.get("disk_percent"))
+
+    lines.append(_section("I/O", unicode, color))
+    up, down = ("↑", "↓") if unicode else ("^", "v")
+    net_thr, io_thr = th.get("network_mbps"), th.get("disk_io_mbps")
+    net_in = _get(record, "network", "in_mbps", "avg")
+    net_out = _get(record, "network", "out_mbps", "avg")
+    rd = _get(record, "disk_io", "read_mbps", "avg")
+    wr = _get(record, "disk_io", "write_mbps", "avg")
+    lines.append(
+        _paint(f"{'Network':<10}", "net_in", color)
+        + " " + _paint(f"{down} in  {_fmt(net_in, '.2f'):>7}", _level(net_in, net_thr, "net_in"), color)
+        + "   " + _paint(f"{up} out   {_fmt(net_out, '.2f'):>7}", _level(net_out, net_thr, "net_out"), color)
+        + _paint("  MB/s", "muted", color)
+    )
+    lines.append(
+        _paint(f"{'Disk I/O':<10}", "read", color)
+        + " " + _paint(f"{up} read{_fmt(rd, '.2f'):>7}", _level(rd, io_thr, "read"), color)
+        + "   " + _paint(f"{down} write {_fmt(wr, '.2f'):>7}", _level(wr, io_thr, "write"), color)
+        + _paint("  MB/s", "muted", color)
+    )
+
+    pings = [(t, p) for t, p in (record.get("ping") or {}).items() if isinstance(p, dict)]
+    if pings:
+        lines.append(_section("Ping", unicode, color))
+    for i, (target, p) in enumerate(pings):
+        key = f"ping_{i % 3}"
+        avg, loss = _num(p.get("avg")), _num(p.get("loss")) or 0.0
+        if avg is None:
+            value = _paint("DOWN", "error", color)
+        else:
+            value = _paint(f"{avg:6.1f} ms", _level(avg, th.get("ping_ms"), key), color)
+            if loss > 0:
+                value += _paint(f"  {loss * 100:.0f}% loss", "warning", color)
+            rng = f"  ({_fmt(p.get('min'))}–{_fmt(p.get('max'))})" if unicode else (
+                f"  ({_fmt(p.get('min'))}-{_fmt(p.get('max'))})")
+            if _num(p.get("min")) is not None:
+                value += _paint(rng, "muted", color)
+        lines.append(_paint(f"{'●' if unicode else '*'} {target:<16}", key, color) + " " + value)
+
+    other = [(k, v) for k, v in temps.items() if not k.startswith("GPU ") and _num(v) is not None]
+    if other:
+        lines.append(_section(f"Temperatures{deg.strip() and ' (' + deg.strip() + ')'}", unicode, color))
+        cells = [
+            _paint(f"{k[:12]:<12}", "muted", color)
+            + _paint(f"{_fmt(v, '.0f'):>4}", _temp_key(v, th.get("temp_celsius")), color)
+            for k, v in other
+        ]
+        for i in range(0, len(cells), 4):
+            lines.append("   ".join(cells[i : i + 4]))
+    return lines
+
+
+def _render_history(
+    records: list[dict[str, Any]], unicode: bool, hours: float, rows: int,
+    color: bool = False,
+    thresholds: dict[str, Any] | None = None,
+) -> list[str]:
+    th = thresholds or {}
+    n_gpus = max((len(r.get("gpus") or []) for r in records), default=0)
+    lines = [_section("History", unicode, color, f"last {hours:g}h, {len(records)} records")]
+    if not records:
+        return lines
+
+    def series(fn) -> list[float | None]:
+        return [_num(fn(r)) for r in records]
+
+    # (header, values, format, colour key, orange-card threshold)
+    columns: list[tuple[str, list[float | None], str, str, Any]] = [
+        ("CPU%", series(lambda r: _get(r, "cpu", "avg")), ".1f", "cpu", th.get("cpu_percent")),
+        ("Mem%", series(lambda r: _get(r, "memory", "percent")), ".1f", "memory", th.get("memory_percent")),
+    ]
+    for i in range(n_gpus):
+        columns.append(
+            (f"GPU{i}%", series(lambda r, i=i: _gpu_field(r, i, "util_percent")), ".0f",
+             "gpu", th.get("gpu_util_percent"))
+        )
+        columns.append(
+            (f"GMem{i}", series(lambda r, i=i: _gpu_field(r, i, "mem_percent")), ".0f",
+             "gpu_mem", th.get("gpu_memory_percent"))
+        )
+    columns += [
+        ("Load1", series(lambda r: _get(r, "load", "min1")), ".2f", "load", None),
+        ("NetIn", series(lambda r: _get(r, "network", "in_mbps", "avg")), ".2f", "net_in", th.get("network_mbps")),
+        ("NetOut", series(lambda r: _get(r, "network", "out_mbps", "avg")), ".2f", "net_out", th.get("network_mbps")),
+        ("DiskR", series(lambda r: _get(r, "disk_io", "read_mbps", "avg")), ".2f", "read", th.get("disk_io_mbps")),
+        ("DiskW", series(lambda r: _get(r, "disk_io", "write_mbps", "avg")), ".2f", "write", th.get("disk_io_mbps")),
+    ]
+
+    lines.append(_paint("Net and Disk in MB/s; table rows are evenly sampled records.", "muted", color))
+    if unicode:
+        # Sparklines over every record, bucketed to at most 60 columns.
+        lines.append("")
+        width = min(60, len(records))
+        for name, vals, spec, key, _thr in columns:
+            buckets: list[float | None] = []
+            for b in range(width):
+                chunk = [
+                    v
+                    for v in vals[b * len(vals) // width : (b + 1) * len(vals) // width]
+                    if v is not None
+                ]
+                buckets.append(sum(chunk) / len(chunk) if chunk else None)
+            nums = [v for v in vals if v is not None]
+            stats = (
+                f"avg {format(sum(nums) / len(nums), spec)}  max {format(max(nums), spec)}"
+                if nums
+                else "no data"
+            )
+            spark = _paint(f"{_sparkline(buckets):<{width}}", key, color)
+            lines.append(f"{_paint(f'{name:<7}', key, color)} {spark}  {stats}")
+
+    # Evenly sample at most `rows` records, always including the newest.
+    count = len(records)
+    picks = sorted({round(k * (count - 1) / max(1, rows - 1)) for k in range(min(rows, count))})
+    sep = " │ " if unicode else " | "
+    width = 11 + len(sep) + 7 * len(columns) - 1
+    lines.append("")
+    lines.append(
+        f"{'Time':<11}" + sep + " ".join(_paint(f"{name:>6}", key, color) for name, _, _, key, _ in columns)
+    )
+    lines.append(("─" if unicode else "-") * width)
+    for idx in picks:
+        t = _record_time(records[idx])
+        stamp = t.strftime("%m-%d %H:%M") if t else "?"
+        cells = " ".join(
+            _paint(f"{_fmt(vals[idx], spec):>6}", "warning", color)
+            if _level(vals[idx], thr, "") == "warning"
+            else f"{_fmt(vals[idx], spec):>6}"
+            for _, vals, spec, _, thr in columns
+        )
+        lines.append(_paint(f"{stamp:<11}", "muted", color) + _paint(sep, "muted", color) + cells)
+    return lines
+
+
+def render_text(
+    records: list[dict[str, Any]],
+    *,
+    style: str = "ascii",
+    view: str = "both",
+    hours: float = 1,
+    rows: int = 24,
+    title: str = "",
+    color: bool = False,
+    thresholds: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> str:
+    """Render history records as a console report (pure; unit-tested)."""
+    unicode = style == "unicode"
+    now = now or datetime.now(timezone.utc).astimezone()
+    heading = title or socket.gethostname()
+    host = socket.gethostname()
+    sub = "" if heading == host else (f"· {host}" if unicode else f"- {host}")
+    inner = f" {heading} " + _paint(sub, "muted", color) + " "
+    span = TEXT_WIDTH - 2
+    fill = max(0, span - len(_strip_ansi(inner)))
+    if unicode:
+        out = [
+            _paint("╭" + "─" * span + "╮", "cpu", color),
+            _paint("│", "cpu", color) + _paint(inner[: len(heading) + 2], "title", color)
+            + inner[len(heading) + 2 :] + " " * fill + _paint("│", "cpu", color),
+            _paint("╰" + "─" * span + "╯", "cpu", color),
+        ]
+    else:
+        out = ["=" * TEXT_WIDTH, inner.strip(), "=" * TEXT_WIDTH]
+    if not records:
+        out.append("No history records yet.")
+        return "\n".join(out) + "\n"
+    if view in ("latest", "both"):
+        out += _render_latest(records[-1], unicode, now, color, thresholds)
+    if view == "both":
+        out.append("")
+    if view in ("history", "both"):
+        out += _render_history(records, unicode, hours, rows, color, thresholds)
+    return "\n".join(out) + "\n"
+
+
+TEXT_USAGE: Final[str] = (
+    "usage: /text?view=latest|history|both&style=ascii|unicode&color=auto|on|off"
+    "&hours=1&rows=24\n"
+)
+
+
+@APP.get("/text")
+async def text_view(
+    view: str = "both",
+    style: str = "ascii",
+    color: str = "auto",
+    hours: float = 1,
+    rows: int = 24,
+) -> Response:
+    """Plain-text report for terminals: `curl http://<host>:8080/text`.
+
+    Colour defaults on for unicode and off for ascii; color=on/off overrides.
+    """
+    if (
+        view not in ("latest", "history", "both")
+        or style not in ("ascii", "unicode")
+        or color not in ("auto", "on", "off")
+    ):
+        return Response(content=TEXT_USAGE, status_code=400, media_type="text/plain")
+    hours = max(0.1, min(hours, 8760))
+    rows = max(1, min(rows, 500))
+    result = await asyncio.to_thread(_read_history, hours)
+    if isinstance(result, str):
+        return Response(
+            content=f"Failed to read history: {result}\n",
+            status_code=500,
+            media_type="text/plain",
+        )
+    records, _skipped, _truncated = result
+    body = render_text(
+        records,
+        style=style,
+        view=view,
+        hours=hours,
+        rows=rows,
+        title=str(_CONFIG.get("title") or ""),
+        color=color == "on" or (color == "auto" and style == "unicode"),
+        thresholds=_CONFIG.get("thresholds") or {},
+    )
+    return Response(content=body, media_type="text/plain; charset=utf-8")
 
 
 @APP.get("/")

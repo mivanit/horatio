@@ -115,6 +115,7 @@ again, don't put this on anything besides a trusted LAN!
 | `GET /api/history/settings`  | Current recording settings                  |
 | `POST /api/history/settings` | Update recording settings (password)        |
 | `GET /config.json`           | The config                                  |
+| `GET /text`                  | Console report: `curl http://<host>:8080/text` (query: `view` latest/history/both, `style` ascii/unicode, `color` auto/on/off (auto: on for unicode, in the dashboard's colours), `hours` default 1, `rows` default 24) |
 
 ## Layout
 

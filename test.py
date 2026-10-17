@@ -840,6 +840,38 @@ def test_mail_and_health_unit() -> None:
         )
 
 
+def test_text_view_unit() -> None:
+    """server.render_text: ascii stays 7-bit, unicode draws bars, empty and gappy input."""
+    print(f"\n{BOLD}render_text unit tests{RESET}\n")
+    import server
+
+    now = datetime.now(timezone.utc)
+    recs = [
+        {
+            "timestamp": (now - timedelta(minutes=10 * (3 - k))).isoformat(),
+            "cpu": {"avg": 10.0 * k, "max": 50.0},
+            "memory": {"used_gb": 4.0, "total_gb": 16.0, "percent": 25.0},
+            "gpus": [{"index": 0, "util_percent": 80.0, "mem_used_gb": None}],
+            "temps": {"GPU 0": 60.0, "Tctl": 45.0},
+            "ping": {"8.8.8.8": {"avg": None, "loss": 1.0}},
+        }
+        for k in range(4)
+    ]
+    recs[1] = {"timestamp": recs[1]["timestamp"]}  # a record missing every metric
+    ascii_out = server.render_text(recs, style="ascii", title="box")
+    check(ascii_out.isascii(), "ascii output is 7-bit")
+    check("GPU 0" in ascii_out and "  memory" in ascii_out and "DOWN" in ascii_out, "latest shows GPU util + memory and down ping")
+    check(ascii_out.count("\n") > 10 and "History" in ascii_out, "history table rendered")
+    uni = server.render_text(recs, style="unicode", view="latest", title="box")
+    check("█" in uni and "History" not in uni, "unicode latest-only has bars, no history")
+    hist = server.render_text(recs, view="history", rows=2)
+    check("Latest record" not in hist and hist.count(" | ") == 3, "history-only, rows capped", repr(hist.count(" | ")))
+    check("No history records" in server.render_text([]), "empty history")
+    colored = server.render_text(recs, style="unicode", color=True)
+    check("\033[38;2;59;130;246m" in colored, "colour mode uses the frontend CPU blue")
+    check("\033[" not in uni, "no escapes unless colour is on")
+
+
 def main() -> int:
     global passes, fails
     test_read_history_unit()
@@ -847,6 +879,7 @@ def main() -> int:
     test_process_history_unit()
     test_dedupe_fs_unit()
     test_mail_and_health_unit()
+    test_text_view_unit()
     port = free_port()
     glances_port = free_port()
     base = f"http://127.0.0.1:{port}"
@@ -974,6 +1007,24 @@ def main() -> int:
                 check(status == 404, f"GET {path} (raw) is 404", f"status={status}")
             except Exception as e:
                 fail(f"GET {path} (raw)", str(e))
+
+        # ── console text view ───────────────────────────────────────
+        for path, want_color in (
+            ("/text", False),
+            ("/text?style=unicode", True),
+            ("/text?style=unicode&color=off&view=history", False),
+        ):
+            try:
+                r = httpx.get(f"{base}{path}", timeout=10)
+                check(
+                    r.status_code == 200 and ("\033[" in r.text) == want_color,
+                    f"GET {path}",
+                    f"status={r.status_code}",
+                )
+            except Exception as e:
+                fail(f"GET {path}", str(e))
+        r = httpx.get(f"{base}/text?style=fancy", timeout=10)
+        check(r.status_code == 400, "GET /text?style=fancy is 400", f"status={r.status_code}")
 
         # ── file-backed endpoints are advertised to the frontend ─────
         print(f"\n{BOLD}Endpoint listing{RESET}\n")
