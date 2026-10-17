@@ -864,12 +864,26 @@ def test_text_view_unit() -> None:
     check(ascii_out.count("\n") > 10 and "History" in ascii_out, "history table rendered")
     uni = server.render_text(recs, style="unicode", view="latest", title="box")
     check("█" in uni and "History" not in uni, "unicode latest-only has bars, no history")
-    hist = server.render_text(recs, view="history", rows=2)
-    check("Latest record" not in hist and hist.count(" | ") == 3, "history-only, rows capped", repr(hist.count(" | ")))
+    hist = server.render_text(recs, style="ascii", view="history", rows=2, table=True)
+    check("Snapshot" not in hist and hist.count(" | ") == 3, "history-only, rows capped", repr(hist.count(" | ")))
     check("No history records" in server.render_text([]), "empty history")
     colored = server.render_text(recs, style="unicode", color=True)
     check("\033[38;2;59;130;246m" in colored, "colour mode uses the frontend CPU blue")
     check("\033[" not in uni, "no escapes unless colour is on")
+    check(" | " not in server.render_text(recs, style="ascii"), "no table unless table=1")
+    wide = server.render_text(recs, width=180)
+    check(max(len(server._strip_ansi(x)) for x in wide.splitlines()) <= 180
+          and any("Snapshot" in x and "History" in x for x in wide.splitlines()),
+          "width=180 puts snapshot and history side by side within the width")
+    narrow = server.render_text(recs, width=80)
+    check(max(len(x) for x in narrow.splitlines()) <= 80, "width=80 stays within 80 columns")
+    check(server._sparkline([72.2, 74.0], lo=0, hi=100) == "▆▆", "percent rows use a fixed 0-100 scale")
+    check(server._sparkline([0.0, 0.0], lo=0, hi=100) != server._sparkline([100.0, 100.0], lo=0, hi=100),
+          "flat 0% and flat 100% look different")
+    check(server.auto_history_hours(80, "both", True, 600) == 3.0
+          and server.auto_history_hours(80, "both", True, 60) == 1.0
+          and 1.0 < server.auto_history_hours(80, "both", True, 120) < 3.0,
+          "auto history window stays in 1-3 h and scales with the record interval")
 
 
 def main() -> int:
@@ -1010,7 +1024,8 @@ def main() -> int:
 
         # ── console text view ───────────────────────────────────────
         for path, want_color in (
-            ("/text", False),
+            ("/text", True),
+            ("/text?style=simple", False),
             ("/text?style=unicode", True),
             ("/text?style=unicode&color=off&view=history", False),
         ):
@@ -1023,6 +1038,10 @@ def main() -> int:
                 )
             except Exception as e:
                 fail(f"GET {path}", str(e))
+        r = httpx.get(f"{base}/text?style=simple", timeout=10)
+        check(r.text.isascii(), "GET /text?style=simple is 7-bit")
+        r = httpx.get(f"{base}/help", timeout=10)
+        check(r.status_code == 200 and "/text" in r.text and "/api/history" in r.text, "GET /help")
         r = httpx.get(f"{base}/text?style=fancy", timeout=10)
         check(r.status_code == 400, "GET /text?style=fancy is 400", f"status={r.status_code}")
 
