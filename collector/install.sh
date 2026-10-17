@@ -42,8 +42,8 @@ if ! command -v smartctl > /dev/null; then
 WARN
 fi
 
-install --mode 0755 --owner root --group root "$S/health-collect.sh" /usr/local/bin/health-collect.sh
-install --mode 0755 --owner root --group root "$S/health-sensors.sh" /usr/local/bin/health-sensors.sh
+install -D --mode 0755 --owner root --group root "$S/health-collect.sh" /usr/local/bin/health-collect.sh
+install -D --mode 0755 --owner root --group root "$S/health-sensors.sh" /usr/local/bin/health-sensors.sh
 # Per-machine policy (SEL fault phrases, SAS defect baselines, fan ceiling,
 # backup timer). Installed only if absent so a box's own tuning survives
 # re-runs. Source: this checkout's health-config.json (gitignored, this box's)
