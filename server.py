@@ -1061,11 +1061,16 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
                 for target in PING_TARGETS:
                     ping_attempts[target] += 1
                 try:
+                    # Live (/text) pings get a short leash: the request waits on
+                    # this, and a dead target would otherwise hold it 2-8 s.
                     ping_results = await asyncio.wait_for(
                         asyncio.gather(
-                            *(asyncio.to_thread(_run_ping, t) for t in PING_TARGETS)
+                            *(
+                                asyncio.to_thread(_run_ping, t, 1 if live else 2)
+                                for t in PING_TARGETS
+                            )
                         ),
-                        timeout=8,
+                        timeout=2.5 if live else 8,
                     )
                     for target, latency in zip(PING_TARGETS, ping_results):
                         if latency is not None:
@@ -3111,7 +3116,7 @@ def _fmt(value: Any, spec: str = ".1f", none: str = "-") -> str:
 
 
 def _bar(
-    percent: Any, unicode: bool, key: str = "cpu", color: bool = False,
+    percent: Any, unicode: bool, key: str = "cpu", color: bool | str = False,
     width: int = TEXT_BAR_WIDTH,
 ) -> str:
     p = _num(percent)
@@ -3122,12 +3127,12 @@ def _bar(
 
 
 def _range_bar(
-    lo: Any, mid: Any, hi: Any, unicode: bool, key: str, color: bool,
+    lo: Any, mid: Any, hi: Any, unicode: bool, key: str, color: bool | str,
     width: int = TEXT_BAR_WIDTH,
 ) -> str:
     """A 0-100 track with min..max filled and the median marked."""
-    vals = [_num(lo), _num(mid), _num(hi)]
-    if any(v is None for v in vals):
+    vals = [v for v in (_num(lo), _num(mid), _num(hi)) if v is not None]
+    if len(vals) < 3:
         return _bar(None, unicode, key, color, width)
     a, m, b = (round(max(0.0, min(v, 100.0)) / 100 * (width - 1)) for v in vals)
     track, span, mark = ("░", "▬", "◆") if unicode else (" ", "-", "|")
@@ -3266,7 +3271,7 @@ def _gpu_field(record: dict[str, Any], i: int, field: str) -> Any:
     return gpus[i].get(field) if i < len(gpus) and isinstance(gpus[i], dict) else None
 
 
-def _section(name: str, unicode: bool, color: bool, extra: str = "", width: int = TEXT_WIDTH) -> str:
+def _section(name: str, unicode: bool, color: bool | str, extra: str = "", width: int = TEXT_WIDTH) -> str:
     dash = "─" if unicode else "-"
     head = f"{dash * 2} {_paint(name, 'title', color)} "
     tail = f" {extra}" if extra else ""
@@ -3295,7 +3300,7 @@ def _render_latest(
     record: dict[str, Any],
     unicode: bool,
     now: datetime,
-    color: bool = False,
+    color: bool | str = False,
     thresholds: dict[str, Any] | None = None,
     width: int = TEXT_WIDTH,
 ) -> list[tuple[str, str]]:
@@ -3343,7 +3348,8 @@ def _render_latest(
 
     load = record.get("load") or {}
     cores = os.cpu_count() or 1
-    load_pct = None if _num(load.get("min1")) is None else 100 * _num(load.get("min1")) / cores
+    load1 = _num(load.get("min1"))
+    load_pct = None if load1 is None else 100 * load1 / cores
     row(
         "Load",
         load_pct,
@@ -3396,7 +3402,9 @@ def _render_latest(
     for i, (target, p) in enumerate(pings):
         key = f"ping_{i % 3}"
         avg, loss = _num(p.get("avg")), _num(p.get("loss")) or 0.0
-        dot = _paint(f"{'●' if unicode else '*'} {target} ", key, color)
+        # Target's colour on the marker, the address muted, the measurement in
+        # the target's colour (orange over the threshold), so they read apart.
+        dot = _paint("●" if unicode else "*", key, color) + " " + _paint(target, "muted", color) + " "
         if avg is None:
             cells.append(dot + _paint("DOWN", "error", color))
             continue
@@ -3461,16 +3469,19 @@ def auto_history_hours(width: int, view: str, unicode: bool, record_interval: fl
 
 def _render_history(
     records: list[dict[str, Any]], unicode: bool, hours: float, rows: int,
-    color: bool = False,
+    color: bool | str = False,
     thresholds: dict[str, Any] | None = None,
     table: bool = False,
     width: int = TEXT_WIDTH,
     now: datetime | None = None,
-) -> tuple[str, list[tuple[str, str]], list[str]]:
-    """(section header, sparkline rows as (slot, line), trailing lines).
+    sparks: bool = True,
+) -> tuple[str, list[tuple[str, str]], list[str], list[str]]:
+    """(section header, sparkline rows as (slot, line), footer, table lines).
 
     Rows follow the snapshot's order; slots match _render_latest's so two-column
-    mode can pair each row with its snapshot line.
+    mode can pair each row with its snapshot line. The footer is the time axis
+    and legend. sparks=False leaves out the sparklines and axis (a requested
+    table that wouldn't fit otherwise takes their place).
     """
     th = thresholds or {}
     labels = f"{'min':>7} {'mean':>7} {'max':>7}"
@@ -3479,7 +3490,7 @@ def _render_history(
         _paint(labels, "muted", color), width,
     )
     if not records:
-        return header, [], [_paint("No history records yet.", "muted", color)]
+        return header, [], [_paint("No history records yet.", "muted", color)], []
     n_gpus = max((len(r.get("gpus") or []) for r in records), default=0)
 
     def series(fn) -> list[float | None]:
@@ -3588,20 +3599,19 @@ def _render_history(
         centre = at + len(mid) // 2
         rule = rule[:centre] + ("┬" if unicode else "+") + rule[centre + 1:]
     deg = "°C" if unicode else "C"
-    tail = [
-        " " * 8 + _paint(rule, "muted", color),
-        " " * 8 + _paint(ticks, "muted", color),
-        _paint(f"Blank = no records. Net/Disk MB/s, MaxT = hottest sensor {deg}.", "muted", color),
-    ]
+    legend = _paint(f"Blank = no records. Net/Disk MB/s, MaxT = hottest sensor {deg}.", "muted", color)
+    foot = [" " * 8 + _paint(rule, "muted", color), " " * 8 + _paint(ticks, "muted", color), legend]
+    if not sparks:
+        spark_rows, foot = [], [legend]
     if not table:
-        return header, spark_rows, tail
+        return header, spark_rows, foot, []
 
     # Evenly sample at most `rows` records, always including the newest.
     count = len(records)
     picks = sorted({round(k * (count - 1) / max(1, rows - 1)) for k in range(min(rows, count))})
     sep = " │ " if unicode else " | "
     table_w = 14 + len(sep) + 7 * len(columns) - 1
-    tail.append("")
+    tail = [""] if sparks else []
     tail.append(
         f"{'Time':<14}" + sep + " ".join(_paint(f"{c.name[:6]:>6}", c.key, color) for c in columns)
     )
@@ -3616,7 +3626,7 @@ def _render_history(
             for c in columns
         )
         tail.append(_paint(f"{stamp:<14}", "muted", color) + _paint(sep, "muted", color) + cells)
-    return header, spark_rows, tail
+    return header, spark_rows, foot, tail
 
 
 def render_text(
@@ -3633,6 +3643,7 @@ def render_text(
     live: dict[str, Any] | None = None,
     width: int = TEXT_WIDTH,
     now: datetime | None = None,
+    sparks: bool = True,
 ) -> str:
     """Render history records as a console report (pure; unit-tested).
 
@@ -3665,18 +3676,19 @@ def render_text(
             left = _render_latest(live or records[-1], unicode, now, color, thresholds, col_w)
         else:
             left = [("", "No data yet.")]
-    hist: tuple[str, list[tuple[str, str]], list[str]] | None = None
+    hist: tuple[str, list[tuple[str, str]], list[str], list[str]] | None = None
     if view in ("history", "both"):
-        hist = _render_history(records, unicode, hours, rows, color, thresholds, table, col_w, now)
+        hist = _render_history(records, unicode, hours, rows, color, thresholds, table, col_w, now, sparks)
 
     if two_col and hist:
-        # Snapshot on the left, history on the right. Each history row goes beside the snapshot line with its slot when that
-        # line is still ahead, else on the next free line; the legend follows.
-        header, spark_rows, tail = hist
+        # Snapshot on the left, history on the right. Each history row goes
+        # beside the snapshot line with its slot when that line is still ahead,
+        # else on the next free line; the axis and legend follow.
+        header, spark_rows, foot, table_lines = hist
         index = {slot: i for i, (slot, _) in enumerate(left) if slot}
         right = [header] + [""] * (len(left) - 1)
         pos = 1
-        for slot, line in spark_rows + [("", t) for t in tail[:3]]:
+        for slot, line in spark_rows + [("", t) for t in foot]:
             at = index.get(slot, -1)
             at = at if at >= pos else pos
             while at < len(right) and right[at]:
@@ -3689,14 +3701,14 @@ def render_text(
         rows_left = [line for _, line in left] + [""] * len(extra)
         for a, b in zip(rows_left, right):
             out.append(a + " " * max(0, col_w - len(_strip_ansi(a))) + "   " + b)
-        out += tail[3:]  # the optional table, full width below
+        out += table_lines  # the optional table, full width below
     else:
         out += [line for _, line in left]
         if left and hist:
             out.append("")
         if hist:
-            header, spark_rows, tail = hist
-            out += [header] + [line for _, line in spark_rows] + tail
+            header, spark_rows, foot, table_lines = hist
+            out += [header] + [line for _, line in spark_rows] + foot + table_lines
     return "\n".join(out) + "\n"
 
 
@@ -3740,7 +3752,9 @@ LIVE VIEW (tui.py)
   width  terminal width in columns, default 80 (60 to 400). The server can't see
          your terminal, so pass it:  curl "http://<host>:8080/text?width=$COLUMNS"
          At 160 or wider, the unicode report shows snapshot and history side by side.
-  height trim to N lines (drops the table first, then cuts with a note)
+  height trim to N lines: a requested table shrinks to fit, and if it still
+         doesn't fit it replaces the sparklines; anything still over is cut,
+         with a note saying how much
   live   0 to use the newest history record instead of sampling now
   table  1 to add a table of evenly sampled records (default off)
   rows   max table rows, default 24 (1 to 500)
@@ -3817,6 +3831,7 @@ async def text_view(
         )
     hours = max(0.1, min(hours, 8760))
     rows = max(1, min(rows, 500))
+    requested_rows = rows
     result = await asyncio.to_thread(_read_history_cached, hours)
     if isinstance(result, str):
         return Response(
@@ -3837,7 +3852,7 @@ async def text_view(
         color, "24" if style == "unicode" else False
     )
 
-    def render(with_table: bool) -> str:
+    def render(with_table: bool, sparks: bool = True) -> str:
         return render_text(
             records,
             style=style,
@@ -3850,15 +3865,25 @@ async def text_view(
             table=with_table,
             live=sample,
             width=max(TEXT_MIN_WIDTH, min(width, 400)),
+            sparks=sparks,
         )
 
     body = render(table)
     if height is not None:
         height = max(5, height)
         if table and body.count("\n") > height:
-            # Asked for the table: shrink it to the rows that fit before cutting.
-            rows = max(3, rows - (body.count("\n") - height))
+            # Asked for the table: shrink it to the rows that fit (at least 3)
+            # before cutting. It shows min(rows, records) rows, so shrink that.
+            shown = min(rows, len(records))
+            rows = max(3, shown - (body.count("\n") - height))
             body = render(True)
+            if body.count("\n") > height:
+                # Still too tall: the table replaces the sparklines, then fills
+                # whatever room that frees.
+                body = render(True, sparks=False)
+                over = body.count("\n") - height  # negative = spare lines
+                rows = max(3, min(requested_rows, min(rows, len(records)) - over))
+                body = render(True, sparks=False)
         body = _fit_height(body, height, depth)
     return Response(content=body, media_type="text/plain; charset=utf-8")
 

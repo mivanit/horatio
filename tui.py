@@ -37,6 +37,7 @@ plain frame and exits.
 from __future__ import annotations
 
 import argparse
+import http.client
 import locale
 import os
 import re
@@ -233,7 +234,7 @@ def main() -> int:
         cols, _ = shutil.get_terminal_size((100, 50))
         try:
             sys.stdout.write(fetch(url(cols, None)))
-        except OSError as e:
+        except (OSError, http.client.HTTPException) as e:
             print(f"horatio-tui: {args.url}: {e}", file=sys.stderr)
             return 1
         return 0
@@ -254,7 +255,7 @@ def main() -> int:
                     try:
                         frame, error = fetch(url(cols, rows)), ""
                         fetched, backoff = now, interval
-                    except OSError as e:
+                    except (OSError, http.client.HTTPException) as e:
                         error, backoff = str(e), min(10.0, backoff * 2)
                     next_fetch = now + backoff
                 age = f"{time.monotonic() - fetched:.0f}s ago" if fetched else "never"
