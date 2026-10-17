@@ -3717,8 +3717,8 @@ QUICK START
 LIVE VIEW (tui.py)
   Standard library only (Python 3.8+, Linux/macOS). Detects terminal size,
   colour depth (NO_COLOR, FORCE_COLOR, COLORTERM, TERM) and UTF-8, and redraws
-  every 2 s (--interval). Keys: q quit, r refresh, v cycle view, t table,
-  +/- history window, ? keys. --color on|256|16|off and --style override the
+  every 2 s (--interval). Keys, listed at the bottom: q quit, r refresh,
+  v cycle view, t table, +/- history window. --color on|256|16|off and --style override the
   detection; --once prints a single frame. Piping from curl runs whatever the
   server sends: fine on your own network, or download it and read it first.
 

@@ -14,7 +14,7 @@ Standard library only, so it runs with no install:
 The server renders; this script picks the width, height, colour depth and
 character set for the terminal, polls, and redraws. Keys: q quit, r refresh,
 v cycle view (both / snapshot / history), t table, + / - history window,
-? help. Not a tty (piped or redirected): prints one plain frame and exits.
+listed at the bottom like nano. Not a tty (piped or redirected): prints one plain frame and exits.
 """
 
 from __future__ import annotations
@@ -128,12 +128,30 @@ class Terminal:
         return os.read(self.fd, 1).decode(errors="ignore") if ready else None
 
 
+# The bottom bar, nano style: key in reverse video, then what it does.
+KEYS = (("q", "Quit"), ("r", "Refresh"), ("v", "View"), ("t", "Table"), ("+", "Longer"), ("-", "Shorter"))
+BAR_ROWS = 2  # status line + key list
+
+
+def key_bar(cols: int) -> str:
+    """`q Quit  r Refresh ...` with each key highlighted, cut to fit."""
+    out, used = [], 0
+    for key, label in KEYS:
+        cell = f" {key} {label} "
+        if used + len(cell) > cols:
+            break
+        out.append(f"\x1b[7m {key} \x1b[0m{label} ")
+        used += len(cell)
+    return "".join(out)
+
+
 def draw(frame: str, status: str, cols: int, rows: int) -> None:
-    lines = frame.rstrip("\n").split("\n")[: rows - 1]
+    lines = frame.rstrip("\n").split("\n")[: rows - BAR_ROWS]
     out = ["\x1b[?2026h\x1b[H"]  # synchronized update (ignored where unsupported), home
     out += [clip(line, cols) + "\x1b[K\n" for line in lines]
     out.append("\x1b[J")
-    out.append(f"\x1b[{rows};1H\x1b[7m{clip(status, cols).ljust(cols)}\x1b[0m\x1b[?2026l")
+    out.append(f"\x1b[{rows - 1};1H\x1b[7m{clip(status, cols).ljust(cols)}\x1b[0m")
+    out.append(f"\x1b[{rows};1H{key_bar(cols)}\x1b[K\x1b[?2026l")
     sys.stdout.write("".join(out))
     sys.stdout.flush()
 
@@ -163,7 +181,7 @@ def main() -> int:
     def url(cols: int, rows: int | None) -> str:
         return build_url(args.url, {
             "view": VIEWS[state["view"]], "style": style, "color": color,
-            "width": max(60, cols), "height": None if rows is None else max(5, rows - 1),
+            "width": max(60, cols), "height": None if rows is None else max(5, rows - BAR_ROWS),
             "hours": state["hours"], "table": 1 if state["table"] else None,
         })
 
@@ -180,7 +198,6 @@ def main() -> int:
     signal.signal(signal.SIGWINCH, lambda *_: resized.__setitem__(0, True))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     frame, error, fetched, backoff = "", "", 0.0, interval
-    show_help = False
     try:
         with Terminal() as term:
             next_fetch = 0.0
@@ -196,21 +213,15 @@ def main() -> int:
                         error, backoff = str(e), min(10.0, backoff * 2)
                     next_fetch = now + backoff
                 age = f"{time.monotonic() - fetched:.0f}s ago" if fetched else "never"
-                if show_help:
-                    status = " q quit  r refresh  v view  t table  +/- history window  ? close help"
-                else:
-                    hours = f"{state['hours']:g}h" if state["hours"] else "auto window"
-                    status = (f" {args.url}  {VIEWS[state['view']]}  {hours}  {color}/{style}"
-                              f"  updated {age}  {'ERROR: ' + error if error else ''}  ? keys")
+                hours = f"{state['hours']:g}h" if state["hours"] else "auto window"
+                status = (f" {args.url}  {VIEWS[state['view']]}  {hours}  {color}/{style}"
+                          f"  updated {age}  {'ERROR: ' + error if error else ''}")
                 draw(frame or "connecting...", status, cols, rows)
                 k = term.key(min(0.5, max(0.0, next_fetch - time.monotonic())))
                 if not k:
                     continue
                 if k in ("q", "Q", "\x03"):
                     return 0
-                if k == "?":
-                    show_help = not show_help
-                    continue
                 if k == "v":
                     state["view"] = (state["view"] + 1) % len(VIEWS)
                 elif k == "t":
