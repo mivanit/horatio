@@ -3,6 +3,22 @@
 # requires-python = ">=3.8"
 # dependencies = []
 # ///
+#
+# ============================================================================
+#  horatio live terminal view
+#
+#  You're reading the script itself. To run it, pipe it into Python instead:
+#
+#      curl -fsS http://<host>:8080/tui.py | python3 -
+#
+#  or save it and run it (read it first if you don't trust the network):
+#
+#      curl -fsS -o tui.py http://<host>:8080/tui.py && python3 tui.py
+#
+#  On the box itself, from the horatio checkout:   python3 tui.py
+#  Needs Python 3.8+ on Linux or macOS (on Windows, use WSL). Nothing to install.
+#  Keys are shown at the bottom of the screen; q quits.
+# ============================================================================
 """Live terminal view of a horatio server: the /text report, redrawn in place.
 
 Standard library only, so it runs with no install:
@@ -14,7 +30,8 @@ Standard library only, so it runs with no install:
 The server renders; this script picks the width, height, colour depth and
 character set for the terminal, polls, and redraws. Keys: q quit, r refresh,
 v cycle view (both / snapshot / history), t table, + / - history window,
-listed at the bottom like nano. Not a tty (piped or redirected): prints one plain frame and exits.
+listed at the bottom like nano. Not a tty (piped or redirected): prints one
+plain frame and exits.
 """
 
 from __future__ import annotations
@@ -268,3 +285,16 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+# ============================================================================
+#  End of the horatio terminal view. To run it rather than read it:
+#
+#      curl -fsS http://<host>:8080/tui.py | python3 -
+#
+#  Options: python3 tui.py --help   (--interval, --color, --style, --hours,
+#  --once). Plain one-off report without this script:
+#
+#      curl "http://<host>:8080/text?width=$COLUMNS"
+#
+#  Full guide: http://<host>:8080/help
+# ============================================================================

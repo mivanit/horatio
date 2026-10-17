@@ -3720,7 +3720,10 @@ LIVE VIEW (tui.py)
   every 2 s (--interval). Keys, listed at the bottom: q quit, r refresh,
   v cycle view, t table, +/- history window. --color on|256|16|off and --style override the
   detection; --once prints a single frame. Piping from curl runs whatever the
-  server sends: fine on your own network, or download it and read it first.
+  server sends: fine on your own network. Otherwise download, read, then run:
+    curl -fsS -o tui.py http://<host>:8080/tui.py && python3 tui.py
+  From a horatio checkout: python3 tui.py on the box itself (finds the local
+  server), or python3 tui.py http://<host>:8080 (or set HORATIO_URL).
 
 /text  console report built from the history file
   view   both (default) | latest | history
@@ -3908,7 +3911,10 @@ async def tui_script(request: Request) -> Response:
     The copy served has SERVED_URL set to the address it was fetched from, so
     it connects back here with no argument."""
     source = (Path(__file__).parent / "tui.py").read_text()
-    source = source.replace('SERVED_URL = ""', f"SERVED_URL = {_base_url(request)!r}", 1)
+    base = _base_url(request)
+    source = source.replace('SERVED_URL = ""', f"SERVED_URL = {base!r}", 1)
+    # The usage comments too, so someone who just curls it sees commands that work.
+    source = source.replace("http://<host>:8080", base)
     return Response(content=source, media_type="text/x-python; charset=utf-8")
 
 

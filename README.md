@@ -30,7 +30,7 @@ It offers nethogs and sysstat until they are installed (`--no-optional` silences
 Then edit `config.json` (created from `config.example.json`: title, ping targets, thresholds)
 and `sudo systemctl restart horatio`; with the collector, also the collector's config at
 `/etc/horatio/config.json` (see the collector README; it takes effect on the next 15-min run).
-Open `http://<host>:8080`, or from a terminal `curl http://<host>:8080/text` (`/help` lists the options and API). For a live view that updates in place, run `python3 tui.py` from a checkout on the box (or `python3 tui.py http://<host>:8080`), or with nothing installed `curl -fsS http://<host>:8080/tui.py | python3 -`. The served copy already knows its server, and `/help` shows the command with the real address. It needs only the standard library; it runs whatever the server sends, so on an untrusted network download and read it first. The checkout can live anywhere writable by the user who runs it (no
+Open `http://<host>:8080`, or from a terminal `curl http://<host>:8080/text` (`/help` lists the options and API). For a live terminal view, see [Terminal](#terminal). The checkout can live anywhere writable by the user who runs it (no
 spaces in the path); the service file is rendered from `horatio.service` with that path and user.
 
 After install, `uv run python server.py --set-password` sets the password for the raw history
@@ -56,6 +56,28 @@ and `logs/` are never touched.
 
 Removes the service, the collector's units, scripts and snapshots. The checkout, its
 `config.json`, `logs/` and `/etc/horatio/config.json` stay; delete them by hand.
+
+## Terminal
+
+Two ways to view a box from a terminal, both without a browser:
+
+**One-off report.** Prints the current snapshot and recent history, then exits:
+
+```bash
+curl "http://<host>:8080/text?width=$COLUMNS"     # colour, unicode
+curl http://<host>:8080/text?style=simple         # plain ASCII, for scripts and agents
+```
+
+**Live view (`tui.py`).** Fills the terminal and redraws every 2 s. Keys are listed at the bottom (q quits, v switches view, t table, +/- history window). It detects terminal size, colour depth and UTF-8; `--color` and `--style` override. Standard library only, Python 3.8+, Linux or macOS.
+
+- **From anywhere, nothing installed.** The box serves the script, and the served copy already knows the box's address:
+  ```bash
+  curl -fsS http://<host>:8080/tui.py | python3 -
+  ```
+  This runs whatever the server sends, which is fine on your own network. Otherwise save it, read it, then run it: `curl -fsS -o tui.py http://<host>:8080/tui.py && python3 tui.py`.
+- **From a horatio checkout.** `python3 tui.py` on the box itself finds the local server (the port comes from the service file, else 8080). Elsewhere, `python3 tui.py http://<host>:8080`, or set `HORATIO_URL`.
+
+`http://<host>:8080/help` has the full list of options, with the box's real address filled in.
 
 ## Configuration
 
