@@ -7,9 +7,9 @@
 
 Standard library only, so it runs with no install:
 
-    curl -s http://<host>:8080/tui.py | python3 - http://<host>:8080
-    python3 tui.py http://<host>:8080          # from a horatio checkout
-    python3 tui.py                             # this box (localhost:8080)
+    curl -fsS http://<host>:8080/tui.py | python3 -   # knows its server
+    python3 tui.py http://<host>:8080                 # from a horatio checkout
+    python3 tui.py                                    # this box's horatio
 
 The server renders; this script picks the width, height, colour depth and
 character set for the terminal, polls, and redraws. Keys: q quit, r refresh,
@@ -31,6 +31,9 @@ import time
 import urllib.parse
 import urllib.request
 
+# Filled in by the server when it serves this file (GET /tui.py), so a
+# downloaded copy already knows where it came from.
+SERVED_URL = ""
 VIEWS = ("both", "latest", "history")
 HOURS_STEPS = (0.5, 1, 2, 3, 6, 12, 24, 48, 168)
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -61,6 +64,25 @@ def detect(env: dict, isatty: bool, encoding: str) -> tuple[str, str]:
     utf8 = encoding.lower().replace("-", "") in ("utf8",)
     style = "unicode" if utf8 and term != "linux" else "ascii"
     return style, color
+
+
+def default_url(unit: str = "/etc/systemd/system/horatio.service") -> str:
+    """Where to connect when no URL is given: $HORATIO_URL, else the server
+    this copy was downloaded from, else this box's horatio (port from its
+    systemd unit's --port, default 8080)."""
+    if os.environ.get("HORATIO_URL"):
+        return os.environ["HORATIO_URL"]
+    if SERVED_URL:
+        return SERVED_URL
+    port = 8080
+    try:
+        with open(unit) as f:
+            m = re.search(r"--port[= ](\d+)", f.read())
+        if m:
+            port = int(m.group(1))
+    except OSError:
+        pass
+    return f"http://localhost:{port}"
 
 
 def _has_tty() -> bool:
@@ -133,8 +155,9 @@ KEYS = (("q", "Quit"), ("r", "Refresh"), ("v", "View"), ("t", "Table"), ("+", "L
 BAR_ROWS = 2  # status line + key list
 
 
-def key_bar(cols: int) -> str:
-    """`q Quit  r Refresh ...` with each key highlighted, cut to fit."""
+def key_bar(cols: int, right: str = "") -> str:
+    """`q Quit  r Refresh ...` with each key highlighted, cut to fit, and
+    `right` (the server) right-aligned when there's room."""
     out, used = [], 0
     for key, label in KEYS:
         cell = f" {key} {label} "
@@ -142,30 +165,34 @@ def key_bar(cols: int) -> str:
             break
         out.append(f"\x1b[7m {key} \x1b[0m{label} ")
         used += len(cell)
+    if right and used + len(right) + 2 <= cols:
+        out.append(" " * (cols - used - len(right) - 1) + f"\x1b[2m{right}\x1b[0m")
     return "".join(out)
 
 
-def draw(frame: str, status: str, cols: int, rows: int) -> None:
+def draw(frame: str, status: str, cols: int, rows: int, host: str = "") -> None:
     lines = frame.rstrip("\n").split("\n")[: rows - BAR_ROWS]
     out = ["\x1b[?2026h\x1b[H"]  # synchronized update (ignored where unsupported), home
     out += [clip(line, cols) + "\x1b[K\n" for line in lines]
     out.append("\x1b[J")
     out.append(f"\x1b[{rows - 1};1H\x1b[7m{clip(status, cols).ljust(cols)}\x1b[0m")
-    out.append(f"\x1b[{rows};1H{key_bar(cols)}\x1b[K\x1b[?2026l")
+    out.append(f"\x1b[{rows};1H{key_bar(cols, host)}\x1b[K\x1b[?2026l")
     sys.stdout.write("".join(out))
     sys.stdout.flush()
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("url", nargs="?", default="http://localhost:8080",
-                        help="horatio server (default http://localhost:8080)")
+    parser.add_argument("url", nargs="?", default=None,
+                        help="horatio server (default: $HORATIO_URL, the server this was "
+                             "downloaded from, or this box's horatio)")
     parser.add_argument("--interval", type=float, default=2.0, help="seconds between refreshes (min 1)")
     parser.add_argument("--color", choices=("on", "256", "16", "off"), help="override colour detection")
     parser.add_argument("--style", choices=("unicode", "ascii", "simple"), help="override character set")
     parser.add_argument("--hours", type=float, help="history window (default: the server's 1-3 h)")
     parser.add_argument("--once", action="store_true", help="print one frame and exit")
     args = parser.parse_args()
+    args.url = args.url or default_url()
 
     try:
         locale.setlocale(locale.LC_ALL, "")
@@ -194,6 +221,7 @@ def main() -> int:
             return 1
         return 0
 
+    host = urllib.parse.urlsplit(args.url).netloc or args.url
     resized = [True]
     signal.signal(signal.SIGWINCH, lambda *_: resized.__setitem__(0, True))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
@@ -214,9 +242,9 @@ def main() -> int:
                     next_fetch = now + backoff
                 age = f"{time.monotonic() - fetched:.0f}s ago" if fetched else "never"
                 hours = f"{state['hours']:g}h" if state["hours"] else "auto window"
-                status = (f" {args.url}  {VIEWS[state['view']]}  {hours}  {color}/{style}"
+                status = (f" {VIEWS[state['view']]}  {hours}  {color}/{style}"
                           f"  updated {age}  {'ERROR: ' + error if error else ''}")
-                draw(frame or "connecting...", status, cols, rows)
+                draw(frame or f"connecting to {args.url} ...", status, cols, rows, host)
                 k = term.key(min(0.5, max(0.0, next_fetch - time.monotonic())))
                 if not k:
                     continue

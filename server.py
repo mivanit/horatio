@@ -3311,7 +3311,7 @@ def _render_latest(
         return _section(name, unicode, color, extra, width)
 
     then = _record_time(record)
-    when = then.strftime("%Y-%m-%d %H:%M %Z") if then else "?"
+    when = then.strftime("%Y-%m-%d %H:%M:%S %Z") if then else "?"
     deg = "°C" if unicode else " C"
     add(sec("Snapshot", f"{when} " + _paint(f"({_age(then, now)})", "muted", color)), "@header")
 
@@ -3600,22 +3600,22 @@ def _render_history(
     count = len(records)
     picks = sorted({round(k * (count - 1) / max(1, rows - 1)) for k in range(min(rows, count))})
     sep = " │ " if unicode else " | "
-    table_w = 11 + len(sep) + 7 * len(columns) - 1
+    table_w = 14 + len(sep) + 7 * len(columns) - 1
     tail.append("")
     tail.append(
-        f"{'Time':<11}" + sep + " ".join(_paint(f"{c.name[:6]:>6}", c.key, color) for c in columns)
+        f"{'Time':<14}" + sep + " ".join(_paint(f"{c.name[:6]:>6}", c.key, color) for c in columns)
     )
     tail.append(("─" if unicode else "-") * table_w)
     for idx in picks:
         t = _record_time(records[idx])
-        stamp = t.strftime("%m-%d %H:%M") if t else "?"
+        stamp = t.strftime("%m-%d %H:%M:%S") if t else "?"
         cells = " ".join(
             _paint(f"{_fmt(c.values[idx], c.spec):>6}", "warning", color)
             if _level(c.values[idx], c.threshold, "") == "warning"
             else f"{_fmt(c.values[idx], c.spec):>6}"
             for c in columns
         )
-        tail.append(_paint(f"{stamp:<11}", "muted", color) + _paint(sep, "muted", color) + cells)
+        tail.append(_paint(f"{stamp:<14}", "muted", color) + _paint(sep, "muted", color) + cells)
     return header, spark_rows, tail
 
 
@@ -3711,8 +3711,8 @@ Horatio: system monitor for this machine. Plain-text help, for people and agents
 QUICK START
   curl "http://<host>:8080/text?width=$COLUMNS"   # colour report: live snapshot + history
   curl http://<host>:8080/text?style=simple      # plain ASCII, no colour (best for agents/logs)
-  curl -s http://<host>:8080/tui.py | python3 - http://<host>:8080   # live, auto-updating view
-  python3 tui.py http://<host>:8080              # the same, from a horatio checkout
+  curl -fsS http://<host>:8080/tui.py | python3 -   # live, auto-updating view
+  python3 tui.py                                 # the same, from a horatio checkout on the box
 
 LIVE VIEW (tui.py)
   Standard library only (Python 3.8+, Linux/macOS). Detects terminal size,
@@ -3853,7 +3853,9 @@ async def text_view(
     if height is not None:
         height = max(5, height)
         if table and body.count("\n") > height:
-            body = render(False)  # the table goes first when it doesn't fit
+            # Asked for the table: shrink it to the rows that fit before cutting.
+            rows = max(3, rows - (body.count("\n") - height))
+            body = render(True)
         body = _fit_height(body, height, depth)
     return Response(content=body, media_type="text/plain; charset=utf-8")
 
@@ -3900,16 +3902,27 @@ def _read_history_cached(hours: float) -> tuple[list[dict[str, Any]], int, bool]
 
 
 @APP.get("/tui.py")
-async def tui_script() -> FileResponse:
+async def tui_script(request: Request) -> Response:
     """The live terminal client, so it runs without a checkout:
-    curl -s http://<host>:8080/tui.py | python3 - http://<host>:8080"""
-    return FileResponse(Path(__file__).parent / "tui.py", media_type="text/x-python")
+    curl -fsS http://<host>:8080/tui.py | python3 -
+    The copy served has SERVED_URL set to the address it was fetched from, so
+    it connects back here with no argument."""
+    source = (Path(__file__).parent / "tui.py").read_text()
+    source = source.replace('SERVED_URL = ""', f"SERVED_URL = {_base_url(request)!r}", 1)
+    return Response(content=source, media_type="text/x-python; charset=utf-8")
+
+
+def _base_url(request: Request) -> str:
+    """This server as the client reached it (its Host header), e.g. http://box:8080."""
+    return str(request.base_url).rstrip("/")
 
 
 @APP.get("/help")
-async def help_page() -> Response:
-    """Plain-text guide to /text and the JSON API."""
-    return Response(content=HELP_TEXT, media_type="text/plain; charset=utf-8")
+async def help_page(request: Request) -> Response:
+    """Plain-text guide to /text and the JSON API, with this server's real
+    address in the examples so they can be pasted as-is."""
+    body = HELP_TEXT.replace("http://<host>:8080", _base_url(request))
+    return Response(content=body, media_type="text/plain; charset=utf-8")
 
 
 @APP.get("/")

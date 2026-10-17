@@ -30,7 +30,7 @@ It offers nethogs and sysstat until they are installed (`--no-optional` silences
 Then edit `config.json` (created from `config.example.json`: title, ping targets, thresholds)
 and `sudo systemctl restart horatio`; with the collector, also the collector's config at
 `/etc/horatio/config.json` (see the collector README; it takes effect on the next 15-min run).
-Open `http://<host>:8080`, or from a terminal `curl http://<host>:8080/text` (`/help` lists the options and API). For a live view that updates in place, run `python3 tui.py http://<host>:8080` from a checkout, or with nothing installed `curl -s http://<host>:8080/tui.py | python3 - http://<host>:8080` (standard library only; it runs whatever the server sends, so on an untrusted network download and read it first). The checkout can live anywhere writable by the user who runs it (no
+Open `http://<host>:8080`, or from a terminal `curl http://<host>:8080/text` (`/help` lists the options and API). For a live view that updates in place, run `python3 tui.py` from a checkout on the box (or `python3 tui.py http://<host>:8080`), or with nothing installed `curl -fsS http://<host>:8080/tui.py | python3 -`. The served copy already knows its server, and `/help` shows the command with the real address. It needs only the standard library; it runs whatever the server sends, so on an untrusted network download and read it first. The checkout can live anywhere writable by the user who runs it (no
 spaces in the path); the service file is rendered from `horatio.service` with that path and user.
 
 After install, `uv run python server.py --set-password` sets the password for the raw history
