@@ -886,6 +886,34 @@ def test_text_view_unit() -> None:
           "auto history window stays in 1-3 h and scales with the record interval")
 
 
+def test_tui_unit() -> None:
+    """tui.py: terminal detection, escape-safe clipping, URL building; server colour depths."""
+    print(f"\n{BOLD}tui / colour depth unit tests{RESET}\n")
+    import server
+    import tui
+
+    tty = {"TERM": "xterm-256color"}
+    check(tui.detect(tty, True, "UTF-8") == ("unicode", "256"), "xterm-256color + UTF-8 -> unicode, 256")
+    check(tui.detect({**tty, "COLORTERM": "truecolor"}, True, "utf-8")[1] == "on", "COLORTERM truecolor -> 24-bit")
+    check(tui.detect({**tty, "NO_COLOR": "1", "COLORTERM": "truecolor"}, True, "UTF-8")[1] == "off", "NO_COLOR wins")
+    check(tui.detect({**tty, "FORCE_COLOR": "1"}, True, "UTF-8")[1] == "16", "FORCE_COLOR=1 -> 16")
+    check(tui.detect({"TERM": "linux"}, True, "UTF-8") == ("ascii", "16"), "Linux console -> ascii, 16")
+    check(tui.detect({"TERM": "dumb"}, True, "ANSI_X3.4-1968") == ("ascii", "off"), "dumb + C locale -> ascii, off")
+    check(tui.detect(tty, False, "UTF-8") == ("simple", "off"), "not a tty -> simple")
+    red = "\033[31mabcdef\033[0m"
+    check(tui.clip(red, 3) == "\033[31mabc\033[0m", "clip keeps escapes whole", repr(tui.clip(red, 3)))
+    check(tui.clip("abc", 10) == "abc", "clip leaves short lines alone")
+    url = tui.build_url("http://h:8080/", {"view": "both", "hours": None, "width": 120})
+    check(url == "http://h:8080/text?view=both&width=120", "build_url drops unset params", url)
+    check(server._paint("x", "cpu", "256").startswith("\033[38;5;"), "256-colour depth")
+    check(server._paint("x", "muted", "256") == "\033[38;5;244mx\033[0m", "greys use the 256 grey ramp")
+    check(server._paint("x", "error", "16").startswith("\033[3") or server._paint("x", "error", "16").startswith("\033[9"),
+          "16-colour depth")
+    tall = "\n".join(str(i) for i in range(50)) + "\n"
+    fit = server._fit_height(tall, 10, False)
+    check(fit.count("\n") == 10 and "41 more lines" in fit, "height fit trims and says how much", repr(fit[-40:]))
+
+
 def main() -> int:
     global passes, fails
     test_read_history_unit()
@@ -894,6 +922,7 @@ def main() -> int:
     test_dedupe_fs_unit()
     test_mail_and_health_unit()
     test_text_view_unit()
+    test_tui_unit()
     port = free_port()
     glances_port = free_port()
     base = f"http://127.0.0.1:{port}"
@@ -1040,6 +1069,11 @@ def main() -> int:
                 fail(f"GET {path}", str(e))
         r = httpx.get(f"{base}/text?style=simple", timeout=10)
         check(r.text.isascii(), "GET /text?style=simple is 7-bit")
+        r = httpx.get(f"{base}/text?height=12&color=256", timeout=10)
+        check(r.status_code == 200 and r.text.count("\n") <= 12 and "\033[38;5;" in r.text,
+              "GET /text?height=12&color=256 fits and uses 256 colours")
+        r = httpx.get(f"{base}/tui.py", timeout=10)
+        check(r.status_code == 200 and "def detect(" in r.text, "GET /tui.py serves the client")
         r = httpx.get(f"{base}/help", timeout=10)
         check(r.status_code == 200 and "/text" in r.text and "/api/history" in r.text, "GET /help")
         r = httpx.get(f"{base}/text?style=fancy", timeout=10)

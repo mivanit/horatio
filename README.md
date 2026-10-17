@@ -30,7 +30,7 @@ It offers nethogs and sysstat until they are installed (`--no-optional` silences
 Then edit `config.json` (created from `config.example.json`: title, ping targets, thresholds)
 and `sudo systemctl restart horatio`; with the collector, also the collector's config at
 `/etc/horatio/config.json` (see the collector README; it takes effect on the next 15-min run).
-Open `http://<host>:8080`, or from a terminal `curl http://<host>:8080/text` (`/help` lists the options and API). The checkout can live anywhere writable by the user who runs it (no
+Open `http://<host>:8080`, or from a terminal `curl http://<host>:8080/text` (`/help` lists the options and API). For a live view that updates in place, run `python3 tui.py http://<host>:8080` from a checkout, or with nothing installed `curl -s http://<host>:8080/tui.py | python3 - http://<host>:8080` (standard library only; it runs whatever the server sends, so on an untrusted network download and read it first). The checkout can live anywhere writable by the user who runs it (no
 spaces in the path); the service file is rendered from `horatio.service` with that path and user.
 
 After install, `uv run python server.py --set-password` sets the password for the raw history
@@ -115,7 +115,8 @@ again, don't put this on anything besides a trusted LAN!
 | `GET /api/history/settings`  | Current recording settings                  |
 | `POST /api/history/settings` | Update recording settings (password)        |
 | `GET /config.json`           | The config                                  |
-| `GET /text`                  | Console report: `curl http://<host>:8080/text` (query: `view` latest/history/both, `style` unicode (default, colour)/ascii/simple (ascii, no colour), `color` auto/on/off, `hours` default 1-3 by width and record interval, `rows` default 24) |
+| `GET /text`                  | Console report: `curl "http://<host>:8080/text?width=$COLUMNS"` (query: `view` latest/history/both, `style` unicode/ascii/simple, `color` auto/on/256/16/off, `hours` default 1-3 by width and record interval, `width` default 80, `height`, `live`, `table`, `rows`) |
+| `GET /tui.py`                | The live terminal client, served so it runs without a checkout |
 | `GET /help`                  | Plain-text guide to `/text` and the JSON API, written for people and agents |
 
 ## Layout

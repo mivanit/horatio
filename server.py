@@ -3071,12 +3071,37 @@ TEXT_COLORS: Final[dict[str, str]] = {
 }
 
 
-def _paint(text: str, key: str, on: bool) -> str:
+def _ansi_256(r: int, g: int, b: int) -> int:
+    """Nearest xterm-256 colour: the grey ramp for near-greys, else the 6x6x6 cube."""
+    if max(r, g, b) - min(r, g, b) < 16:
+        return 232 + min(23, round((r + g + b) / 3 / 255 * 23))
+    return 16 + 36 * round(r / 255 * 5) + 6 * round(g / 255 * 5) + round(b / 255 * 5)
+
+
+_ANSI_16: Final[list[tuple[int, int, int]]] = [
+    (0, 0, 0), (205, 49, 49), (13, 188, 121), (229, 229, 16),
+    (36, 114, 200), (188, 63, 188), (17, 168, 205), (229, 229, 229),
+]
+
+
+def _ansi_16(r: int, g: int, b: int) -> int:
+    """Nearest of the 8 base colours (30-37), bright (90-97) when it's light."""
+    i = min(range(8), key=lambda k: sum((a - c) ** 2 for a, c in zip((r, g, b), _ANSI_16[k])))
+    return (90 if max(r, g, b) > 191 else 30) + i
+
+
+def _paint(text: str, key: str, on: bool | str) -> str:
+    """Colour `text` with TEXT_COLORS[key]. `on` is the colour depth: False for
+    none, True or "24" for 24-bit, "256" or "16" for older terminals."""
     if not on or not text:
         return text
     h = TEXT_COLORS[key].lstrip("#")
     r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
     bold = "1;" if key == "title" else ""
+    if on == "256":
+        return f"\033[{bold}38;5;{_ansi_256(r, g, b)}m{text}\033[0m"
+    if on == "16":
+        return f"\033[{bold}{_ansi_16(r, g, b)}m{text}\033[0m"
     return f"\033[{bold}38;2;{r};{g};{b}m{text}\033[0m"
 
 
@@ -3602,7 +3627,7 @@ def render_text(
     hours: float = 1,
     rows: int = 24,
     title: str = "",
-    color: bool = False,
+    color: bool | str = False,
     thresholds: dict[str, Any] | None = None,
     table: bool = False,
     live: dict[str, Any] | None = None,
@@ -3677,15 +3702,25 @@ def render_text(
 
 TEXT_USAGE: Final[str] = (
     "usage: /text?view=latest|history|both&style=unicode|ascii|simple&color=auto|on|off"
-    "&hours=N&width=80&table=0|1&rows=24  (see /help)\n"
+    "&hours=N&width=80&height=N&live=0|1&table=0|1&rows=24  (see /help)\n"
 )
 
 HELP_TEXT: Final[str] = """\
 Horatio: system monitor for this machine. Plain-text help, for people and agents.
 
 QUICK START
-  curl http://<host>:8080/text           # colour unicode report: snapshot + last hour
-  curl http://<host>:8080/text?style=simple   # plain ASCII, no colour (best for agents/logs)
+  curl "http://<host>:8080/text?width=$COLUMNS"   # colour report: live snapshot + history
+  curl http://<host>:8080/text?style=simple      # plain ASCII, no colour (best for agents/logs)
+  curl -s http://<host>:8080/tui.py | python3 - http://<host>:8080   # live, auto-updating view
+  python3 tui.py http://<host>:8080              # the same, from a horatio checkout
+
+LIVE VIEW (tui.py)
+  Standard library only (Python 3.8+, Linux/macOS). Detects terminal size,
+  colour depth (NO_COLOR, FORCE_COLOR, COLORTERM, TERM) and UTF-8, and redraws
+  every 2 s (--interval). Keys: q quit, r refresh, v cycle view, t table,
+  +/- history window, ? keys. --color on|256|16|off and --style override the
+  detection; --once prints a single frame. Piping from curl runs whatever the
+  server sends: fine on your own network, or download it and read it first.
 
 /text  console report built from the history file
   view   both (default) | latest | history
@@ -3694,14 +3729,16 @@ QUICK START
   style  unicode (default: bars, sparklines, box drawing)
          | ascii (7-bit characters)
          | simple (ascii with no colour)
-  color  auto (default: on for unicode, off for ascii/simple) | on | off
-         colour is 24-bit ANSI escapes; turn it off when parsing the output
+  color  auto (default: on for unicode, off for ascii/simple) | on | 256 | 16 | off
+         on is 24-bit ANSI; 256/16 for older terminals; turn it off when parsing
   hours  history window (0.1 to 8760). Default: 1 to 3 hours, picked so the
          sparklines have about one record per column (wider terminals and
          slower recording intervals get the longer window)
   width  terminal width in columns, default 80 (60 to 400). The server can't see
          your terminal, so pass it:  curl "http://<host>:8080/text?width=$COLUMNS"
          At 160 or wider, the unicode report shows snapshot and history side by side.
+  height trim to N lines (drops the table first, then cuts with a note)
+  live   0 to use the newest history record instead of sampling now
   table  1 to add a table of evenly sampled records (default off)
   rows   max table rows, default 24 (1 to 500)
   Bad parameters return 400 with a usage line.
@@ -3754,16 +3791,20 @@ async def text_view(
     rows: int = 24,
     table: bool = False,
     width: int = TEXT_WIDTH,
+    height: int | None = None,
+    live: bool = True,
 ) -> Response:
     """Plain-text report for terminals: `curl http://<host>:8080/text`.
 
-    style=simple is ascii without colour. Colour defaults on for unicode and off
-    otherwise; color=on/off overrides. Documented at /help.
+    style=simple is ascii without colour. Colour defaults on (24-bit) for
+    unicode and off otherwise; color=on|256|16|off overrides. height=N trims the
+    report to N lines (the TUI passes its terminal size). live=0 uses the newest
+    record instead of a fresh sample. Documented at /help.
     """
     if (
         view not in ("latest", "history", "both")
         or style not in ("ascii", "unicode", "simple")
-        or color not in ("auto", "on", "off")
+        or color not in ("auto", "on", "256", "16", "off")
     ):
         return Response(content=TEXT_USAGE, status_code=400, media_type="text/plain")
     if hours is None:
@@ -3773,7 +3814,7 @@ async def text_view(
         )
     hours = max(0.1, min(hours, 8760))
     rows = max(1, min(rows, 500))
-    result = await asyncio.to_thread(_read_history, hours)
+    result = await asyncio.to_thread(_read_history_cached, hours)
     if isinstance(result, str):
         return Response(
             content=f"Failed to read history: {result}\n",
@@ -3781,28 +3822,88 @@ async def text_view(
             media_type="text/plain",
         )
     records, _skipped, _truncated = result
-    live: dict[str, Any] | None = None
-    if view in ("latest", "both"):
+    sample: dict[str, Any] | None = None
+    if live and view in ("latest", "both"):
         try:
-            live = await collect_history_sample(APP.state.glances_url, live=True)
+            sample = await _live_sample()
         except Exception as e:
             logger.warning("/text: live sample failed, using the newest record: %s", e)
     if style == "simple":
         style, color = "ascii", "off"
-    body = render_text(
-        records,
-        style=style,
-        view=view,
-        hours=hours,
-        rows=rows,
-        title=str(_CONFIG.get("title") or ""),
-        color=color == "on" or (color == "auto" and style == "unicode"),
-        thresholds=_CONFIG.get("thresholds") or {},
-        table=table,
-        live=live,
-        width=max(TEXT_MIN_WIDTH, min(width, 400)),
+    depth: bool | str = {"on": "24", "256": "256", "16": "16", "off": False}.get(
+        color, "24" if style == "unicode" else False
     )
+
+    def render(with_table: bool) -> str:
+        return render_text(
+            records,
+            style=style,
+            view=view,
+            hours=hours,
+            rows=rows,
+            title=str(_CONFIG.get("title") or ""),
+            color=depth,
+            thresholds=_CONFIG.get("thresholds") or {},
+            table=with_table,
+            live=sample,
+            width=max(TEXT_MIN_WIDTH, min(width, 400)),
+        )
+
+    body = render(table)
+    if height is not None:
+        height = max(5, height)
+        if table and body.count("\n") > height:
+            body = render(False)  # the table goes first when it doesn't fit
+        body = _fit_height(body, height, depth)
     return Response(content=body, media_type="text/plain; charset=utf-8")
+
+
+def _fit_height(body: str, height: int, color: bool | str) -> str:
+    """Trim a report to `height` lines, noting how many were cut."""
+    lines = body.rstrip("\n").split("\n")
+    if len(lines) <= height:
+        return body
+    cut = len(lines) - (height - 1)
+    return "\n".join(lines[: height - 1] + [_paint(f"... {cut} more lines (taller terminal, or another view)", "muted", color)]) + "\n"
+
+
+# Short-lived caches so several terminals polling /text every second cost one
+# live sample per second and one history parse per new record.
+_LIVE_TTL: Final[float] = 1.0
+_live_cache: dict[str, Any] = {"at": 0.0, "record": None}
+_live_lock = asyncio.Lock()
+_history_cache: dict[str, Any] = {"key": None, "result": None}
+
+
+async def _live_sample() -> dict[str, Any]:
+    async with _live_lock:
+        if _live_cache["record"] is None or time.monotonic() - _live_cache["at"] > _LIVE_TTL:
+            _live_cache["record"] = await collect_history_sample(APP.state.glances_url, live=True)
+            _live_cache["at"] = time.monotonic()
+        return _live_cache["record"]
+
+
+def _read_history_cached(hours: float) -> tuple[list[dict[str, Any]], int, bool] | str:
+    """_read_history, reused until the file changes or a minute passes (the
+    window start moves). Callers must not mutate the returned records."""
+    try:
+        st = HISTORY_FILE.stat()
+        key = (hours, st.st_mtime_ns, st.st_size, int(time.time() // 60))
+    except OSError:
+        key = None
+    if key is not None and _history_cache["key"] == key:
+        return _history_cache["result"]
+    result = _read_history(hours)
+    if key is not None and not isinstance(result, str):
+        _history_cache.update(key=key, result=result)
+    return result
+
+
+@APP.get("/tui.py")
+async def tui_script() -> FileResponse:
+    """The live terminal client, so it runs without a checkout:
+    curl -s http://<host>:8080/tui.py | python3 - http://<host>:8080"""
+    return FileResponse(Path(__file__).parent / "tui.py", media_type="text/x-python")
 
 
 @APP.get("/help")
