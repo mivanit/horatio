@@ -446,6 +446,7 @@ const HISTORY_METRICS = {
       { key: 'cpu_percent', label: 'CPU %', unit: '%' },
       { key: 'rss_mb', label: 'Memory (MB)', unit: ' MB' },
       { key: 'gpu_mem_mib', label: 'GPU memory (MiB)', unit: ' MiB' },
+      { key: 'gpu_util_percent', label: 'GPU util %', unit: '%' },
       { key: 'disk_read_kbps', label: 'Disk read (KB/s)', unit: ' KB/s' },
       { key: 'disk_write_kbps', label: 'Disk write (KB/s)', unit: ' KB/s' },
       { key: 'threads', label: 'Threads', unit: '' },

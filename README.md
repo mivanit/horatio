@@ -68,7 +68,7 @@ Removes the service, the collector's units, scripts and snapshots. The checkout,
 | `history.record_interval` | seconds between history records (default 600) |
 | `history.min_record_interval` | minimum seconds between manual "record now" requests, 0 to disable (default 60) |
 | `history.sample_duration`, `history.sample_count` | each record averages `sample_count` samples over `sample_duration` seconds |
-| `history.processes_enabled`, `history.process_count` | log the top `process_count` processes by CPU and by memory, plus any holding GPU memory, in each history record (`processes`: pid, name always; ppid, create_time, user, status, threads, cpu_percent, rss_mb, disk_read_kbps, disk_write_kbps, gpu_mem_mib + gpus when known and non-zero); default off, 10. Roughly doubles a record's size at 10, so the 64 MB history tail covers fewer days |
+| `history.processes_enabled`, `history.process_count` | log the top `process_count` processes by CPU and by memory, plus any holding GPU memory, in each history record (`processes`: pid, name always; ppid, create_time, user, status, threads, cpu_percent, rss_mb, disk_read_kbps, disk_write_kbps, gpu_mem_mib + gpus, gpu_util_percent when known and non-zero); default off, 10. Roughly doubles a record's size at 10, so the 64 MB history tail covers fewer days |
 | `thresholds.*_percent`, `temp_celsius`, `network_mbps`, `disk_io_mbps`, `ping_ms` | orange-card thresholds |
 | `thresholds.power_max_watts`, `power_psu_watts`, `power_warn_fraction` | the power bar's right edge, its dashed PSU line, and the orange threshold as a fraction of the PSU |
 
@@ -100,7 +100,7 @@ again, don't put this on anything besides a trusted LAN!
 | `GET /api/list-endpoints`    | Which file-backed endpoints exist on this box (mail, storage-health, sensors) |
 | `GET /api/gpu-info`          | NVIDIA GPU details                          |
 | `GET /api/cpu-info`          | CPU details from /proc/cpuinfo              |
-| `GET /api/gpu-processes`     | GPU process list                            |
+| `GET /api/gpu-processes`     | GPU process list: per (GPU, pid) memory plus `gpu_util_percent` / `gpu_mem_util_percent` from `nvidia-smi pmon` (null when the driver had no sample for that pid) |
 | `GET /api/network-processes` | Per-process network bandwidth (nethogs)     |
 | `GET /api/disk-processes`    | Per-process disk I/O (pidstat)              |
 | `GET /api/ping`              | Ping the configured targets                 |

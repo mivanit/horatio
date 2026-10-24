@@ -83,7 +83,10 @@ SCHEMAS: dict[str, object] = {
         and {"processes_enabled", "process_count"} <= d["defaults"].keys()
     ),
     "/api/ping": lambda d: isinstance(d, dict) and ("disabled" in d or "targets" in d),
-    "/api/gpu-processes": lambda d: isinstance(d, list),
+    "/api/gpu-processes": lambda d: isinstance(d, list) and all(
+        {"gpu_index", "pid", "gpu_memory_mib", "gpu_util_percent", "gpu_mem_util_percent"} <= p.keys()
+        for p in d
+    ),
     "/api/disk-processes": lambda d: (
         isinstance(d, list) or (isinstance(d, dict) and ("error" in d or "status" in d))
     ),
@@ -578,9 +581,9 @@ def test_process_history_unit() -> None:
              proc(P + 3, 0.5, 1 << 20, "idle"), proc(P + 4, 20.0, 5 << 20, "mid"),
              {"pid": P + 5, "name": "nomem", "cpu_percent": 0.0},
              {"pid": True, "cpu_percent": 99}, "junk"]
-    gpu = [{"pid": P + 3, "gpu_index": 1, "gpu_memory_mib": 100.0, "name": "idle"},
-           {"pid": P + 3, "gpu_index": 0, "gpu_memory_mib": 50.0, "name": "idle"},
-           {"pid": P + 99, "gpu_index": 0, "gpu_memory_mib": 7.0, "name": "ghost"}]
+    gpu = [{"pid": P + 3, "gpu_index": 1, "gpu_memory_mib": 100.0, "name": "idle", "gpu_util_percent": 40.0},
+           {"pid": P + 3, "gpu_index": 0, "gpu_memory_mib": 50.0, "name": "idle", "gpu_util_percent": 2.5},
+           {"pid": P + 99, "gpu_index": 0, "gpu_memory_mib": 7.0, "name": "ghost", "gpu_util_percent": None}]
     rows = server.build_process_records(procs, gpu, 2)
     by_pid = {r["pid"]: r for r in rows}
     check(
@@ -589,6 +592,8 @@ def test_process_history_unit() -> None:
         and by_pid[P + 2]["rss_mb"] == 900.0
         and by_pid[P + 3]["gpu_mem_mib"] == 150.0
         and by_pid[P + 3]["gpus"] == [0, 1]
+        and by_pid[P + 3]["gpu_util_percent"] == 42.5  # summed over its GPUs
+        and "gpu_util_percent" not in by_pid[P + 99]  # pmon had no sample -> no key
         and "gpus" not in by_pid[P + 1]
         and "cpu_percent" not in by_pid[P + 99]
         and by_pid[P + 99]["gpu_mem_mib"] == 7.0
@@ -620,6 +625,19 @@ def test_process_history_unit() -> None:
         and "disk_read_kbps" not in io[P + 8],
         "build_process_records: disk KB/s from io_counters, zero and unreadable omitted",
         describe([io[P + 6], io[P + 7], io[P + 8]]),
+    )
+    pm = server._parse_pmon(
+        "# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command \n"
+        "# Idx           #    C/G      %      %      %      %      %      %    name \n"
+        "    0    1498409     C     97     75      -      -      -      -    python3        \n"
+        "    0    1498411     C      -      -      -      -      -      -    python3        \n"
+        "    1    1498408     C     87     48      -      -      -      -    python3        \n"
+        "garbage line\n"
+    )
+    check(
+        pm == {(0, 1498409): (97.0, 75.0), (0, 1498411): (None, None), (1, 1498408): (87.0, 48.0)},
+        "_parse_pmon: (gpu, pid) -> (sm, mem), '-' -> None, headers and junk skipped",
+        repr(pm),
     )
     f = server.aggregate_cpu_freq([1200.0, 3600.0, None, 2400.0, "x"], {"min_mhz": 1200.0, "max_mhz": 3600.0})
     check(

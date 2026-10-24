@@ -211,6 +211,24 @@ const PROCESS_COLUMNS = [
     color: (p) => getMemoryColor(p.gpu_memory_mib * 1024 * 1024),  // MiB to bytes
     cssClass: 'num-cell'
   },
+  {
+    key: 'gpu_util_percent',
+    label: 'GPU %',
+    group: null,
+    sortable: true,
+    width: '60px',
+    getValue: (p) => p.gpu_util_percent ?? -1,
+    // SM utilization from nvidia-smi pmon, summed over the process's GPUs; the
+    // hover lists each GPU's own figure. Empty when the driver had no sample for
+    // this pid in the window (an idle process): unknown, not 0.
+    render: (p) => {
+      if (p.gpu_util_percent == null) return '';
+      const per = (p.gpu_utils ?? []).filter(u => u.sm != null).map(u => `GPU ${u.gpu}: ${u.sm}% SM, ${u.mem ?? '-'}% mem bandwidth`);
+      return `<span data-tip="${escapeHtml(per.join('; ') || 'SM utilization')}">${p.gpu_util_percent.toFixed(0)}%</span>`;
+    },
+    color: (p) => p.gpu_util_percent == null ? null : getCoreColor(Math.min(p.gpu_util_percent, 100)),
+    cssClass: 'num-cell'
+  },
   createRateColumn('net_up', 'Up', 'net_up', '98px', 'network'),
   createRateColumn('net_down', 'Down', 'net_down', '98px', 'network'),
   createRateColumn('disk_read', 'Read', 'disk_read', '93px', 'disk'),
@@ -893,7 +911,9 @@ function enrichProcessData(proc, networkByPid, diskByPid, gpuByPid) {
     disk_write: disk?.write_kbps,
     gpu_index: gpu?.gpu_index,
     gpu_memory_mib: gpu?.gpu_memory_mib,
-    gpu_indices: gpu?.gpu_indices
+    gpu_indices: gpu?.gpu_indices,
+    gpu_util_percent: gpu?.gpu_util_percent,
+    gpu_utils: gpu?.gpu_utils
   };
 }
 
@@ -1039,12 +1059,18 @@ function renderUnifiedProcesses() {
         process_name: p.process_name,
         path: p.path,
         gpu_indices: [p.gpu_index],
-        gpu_memory_mib: p.gpu_memory_mib || 0
+        gpu_memory_mib: p.gpu_memory_mib || 0,
+        // SM % summed over GPUs (null until one GPU reports a sample); per-GPU detail for the hover
+        gpu_util_percent: p.gpu_util_percent ?? null,
+        gpu_utils: [{ gpu: p.gpu_index, sm: p.gpu_util_percent ?? null, mem: p.gpu_mem_util_percent ?? null }]
       };
     } else {
       // Aggregate into existing object
-      gpuByPid[p.pid].gpu_memory_mib += p.gpu_memory_mib || 0;
-      gpuByPid[p.pid].gpu_indices.push(p.gpu_index);
+      const agg = gpuByPid[p.pid];
+      agg.gpu_memory_mib += p.gpu_memory_mib || 0;
+      agg.gpu_indices.push(p.gpu_index);
+      if (p.gpu_util_percent != null) agg.gpu_util_percent = (agg.gpu_util_percent ?? 0) + p.gpu_util_percent;
+      agg.gpu_utils.push({ gpu: p.gpu_index, sm: p.gpu_util_percent ?? null, mem: p.gpu_mem_util_percent ?? null });
     }
   });
 

@@ -845,7 +845,9 @@ def build_process_records(
     name (executable / module / script, never the arguments), like /api/processlist.
     ``ppid`` and ``create_time`` (epoch seconds) come from /proc so a row can be
     attributed to a process tree later. Disk rates come from Glances' cumulative
-    ``io_counters`` over its own refresh interval. Rows are sparse: a key whose
+    ``io_counters`` over its own refresh interval; ``gpu_util_percent`` is the
+    SM utilization summed over the GPUs the process uses (nvidia-smi pmon), left
+    out when the driver had no sample. Rows are sparse: a key whose
     value is unknown (None) or a rate that is zero is left out, so a row carries
     only ``pid`` and ``name`` for sure. Sorted by CPU, GPU-only rows last.
     """
@@ -854,8 +856,13 @@ def build_process_records(
         pid = g.get("pid")
         if not isinstance(pid, int):
             continue
-        slot = gpu_by_pid.setdefault(pid, {"mem": 0.0, "gpus": set(), "name": g.get("name")})
+        slot = gpu_by_pid.setdefault(
+            pid, {"mem": 0.0, "util": None, "gpus": set(), "name": g.get("name")}
+        )
         slot["mem"] += _num(g.get("gpu_memory_mib")) or 0.0
+        util = _num(g.get("gpu_util_percent"))
+        if util is not None:  # summed over the GPUs it runs on (like CPU over cores)
+            slot["util"] = (slot["util"] or 0.0) + util
         if isinstance(g.get("gpu_index"), int):
             slot["gpus"].add(g["gpu_index"])
 
@@ -924,6 +931,8 @@ def build_process_records(
         if gpu and gpu["mem"] > 0:
             row["gpu_mem_mib"] = round(gpu["mem"], 1)
             row["gpus"] = sorted(gpu["gpus"])
+            if gpu["util"]:
+                row["gpu_util_percent"] = round(gpu["util"], 1)
         rows.append(sparse(row, ("disk_read_kbps", "disk_write_kbps")))
     # GPU processes Glances did not list (the join caveat of the live view)
     for pid, gpu in gpu_by_pid.items():
@@ -938,6 +947,7 @@ def build_process_records(
                     "create_time": create_time,
                     "name": gpu["name"] or "unknown",
                     "gpu_mem_mib": round(gpu["mem"], 1),
+                    "gpu_util_percent": round(gpu["util"], 1) if gpu["util"] else None,
                     "gpus": sorted(gpu["gpus"]),
                 }
             )
@@ -2358,6 +2368,58 @@ async def ip_info() -> Response:
         )
 
 
+def _parse_pmon(stdout: str) -> dict[tuple[int, int], tuple[float | None, float | None]]:
+    """{(gpu index, pid): (sm %, mem %)} from ``nvidia-smi pmon -c 1 -s u``.
+
+    Columns: gpu pid type sm mem enc dec jpg ofa command; '#' lines are headers.
+    '-' is "no sample" (the driver had nothing for that pid in the window: an
+    idle process, or a GPU that does not support per-process accounting) and
+    becomes None, which the callers keep apart from 0.
+    """
+    out: dict[tuple[int, int], tuple[float | None, float | None]] = {}
+    for line in stdout.splitlines():
+        parts = line.split()
+        if not parts or parts[0].startswith("#") or len(parts) < 5:
+            continue
+        try:
+            key = (int(parts[0]), int(parts[1]))
+        except ValueError:
+            continue
+        def pct(tok: str) -> float | None:
+            try:
+                return float(tok)  # '-' -> ValueError -> None
+            except ValueError:
+                return None
+
+        out[key] = (pct(parts[3]), pct(parts[4]))
+    return out
+
+
+def _gpu_process_utilization() -> dict[tuple[int, int], tuple[float | None, float | None]]:
+    """Per-process SM / memory-bandwidth utilization, {} when pmon is unusable.
+
+    ``--query-compute-apps`` has no utilization field; ``pmon`` is the only
+    source without accounting mode (root to enable). One 1 s sample, ~0.1 s.
+    pmon watches at most four GPUs (its own limit); a fifth gets no rows, so
+    those processes read as None, never as 0. Any failure is a missing column,
+    not a missing process list.
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "pmon", "-c", "1", "-s", "u"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.debug("nvidia-smi pmon failed: %s", e)
+        return {}
+    if result.returncode != 0:
+        logger.debug("nvidia-smi pmon exit %d: %s", result.returncode, result.stderr.strip()[:200])
+        return {}
+    return _parse_pmon(result.stdout)
+
+
 def _get_gpu_processes() -> list[dict[str, Any]]:
     """Get processes using GPU from nvidia-smi (sync, called from thread pool).
 
@@ -2396,6 +2458,8 @@ def _get_gpu_processes() -> list[dict[str, Any]]:
             except ValueError:
                 logger.warning("Skipping GPU UUID line with bad index: %s", line)
 
+    util = _gpu_process_utilization()
+
     processes: list[dict[str, Any]] = []
     for line in result.stdout.strip().split("\n"):
         if not line.strip():
@@ -2410,13 +2474,20 @@ def _get_gpu_processes() -> list[dict[str, Any]]:
                 info = get_sanitized_process_info(
                     pid, Path(nvidia_name).name, nvidia_name
                 )
+                gpu_index = uuid_to_index.get(gpu_uuid, 0)
+                sm, membw = util.get((gpu_index, pid), (None, None))
                 processes.append(
                     {
-                        "gpu_index": uuid_to_index.get(gpu_uuid, 0),
+                        "gpu_index": gpu_index,
                         "pid": pid,
                         "name": info["name"],
                         "path": info["path"],
                         "gpu_memory_mib": float(parts[3]),
+                        # SM and memory-bandwidth utilization of this pid on this
+                        # GPU over pmon's 1 s sample; None when the driver had no
+                        # sample for it (an idle process, or pmon unavailable).
+                        "gpu_util_percent": sm,
+                        "gpu_mem_util_percent": membw,
                     }
                 )
             except (ValueError, IndexError) as e:
