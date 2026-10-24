@@ -48,6 +48,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 STATIC_DIR: Final[Path] = Path(__file__).parent / "static"
 INDEX_FILE: Final[Path] = Path(__file__).parent / "index.html"
@@ -122,6 +123,35 @@ def _cfg_int(
     return value
 
 
+def _cfg_num(
+    cfg: dict[str, Any],
+    key: str,
+    default: float,
+    lo: float,
+    hi: float,
+    section: str,
+) -> float:
+    """Read a numeric (int or float) setting, like _cfg_int. The range check
+    also rejects inf and NaN (every comparison with them is False)."""
+    value = cfg.get(key, default)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not (lo <= value <= hi)
+    ):
+        logging.getLogger("dashboard").warning(
+            "config.json %s.%s=%r is invalid or outside [%g, %g]; using %g",
+            section,
+            key,
+            value,
+            lo,
+            hi,
+            default,
+        )
+        return float(default)
+    return float(value)
+
+
 _CONFIG: Final[dict[str, Any]] = _load_config()
 
 # History recording settings (defaults, runtime values stored on APP.state).
@@ -156,6 +186,34 @@ if not isinstance(_processes_enabled, bool):
     )
     _processes_enabled = False
 DEFAULT_HISTORY_PROCESSES_ENABLED: Final[bool] = _processes_enabled
+
+
+
+def _read_limits(cfg: dict[str, Any]) -> tuple[float, float]:
+    """(network_mbps, disk_io_mbps) ceilings from config.json's "limits".
+
+    Glances' rates are a counter delta over its own elapsed time and now and then
+    come out absurd (counter wrap, interface churn). Each interface's and each
+    drive's samples are clamped to these when a record is collected (_RateCaps);
+    totals are not capped. Records from before the caps are clamped when served
+    (clamp_record_rates). Read once at startup.
+    Defaults: 10 Gbit/s ~ 1250 MB/s; a PCIe 5 NVMe ~ 15 GB/s.
+    """
+    limits: Any = cfg.get("limits", {})
+    if not isinstance(limits, dict):
+        logging.getLogger("dashboard").warning(
+            "config.json: 'limits' is not an object; using defaults"
+        )
+        limits = {}
+    return (
+        _cfg_num(limits, "network_mbps", 1250.0, 1, 1e9, "limits"),
+        _cfg_num(limits, "disk_io_mbps", 15000.0, 1, 1e9, "limits"),
+    )
+
+
+_LIMITS: Final[tuple[float, float]] = _read_limits(_CONFIG)
+MAX_NETWORK_MBPS: Final[float] = _LIMITS[0]
+MAX_DISK_IO_MBPS: Final[float] = _LIMITS[1]
 
 
 # Password hashing
@@ -964,6 +1022,9 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
     percpu_samples: dict[int, list[Any]] = {}
     net_in_samples: list[float] = []
     net_out_samples: list[float] = []
+    # Caps each interface / drive rate sample and remembers which went over
+    # (see _RateCaps); summarised into the record's `rate_capped` note.
+    caps = _RateCaps()
     # Disk I/O, one dict per sample iteration: {disk_name: (read_mbps, write_mbps)}.
     # Keyed per iteration (not per disk) so a device that appears or vanishes
     # mid-window cannot shift another device's samples out of alignment.
@@ -1009,21 +1070,26 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
                 net_resp = await client.get(f"{glances_url}/api/4/network", timeout=5.0)
                 if net_resp.status_code == 200:
                     net_data: Any = net_resp.json()
-                    # Filter out loopback - check interface_name field (Glances uses this)
-                    total_in = sum(
-                        iface.get("bytes_recv_rate_per_sec", 0) or 0
-                        for iface in net_data
-                        if not (iface.get("interface_name") or "").startswith("lo")
-                    )
-                    total_out = sum(
-                        iface.get("bytes_sent_rate_per_sec", 0) or 0
-                        for iface in net_data
-                        if not (iface.get("interface_name") or "").startswith("lo")
-                    )
-                    net_in_samples.append(
-                        total_in / 1e6
-                    )  # Convert to MB/s (match live view)
-                    net_out_samples.append(total_out / 1e6)
+                    # MB/s (match live view), summed over every interface but
+                    # loopback. Each interface is capped on its own: a counter
+                    # glitch is per interface, while the sum legitimately
+                    # exceeds one link's rate (bridges, veths and tunnels count
+                    # the same traffic again), so the total is never capped.
+                    total_in = total_out = 0.0
+                    for iface in net_data:
+                        name = iface.get("interface_name") or ""
+                        if name.startswith("lo"):
+                            continue
+                        total_in += caps.sample(
+                            iface.get("bytes_recv_rate_per_sec"),
+                            MAX_NETWORK_MBPS, ("network.in_mbps", name),
+                        )
+                        total_out += caps.sample(
+                            iface.get("bytes_sent_rate_per_sec"),
+                            MAX_NETWORK_MBPS, ("network.out_mbps", name),
+                        )
+                    net_in_samples.append(total_in)
+                    net_out_samples.append(total_out)
                 else:
                     logger.warning("Network API returned status %d", net_resp.status_code)
 
@@ -1037,13 +1103,17 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
                     for disk in disk_data:
                         disk_name: Any = disk.get("disk_name")
                         if disk_name:
-                            read_mbps = (
-                                disk.get("read_bytes_rate_per_sec", 0) or 0
-                            ) / 1e6
-                            write_mbps = (
-                                disk.get("write_bytes_rate_per_sec", 0) or 0
-                            ) / 1e6
-                            this_iter[disk_name] = (read_mbps, write_mbps)
+                            # Capped per device, like the network interfaces.
+                            this_iter[disk_name] = (
+                                caps.sample(
+                                    disk.get("read_bytes_rate_per_sec"),
+                                    MAX_DISK_IO_MBPS, ("disk_io.read_mbps", disk_name),
+                                ),
+                                caps.sample(
+                                    disk.get("write_bytes_rate_per_sec"),
+                                    MAX_DISK_IO_MBPS, ("disk_io.write_mbps", disk_name),
+                                ),
+                            )
                     disk_iter_samples.append(this_iter)
                 else:
                     logger.warning(
@@ -1230,6 +1300,8 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
     # fs data (Glances could not read the mounts) every row is counted, as before.
     seen_disks: set[str] = {d for it in disk_iter_samples for d in it}
     counted: set[str] = {d for d in seen_disks if d in disk_to_mount} or seen_disks
+    # Each device is capped already; the total is their plain sum (a busy pool
+    # legitimately exceeds one drive's ceiling).
     disk_read_samples = [sum(v[0] for d, v in it.items() if d in counted) for it in disk_iter_samples]
     disk_write_samples = [sum(v[1] for d, v in it.items() if d in counted) for it in disk_iter_samples]
     if disk_read_samples or disk_write_samples:
@@ -1251,6 +1323,23 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
             )
         if drives_io:
             record["disk_io"]["drives"] = drives_io
+
+    # The caps this record was collected under, per interface / per drive. Its
+    # presence tells clamp_record_rates the totals are already sane sums (older
+    # records only have totals, so reading clamps those instead).
+    record["rate_caps"] = {"network_mbps": MAX_NETWORK_MBPS, "disk_io_mbps": MAX_DISK_IO_MBPS}
+    capped = caps.note(disk_to_mount)
+    if capped:
+        record["rate_capped"] = capped
+        if not live:
+            logger.warning(
+                "Rate cap hit: %s",
+                "; ".join(
+                    f"{c['metric']} {c.get('interface') or c.get('drive') or c.get('device')} "
+                    f"{c['samples']}/{c['of']} samples, raw max {c['raw_max']:g} MB/s (cap {c['cap']:g})"
+                    for c in capped
+                ),
+            )
 
     # Drive usage (filesystem, point-in-time)
     if fs_data:
@@ -1586,6 +1675,32 @@ async def lifespan(app: FastAPI):
 APP: FastAPI = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
+class _GZipUnlessRange:
+    """GZipMiddleware, except for requests with a Range header: starlette would
+    gzip a 206 body while Content-Range still counts uncompressed bytes, so a
+    resumed download (curl -C - of /api/history/raw) would splice gzip into the
+    file."""
+
+    def __init__(self, app: Any, **kwargs: Any) -> None:
+        self.app = app
+        self.gzip = GZipMiddleware(app, **kwargs)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "http" and any(k == b"range" for k, _ in scope["headers"]):
+            await self.app(scope, receive, send)
+        else:
+            await self.gzip(scope, receive, send)
+
+
+# History JSON shrinks 5-10x gzipped; a 30-day window is ~6 MB raw. Only clients
+# that send Accept-Encoding: gzip get it (browsers, httpx), so tui.py's urllib
+# keeps reading /text uncompressed. Proxied Glances bodies arrive decoded with
+# content-encoding stripped (HOP_BY_HOP_HEADERS), so recompressing them is safe.
+# Level 1: compression runs on the event loop, and on JSON it gets most of
+# level 6's ratio for a fraction of the time.
+APP.add_middleware(_GZipUnlessRange, minimum_size=1000, compresslevel=1)
+
+
 def setup_logging() -> None:
     """Configure logging to write to logs/ directory."""
     LOGS_DIR.mkdir(exist_ok=True)
@@ -1633,11 +1748,105 @@ async def log_connections(request: Request, call_next):
     return await call_next(request)
 
 
+def _clamp_rate(value: float, cap: float) -> float:
+    """A rate in MB/s bounded to [0, cap]."""
+    return min(max(value, 0.0), cap)
+
+
+class _RateCaps:
+    """Caps one record's rate samples per interface / per drive and remembers
+    what went over, for the record's ``rate_capped`` note.
+
+    A series is (metric, interface or disk name). ``sample`` takes Glances'
+    bytes/s and returns MB/s. A sample over the cap counts as the cap; it is
+    never dropped, since that would hide real traffic if the cap is set too low.
+    A missing (None), non-finite or non-numeric rate is not a measurement: it
+    is returned as 0 for the sums and not counted, so it can neither crash the
+    record nor become a cap-height spike.
+    """
+
+    def __init__(self) -> None:
+        self.seen: dict[tuple[str, str], int] = {}
+        self.hits: dict[tuple[str, str], list[float]] = {}
+
+    def sample(self, bytes_per_sec: Any, cap: float, series: tuple[str, str]) -> float:
+        n = _num(bytes_per_sec)
+        if n is None:
+            return 0.0
+        n /= 1e6
+        self.seen[series] = self.seen.get(series, 0) + 1
+        if n > cap:
+            self.hits.setdefault(series, []).append(n)
+        return _clamp_rate(n, cap)
+
+    def note(self, disk_to_mount: dict[str, str]) -> list[dict[str, Any]]:
+        """``[{metric, interface | device [+ drive], samples, of, raw_max, cap}]``,
+        one entry per series that went over its cap. ``samples`` of ``of`` counts
+        that interface's or device's own samples in the burst; ``drive`` is the
+        mount point when the device is mounted (as in disk_io.drives)."""
+        note: list[dict[str, Any]] = []
+        for (metric, name), raw in sorted(self.hits.items()):
+            entry: dict[str, Any] = {"metric": metric}
+            if metric.startswith("network."):
+                entry["interface"] = name
+                cap = MAX_NETWORK_MBPS
+            else:
+                entry["device"] = name
+                if name in disk_to_mount:
+                    entry["drive"] = disk_to_mount[name]
+                cap = MAX_DISK_IO_MBPS
+            entry.update(
+                samples=len(raw),
+                of=self.seen.get((metric, name), len(raw)),
+                raw_max=_round(max(raw), 2),
+                cap=cap,
+            )
+            note.append(entry)
+        return note
+
+
+def _clamp_stats(stats: Any, cap: float) -> None:
+    """Clamp the avg/min/max of one compute_stats block in place; None (an
+    empty window) and anything that is not a number are left alone."""
+    if not isinstance(stats, dict):
+        return
+    for key, value in stats.items():
+        n = _num(value)
+        if n is not None:
+            stats[key] = _clamp_rate(n, cap)
+
+
+def clamp_record_rates(record: dict[str, Any]) -> None:
+    """Clamp a served record's rates to the configured limits, in place, if it
+    predates the caps: network.in_mbps/out_mbps, disk_io.read_mbps/write_mbps
+    and every disk_io.drives[] entry. A record with ``rate_caps`` was capped per
+    interface / per drive when taken and is served as recorded. The file is
+    never rewritten.
+    """
+    if "rate_caps" in record:
+        return
+    net = record.get("network")
+    if isinstance(net, dict):
+        for key in ("in_mbps", "out_mbps"):
+            _clamp_stats(net.get(key), MAX_NETWORK_MBPS)
+    dio = record.get("disk_io")
+    if isinstance(dio, dict):
+        for key in ("read_mbps", "write_mbps"):
+            _clamp_stats(dio.get(key), MAX_DISK_IO_MBPS)
+        drives = dio.get("drives")
+        if isinstance(drives, list):
+            for drive in drives:
+                if isinstance(drive, dict):
+                    for key in ("read_mbps", "write_mbps"):
+                        _clamp_stats(drive.get(key), MAX_DISK_IO_MBPS)
+
+
 def _read_history(
     hours: float,
     initial_read_size: int = HISTORY_INITIAL_TAIL_READ,
     max_bytes: int = HISTORY_MAX_TAIL_READ,
-) -> tuple[list[dict[str, Any]], int, bool] | str:
+    since: float | None = None,
+) -> tuple[list[dict[str, Any]], int, bool, float] | str:
     """Read history records from the tail of the JSONL file (sync, called from thread pool).
 
     Records are appended chronologically, so instead of scanning the whole file
@@ -1647,16 +1856,28 @@ def _read_history(
     oldest record in that window (e.g. "1 year" on a partial file) would otherwise
     read the whole — potentially huge — file, so we stop at the cap and report it.
 
-    Returns (records, skipped_line_count, truncated) on success, or an error
-    string on failure. ``truncated`` is True when the byte cap was hit before the
-    range was covered (the oldest returned data is newer than the requested
-    cutoff). Skipped lines are non-empty lines that don't parse as a dict with a
-    valid timestamp — corruption worth surfacing, not silently dropping.
-    """
-    if not HISTORY_FILE.exists():
-        return [], 0, False
+    ``since`` (epoch seconds) is the incremental path: only records strictly newer
+    than it are returned, and the window is covered as soon as it reaches a record
+    at or before ``since`` — a client topping up a recent view parses one small
+    window instead of the whole range. ``truncated`` then means the byte cap was
+    hit before reaching ``since``: there is a gap between the client's newest
+    record and the oldest one returned, and the client should refetch in full.
+    The filter is by timestamp, so a client that wants records appended out of
+    timestamp order (a clock step, two recorders finishing in reverse) passes a
+    ``since`` somewhat before its newest record and drops the duplicates.
 
+    Returns (records, skipped_line_count, truncated, cutoff) on success, or an
+    error string on failure. ``cutoff`` is the window start as epoch seconds (the
+    client trims its cached records against it). ``truncated`` is True when the
+    byte cap was hit before the range was covered (the oldest returned data is
+    newer than the requested cutoff). Skipped lines are non-empty lines that
+    don't parse as a dict with a valid timestamp — corruption worth surfacing,
+    not silently dropping. Served rates are clamped (clamp_record_rates).
+    """
     cutoff = datetime.now(timezone.utc).timestamp() - (hours * 3600)
+
+    if not HISTORY_FILE.exists():
+        return [], 0, False, cutoff
 
     try:
         with open(HISTORY_FILE, "rb") as f:
@@ -1671,6 +1892,9 @@ def _read_history(
                     # Drop the (likely partial) line the window starts in
                     nl = data.find(b"\n")
                     data = data[nl + 1 :] if nl != -1 else b""
+                # An unterminated last line is a record still being appended,
+                # not corruption: leave it for the next read.
+                data = data[: data.rfind(b"\n") + 1]
 
                 records: list[dict[str, Any]] = []
                 first_ts: float | None = None
@@ -1695,10 +1919,14 @@ def _read_history(
                         continue
                     if first_ts is None:
                         first_ts = ts
-                    if ts >= cutoff:
+                    if ts >= cutoff and (since is None or ts > since):
                         records.append(record)
 
-                covered = offset == 0 or (first_ts is not None and first_ts < cutoff)
+                covered = (
+                    offset == 0
+                    or (first_ts is not None and first_ts < cutoff)
+                    or (since is not None and first_ts is not None and first_ts <= since)
+                )
                 # offset > 0 with a maxed window means we can't grow further.
                 hit_cap = offset > 0 and capped >= max_bytes
                 if covered or hit_cap:
@@ -1715,7 +1943,9 @@ def _read_history(
                             hours,
                             len(records),
                         )
-                    return records, skipped, truncated
+                    for record in records:
+                        clamp_record_rates(record)
+                    return records, skipped, truncated, cutoff
                 read_size *= 2
     except Exception as e:
         logger.error("Failed to read history file: %s", e)
@@ -1758,15 +1988,44 @@ def _recording_health() -> dict[str, Any]:
     }
 
 
+def _parse_since(since: str | None) -> float | None | Response:
+    """The ``since`` query parameter (any ISO 8601 timestamp; the browser sends
+    the previous response's ``now`` minus a few minutes) as epoch seconds; None
+    when absent; a 400 Response when it does not parse."""
+    if since is None or since == "":
+        return None
+    # An unencoded "+00:00" pasted into a URL arrives as " 00:00"; put the plus
+    # back on the offset only (a space between date and time is valid ISO).
+    text = re.sub(r"(:\d\d(?:\.\d+)?) (\d\d:\d\d)$", r"\1+\2", since.strip())
+    text = text.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return Response(
+            content=json.dumps({"error": "since must be an ISO 8601 timestamp"}),
+            status_code=400,
+            media_type="application/json",
+        )
+    # Records are UTC; a timestamp without an offset is read as UTC too, not as
+    # the server's local time.
+    return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
+
+
 @APP.get("/api/history")
-async def get_history(hours: float = 24) -> Response:
+async def get_history(hours: float = 24, since: str | None = None) -> Response:
     """Return historical data for the specified time range.
 
     Args:
         hours: Number of hours of history to return (default 24, max 8760).
+        since: Only records strictly newer than this timestamp are returned
+            (the client merges them and trims against ``cutoff``). Responses
+            carry ``now`` (the server's clock) for the client's next since.
     """
     hours = max(0.1, min(hours, 8760))
-    result = await asyncio.to_thread(_read_history, hours)
+    since_ts = _parse_since(since)
+    if isinstance(since_ts, Response):
+        return since_ts
+    result = await asyncio.to_thread(_read_history, hours, since=since_ts)
 
     if isinstance(result, str):
         return Response(
@@ -1775,7 +2034,7 @@ async def get_history(hours: float = 24) -> Response:
             media_type="application/json",
         )
 
-    records, skipped, truncated = result
+    records, skipped, truncated, cutoff = result
     # Records embed an `ip` block (LAN/public/Tailscale). Nothing in the UI reads it
     # from history — the IP-Info card uses live /api/ip-info — so don't serve a
     # network-topology history to unauthenticated LAN clients. The password-gated
@@ -1793,6 +2052,8 @@ async def get_history(hours: float = 24) -> Response:
                 "count": len(records),
                 "skipped_lines": skipped,
                 "truncated": truncated,
+                "cutoff": cutoff,
+                "now": cutoff + hours * 3600,
                 "recording": _recording_health(),
             }
         ),
@@ -1801,12 +2062,15 @@ async def get_history(hours: float = 24) -> Response:
 
 
 @APP.get("/api/history/field/{name}")
-async def get_history_field(name: str, hours: float = 24) -> Response:
+async def get_history_field(
+    name: str, hours: float = 24, since: str | None = None
+) -> Response:
     """One heavy record field over the range: ``[{timestamp, <name>}, ...]``.
 
     Only the names in HISTORY_SIDE_FIELDS (the ones /api/history leaves out) are
     served; a record without the field keeps its timestamp so the chart's x-axis
-    matches /api/history and the missing field draws as a gap.
+    matches /api/history and the missing field draws as a gap. ``since`` works
+    as in /api/history.
     """
     if name not in HISTORY_SIDE_FIELDS:
         return Response(
@@ -1815,14 +2079,17 @@ async def get_history_field(name: str, hours: float = 24) -> Response:
             media_type="application/json",
         )
     hours = max(0.1, min(hours, 8760))
-    result = await asyncio.to_thread(_read_history, hours)
+    since_ts = _parse_since(since)
+    if isinstance(since_ts, Response):
+        return since_ts
+    result = await asyncio.to_thread(_read_history, hours, since=since_ts)
     if isinstance(result, str):
         return Response(
             content=json.dumps({"error": "Failed to read history", "detail": result}),
             status_code=500,
             media_type="application/json",
         )
-    records, skipped, truncated = result
+    records, skipped, truncated, cutoff = result
     slim = [
         {"timestamp": rec.get("timestamp"), **({name: rec[name]} if name in rec else {})}
         for rec in records
@@ -1835,6 +2102,8 @@ async def get_history_field(name: str, hours: float = 24) -> Response:
                 "count": len(slim),
                 "skipped_lines": skipped,
                 "truncated": truncated,
+                "cutoff": cutoff,
+                "now": cutoff + hours * 3600,
             }
         ),
         media_type="application/json",
@@ -3766,8 +4035,12 @@ LIVE VIEW (tui.py)
     seconds (600 by default), and each one averages several samples.
   - Temperatures: min / median / mean / max over every sensor (CPU, drives,
     GPUs, ...). The MaxT history row is the hottest sensor in each record.
-  - Percentages are 0-100. Network and disk I/O are MB/s (megabytes). Temperatures
-    are Celsius. Ping is round-trip ms; DOWN means every probe was lost.
+  - Percentages are 0-100. Network and disk I/O are MB/s (megabytes). Each
+    network interface and each drive is capped at config.json's
+    limits.network_mbps / limits.disk_io_mbps (defaults 1250 and 15000, read at
+    startup); the totals are their sums and are not capped. A record that hit a
+    cap lists it under rate_capped. Temperatures are Celsius. Ping is round-trip
+    ms; DOWN means every probe was lost.
   - Load: the bar is the 1-minute load divided by the CPU core count.
   - Sparklines are on a real time axis, window start (left) to now (right);
     a blank stretch means no records then (box off, recorder down). Each sparkline
@@ -3780,8 +4053,13 @@ LIVE VIEW (tui.py)
 
 JSON API (machine-readable; prefer these for exact values)
   GET /api/history?hours=24      records (no temps/processes/ip): cpu, memory, swap,
-                                 gpus, drives, network, disk_io, load, ping, cpu_freq
-  GET /api/history/field/temps   [{timestamp, temps}] for the same range (?hours=)
+                                 gpus, drives, network, disk_io, load, ping, cpu_freq;
+                                 &since=<timestamp, URL-encoded> returns only
+                                 records newer than it. Every response has cutoff
+                                 (window start) and now (epoch s). Records may carry
+                                 rate_capped: [{metric, interface | device, drive,
+                                 samples, of, raw_max, cap}] and rate_caps
+  GET /api/history/field/temps   [{timestamp, temps}] for the same range (?hours=, &since=)
   GET /api/history/field/processes   per-process rows, when process logging is on
   GET /api/history/settings      recording interval and sampling settings
   GET /api/processlist           live process list (arguments stripped)
@@ -3791,9 +4069,10 @@ JSON API (machine-readable; prefer these for exact values)
   GET /api/ping                  ping the configured targets now
   GET /api/sensors               fans/temps/power snapshot (root collector, when installed)
   GET /api/storage-health        drive SMART/RAID/ECC snapshot (root collector)
-  GET /api/4/<plugin>            live Glances metrics: cpu, mem, memswap, load,
-                                 network, diskio, fs, sensors, gpu
-  GET /config.json               title, ping targets, thresholds
+  GET /api/4/<plugin>            live Glances metrics, raw (rates not capped): cpu,
+                                 mem, memswap, load, network, diskio, fs, sensors, gpu
+  GET /config.json               the config file as written: title, ping targets,
+                                 thresholds, limits if set
 
 Dashboard: http://<host>:8080/   This page: /help
 """
@@ -3839,7 +4118,7 @@ async def text_view(
             status_code=500,
             media_type="text/plain",
         )
-    records, _skipped, _truncated = result
+    records, _skipped, _truncated, _cutoff = result
     sample: dict[str, Any] | None = None
     if live and view in ("latest", "both"):
         try:
@@ -3913,7 +4192,9 @@ async def _live_sample() -> dict[str, Any]:
         return _live_cache["record"]
 
 
-def _read_history_cached(hours: float) -> tuple[list[dict[str, Any]], int, bool] | str:
+def _read_history_cached(
+    hours: float,
+) -> tuple[list[dict[str, Any]], int, bool, float] | str:
     """_read_history, reused until the file changes or a minute passes (the
     window start moves). Callers must not mutate the returned records."""
     try:

@@ -9,8 +9,11 @@ Usage: uv run python test.py
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -45,7 +48,7 @@ SCHEMAS: dict[str, object] = {
     "/api/4/gpu": lambda d: isinstance(d, list),
     # The heavy fields are left out here and served by /api/history/field/<name>.
     "/api/history": lambda d: (
-        isinstance(d, dict) and {"records", "count", "skipped_lines"} <= d.keys()
+        isinstance(d, dict) and {"records", "count", "skipped_lines", "cutoff", "now"} <= d.keys()
         and not any(k in r for r in d["records"] for k in ("temps", "processes", "ip"))
     ),
     "/api/history/field/temps": lambda d: (
@@ -170,12 +173,14 @@ def wait_for_server(base: str, proc: subprocess.Popen, timeout: float = 30) -> b
     return False
 
 
-def _history_line(age_hours: float, pad: int = 0) -> str:
-    """Build a history JSONL line with a timestamp age_hours in the past."""
+def _history_line(age_hours: float, pad: int = 0, **fields: object) -> str:
+    """Build a history JSONL line with a timestamp age_hours in the past; extra
+    keyword arguments become record fields (e.g. a network block)."""
     ts = datetime.now(timezone.utc) - timedelta(hours=age_hours)
     record: dict[str, object] = {"timestamp": ts.isoformat(), "cpu": {"avg": 1.0}}
     if pad:
         record["pad"] = "x" * pad
+    record.update(fields)
     return json.dumps(record) + "\n"
 
 
@@ -191,12 +196,12 @@ def test_read_history_unit() -> None:
             server.HISTORY_FILE = hist
 
             def read(
-                hours: float, initial: int = 1024 * 1024
+                hours: float, initial: int = 1024 * 1024, since: float | None = None
             ) -> tuple[list[dict], int]:
-                result = server._read_history(hours, initial_read_size=initial)
+                result = server._read_history(hours, initial_read_size=initial, since=since)
                 if isinstance(result, str):
                     raise AssertionError(f"_read_history failed: {result}")
-                records, skipped, _truncated = result
+                records, skipped, _truncated, _cutoff = result
                 return records, skipped
 
             # 1. Missing, empty, and newline-only files
@@ -229,14 +234,15 @@ def test_read_history_unit() -> None:
                 describe(records),
             )
 
-            # 4. Torn last line (no trailing newline) is skipped and counted
+            # 4. An unterminated last line is a record still being appended: left
+            #    for the next read, not counted as corrupt.
             hist.write_text(
                 _history_line(30) + _history_line(2) + '{"timestamp": "2026-'
             )
             records, skipped = read(24)
             check(
-                len(records) == 1 and skipped == 1,
-                "torn last line skipped and counted",
+                len(records) == 1 and skipped == 0,
+                "unterminated last line left for the next read, not counted",
                 describe(records),
             )
 
@@ -299,7 +305,7 @@ def test_read_history_unit() -> None:
             hist.write_text(
                 "".join(_history_line(i * 0.001, pad=500) for i in range(2000))
             )
-            records, skipped, truncated = server._read_history(
+            records, skipped, truncated, _ = server._read_history(
                 24, initial_read_size=4096, max_bytes=64 * 1024
             )
             check(
@@ -308,12 +314,600 @@ def test_read_history_unit() -> None:
                 f"{len(records)} records, truncated={truncated}",
             )
             # Within-cap read of the same file is not truncated.
-            _, _, truncated_full = server._read_history(
+            _, _, truncated_full, _ = server._read_history(
                 24, initial_read_size=1024 * 1024
             )
             check(not truncated_full, "within-cap read is not truncated")
+
+            # 10. cutoff: the window start as epoch seconds, also for a missing file.
+            hist.unlink()
+            missing = server._read_history(24)
+            now = datetime.now(timezone.utc).timestamp()
+            check(
+                isinstance(missing, tuple)
+                and missing[:3] == ([], 0, False)
+                and abs(missing[3] - (now - 24 * 3600)) < 2,
+                "missing file -> ([], 0, False, cutoff) with cutoff = now - hours",
+                describe(missing),
+            )
+
+            # 11. since: only records strictly newer than it, covered by the first
+            #     window even when the range would need several doublings.
+            hist.write_text("".join(_history_line(20 - i, pad=100) for i in range(20)))
+            full, _ = read(24, initial=256)
+
+            def ts_of(r: dict) -> float:
+                return datetime.fromisoformat(r["timestamp"]).timestamp()
+
+            second_newest = ts_of(full[-2])
+            newer, skipped = read(24, initial=256, since=second_newest)
+            check(
+                [r["timestamp"] for r in newer] == [full[-1]["timestamp"]] and skipped == 0,
+                "since=2nd-newest -> only the newest record",
+                describe(newer),
+            )
+            check(read(24, since=ts_of(full[-1])) == ([], 0), "since=newest -> no records")
+            check(
+                read(24, since=ts_of(full[-1]) + 3600) == ([], 0),
+                "since in the future -> no records",
+            )
+            older, _ = read(24, initial=256, since=now - 48 * 3600)
+            check(
+                [r["timestamp"] for r in older] == [r["timestamp"] for r in full],
+                "since older than the cutoff behaves like no since",
+            )
+            # The record exactly at `since` is held by the client: excluded.
+            exact, _ = read(24, since=ts_of(full[-3]))
+            check(len(exact) == 2, "record at exactly since is excluded", describe(exact))
+
+            # 12. Reaching `since` covers the read: a byte cap that cannot reach
+            #     the 24 h cutoff is not hit (truncated stays False) when the
+            #     window already holds a record at or before `since`.
+            res = server._read_history(
+                24, initial_read_size=256, max_bytes=600, since=second_newest
+            )
+            assert not isinstance(res, str), res
+            check(
+                [r["timestamp"] for r in res[0]] == [full[-1]["timestamp"]] and res[2] is False,
+                "since stops the tail read early (no truncation under a small byte cap)",
+                f"records={len(res[0])} truncated={res[2]}",
+            )
+            res = server._read_history(24, initial_read_size=256, max_bytes=600)
+            assert not isinstance(res, str), res
+            check(res[2] is True, "the same byte cap without since does truncate")
+            # Boundary: the window's first whole line is exactly the `since` record.
+            lines = hist.read_bytes().splitlines(keepends=True)
+            window = len(lines[-1]) + len(lines[-2]) + 10   # 10 bytes of the line before
+            res = server._read_history(
+                24, initial_read_size=window, max_bytes=window, since=second_newest
+            )
+            assert not isinstance(res, str), res
+            check(
+                len(res[0]) == 1 and res[2] is False,
+                "a window starting exactly at the since record is covered",
+                f"records={len(res[0])} truncated={res[2]}",
+            )
+
+            # 13. cutoff on a normal read is the window start.
+            res = server._read_history(24)
+            assert not isinstance(res, str), res
+            now = datetime.now(timezone.utc).timestamp()
+            check(
+                abs(res[3] - (now - 24 * 3600)) < 2,
+                "cutoff = now - hours on a non-empty file",
+                f"cutoff={res[3]} expected~{now - 24 * 3600}",
+            )
     finally:
         server.HISTORY_FILE = orig_history_file
+
+
+def test_rate_clamp_unit() -> None:
+    """Rate caps: _cfg_num, _clamp_rate, clamp_record_rates, and the read path."""
+    print(f"\n{BOLD}rate clamp unit tests{RESET}\n")
+    import server
+
+    # _cfg_num: ints and floats in range pass (as float); bool, strings, 0 and
+    # non-finite fall back to the default with a warning.
+    def num(v: object) -> float:
+        return server._cfg_num({"k": v}, "k", 7.0, 1, 1e9, "t")
+
+    check(num(1250) == 1250.0 and isinstance(num(1250), float), "_cfg_num int -> float")
+    check(num(1250.5) == 1250.5, "_cfg_num float passes")
+    check(num(True) == 7.0, "_cfg_num rejects bool")
+    check(num("x") == 7.0, "_cfg_num rejects str")
+    check(num(0) == 7.0, "_cfg_num rejects below lo")
+    check(num(float("inf")) == 7.0 and num(float("nan")) == 7.0, "_cfg_num rejects inf/nan")
+    check(server._cfg_num({}, "k", 7.0, 1, 1e9, "t") == 7.0, "_cfg_num missing -> default")
+
+    # _read_limits: the "limits" section, not thresholds; defaults otherwise.
+    check(
+        server._read_limits({"limits": {"network_mbps": 100, "disk_io_mbps": 2000.5}}) == (100.0, 2000.5),
+        "_read_limits reads config.json limits",
+    )
+    check(
+        server._read_limits({"thresholds": {"network_mbps": 3, "disk_io_mbps": 50}}) == (1250.0, 15000.0),
+        "_read_limits ignores thresholds (same key names)",
+    )
+    check(server._read_limits({}) == (1250.0, 15000.0), "_read_limits defaults without limits")
+    check(
+        server._read_limits({"limits": "fast"}) == (1250.0, 15000.0)
+        and server._read_limits({"limits": {"network_mbps": 0}})[0] == 1250.0,
+        "_read_limits: non-object section or bad value -> defaults",
+    )
+
+    check(server._clamp_rate(-3.0, 10.0) == 0.0, "_clamp_rate floors at 0")
+    check(server._clamp_rate(1e9, 10.0) == 10.0, "_clamp_rate caps")
+    check(server._clamp_rate(4.5, 10.0) == 4.5, "_clamp_rate passes sane values")
+
+    rc = server._RateCaps()
+    vals = [rc.sample(v * 1e6, 10.0, ("network.in_mbps", "eth0")) for v in (4.0, 50.0, -1.0, 99.0)]
+    check(vals == [4.0, 10.0, 0.0, 10.0], "_RateCaps.sample: bytes/s -> MB/s, clamps without dropping", str(vals))
+    odd = [rc.sample(v, 10.0, ("network.in_mbps", "eth0")) for v in (float("inf"), float("nan"), "x", None, True)]
+    check(odd == [0.0] * 5, "_RateCaps.sample: missing/non-finite/non-numeric -> 0", str(odd))
+    check(
+        rc.seen == {("network.in_mbps", "eth0"): 4}
+        and rc.hits == {("network.in_mbps", "eth0"): [50.0, 99.0]},
+        "_RateCaps counts only real samples and keeps over-cap raw values",
+        f"seen={rc.seen} hits={rc.hits}",
+    )
+
+    # _parse_since: encoded, unencoded '+', Z, naive (= UTC), space separator, junk.
+    ref = datetime(2026, 10, 23, 12, 0, 0, 500000, tzinfo=timezone.utc).timestamp()
+    for text in ("2026-10-23T12:00:00.5+00:00", "2026-10-23T12:00:00.5 00:00",
+                 "2026-10-23T12:00:00.5Z", "2026-10-23T12:00:00.5", "2026-10-23 12:00:00.5"):
+        check(server._parse_since(text) == ref, f"_parse_since({text!r})")
+    check(server._parse_since(None) is None and server._parse_since("") is None, "_parse_since absent -> None")
+    bad = server._parse_since("garbage")
+    check(getattr(bad, "status_code", None) == 400, "_parse_since junk -> 400")
+
+    # Caps pinned here so the expectations don't depend on this box's config.json.
+    orig_caps = (server.MAX_NETWORK_MBPS, server.MAX_DISK_IO_MBPS)
+    server.MAX_NETWORK_MBPS, server.MAX_DISK_IO_MBPS = 1250.0, 15000.0
+    try:
+        _rate_clamp_record_checks(server)
+        _collect_sample_cap_checks(server)
+    finally:
+        server.MAX_NETWORK_MBPS, server.MAX_DISK_IO_MBPS = orig_caps
+
+
+def _rate_clamp_record_checks(server: object) -> None:
+    """clamp_record_rates and the read path, at the default caps."""
+    net_cap, dio_cap = 1250.0, 15000.0
+    spike = {"avg": 1e9, "min": -5.0, "max": 1e12}
+    clamped = {"avg": net_cap, "min": 0.0, "max": net_cap}
+    dclamped = {"avg": dio_cap, "min": 0.0, "max": dio_cap}
+
+    # A record from before per-device capping (no rate_caps): only totals exist,
+    # so the totals are clamped, both directions.
+    legacy: dict = {
+        "network": {"in_mbps": dict(spike), "out_mbps": dict(spike)},
+        "disk_io": {
+            "read_mbps": dict(spike),
+            "write_mbps": dict(spike),
+            "drives": [
+                {"name": "/", "read_mbps": dict(spike), "write_mbps": dict(spike)},
+                {"name": "/data", "read_mbps": {"avg": None, "min": None, "max": None}, "write_mbps": "bogus"},
+                "not a dict",
+            ],
+        },
+        "cpu": {"avg": 1e9},
+    }
+    server.clamp_record_rates(legacy)
+    check(
+        legacy["network"]["in_mbps"] == clamped and legacy["network"]["out_mbps"] == clamped,
+        "legacy record: network in and out totals clamped, negatives floored",
+        describe(legacy["network"]),
+    )
+    check(
+        legacy["disk_io"]["read_mbps"] == dclamped and legacy["disk_io"]["write_mbps"] == dclamped,
+        "legacy record: disk read and write totals clamped",
+    )
+    drives = legacy["disk_io"]["drives"]
+    check(
+        drives[0]["read_mbps"] == dclamped and drives[0]["write_mbps"] == dclamped
+        and drives[1]["read_mbps"] == {"avg": None, "min": None, "max": None}
+        and drives[1]["write_mbps"] == "bogus" and drives[2] == "not a dict",
+        "per-drive read and write clamped; None stats and odd entries left alone",
+    )
+    check(legacy["cpu"] == {"avg": 1e9}, "other metrics untouched")
+
+    # A per-device-capped record (rate_caps): totals are sums that may rightly
+    # exceed one cap, so they are left alone; drives are still clamped.
+    big = {"avg": 3000.0, "min": 2000.0, "max": 4000.0}
+    new: dict = {
+        "rate_caps": {"network_mbps": net_cap, "disk_io_mbps": dio_cap},
+        "network": {"in_mbps": dict(big), "out_mbps": dict(big)},
+        "disk_io": {
+            "read_mbps": {"avg": 20000.0, "min": 0.0, "max": 25000.0},
+            "write_mbps": {"avg": 1.0, "min": 1.0, "max": 1.0},
+            "drives": [{"name": "/", "read_mbps": dict(spike), "write_mbps": dict(spike)}],
+        },
+    }
+    server.clamp_record_rates(new)
+    check(
+        new["network"]["in_mbps"] == big and new["network"]["out_mbps"] == big
+        and new["disk_io"]["read_mbps"]["max"] == 25000.0,
+        "per-device-capped record: totals over one cap are left alone",
+        describe(new),
+    )
+    check(
+        new["disk_io"]["drives"][0]["read_mbps"] == spike,
+        "per-device-capped record: served as recorded (drives too)",
+    )
+    server.clamp_record_rates({"network": None, "disk_io": 5})
+    server.clamp_record_rates({})
+    ok("clamp_record_rates tolerates missing/odd blocks")
+
+    # The read path serves clamped values for legacy records and never rewrites.
+    orig_history_file = server.HISTORY_FILE
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            hist = Path(tmp) / "history.jsonl"
+            server.HISTORY_FILE = hist
+            hist.write_text(
+                _history_line(
+                    1,
+                    network={"in_mbps": {"avg": 1e9, "min": 1e9, "max": 1e9},
+                             "out_mbps": {"avg": 0.5, "min": 0.1, "max": 0.9}},
+                    disk_io={"read_mbps": {"avg": 1e9, "min": 0.0, "max": 1e9},
+                             "write_mbps": {"avg": 1.0, "min": 1.0, "max": 1.0}},
+                )
+            )
+            result = server._read_history(24)
+            assert not isinstance(result, str), result
+            served = result[0][0]
+            check(
+                served["network"]["in_mbps"]["avg"] == net_cap
+                and served["network"]["out_mbps"]["max"] == 0.9
+                and served["disk_io"]["read_mbps"]["max"] == dio_cap
+                and served["disk_io"]["write_mbps"]["avg"] == 1.0,
+                "_read_history serves clamped legacy rates, sane values untouched",
+                describe(served),
+            )
+            raw = json.loads(hist.read_text())
+            check(raw["network"]["in_mbps"]["avg"] == 1e9, "reading never rewrites the file")
+    finally:
+        server.HISTORY_FILE = orig_history_file
+
+
+def _collect_sample_cap_checks(server: object) -> None:
+    """collect_history_sample against a fake Glances: each interface and each
+    drive is capped on its own (a spike counts as the cap, never dropped),
+    totals are uncapped sums, bad rates are ignored without losing the record,
+    and the record lists what hit a cap; the log line is for recorded samples
+    only. Caps are lowered so the numbers are easy to read."""
+    server.MAX_NETWORK_MBPS, server.MAX_DISK_IO_MBPS = 100.0, 200.0
+    M = 1e6  # MB/s -> bytes/s
+    calls = {"network": 0, "diskio": 0}
+    # Per sample (3 samples), MB/s. eth0 spikes in (sample 2) and out (sample 3);
+    # docker0 carries steady traffic that also crossed eth0, so the in total of
+    # sample 2 (100 + 80) rightly exceeds the 100 cap and is not capped; wlan0
+    # reports Infinity and a string, which are ignored.
+    eth0_in, eth0_out = [1, 5e6, 2], [1, 1, 3e6]
+    docker_in = [80, 80, 80]
+    wlan0_in = [float("inf"), "x", 1]
+    sda1_read, sda1_write = [1, 9e8, 1], [0, 0, 7e8]
+    sdb_read = [150, 150, 150]   # mounted: total read in sample 2 = 200 + 150
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/4/network":
+            i = calls["network"] % 3
+            calls["network"] += 1
+            body = json.dumps([
+                {"interface_name": "eth0", "bytes_recv_rate_per_sec": eth0_in[i] * M,
+                 "bytes_sent_rate_per_sec": eth0_out[i] * M},
+                {"interface_name": "docker0", "bytes_recv_rate_per_sec": docker_in[i] * M,
+                 "bytes_sent_rate_per_sec": 0},
+                {"interface_name": "wlan0",
+                 "bytes_recv_rate_per_sec": wlan0_in[i] * M if isinstance(wlan0_in[i], (int, float)) else wlan0_in[i],
+                 "bytes_sent_rate_per_sec": None},
+                {"interface_name": "lo", "bytes_recv_rate_per_sec": 9e15, "bytes_sent_rate_per_sec": 9e15},
+            ])  # json.dumps writes Infinity, as Glances' stdlib json would
+            return httpx.Response(200, content=body, headers={"content-type": "application/json"})
+        if path == "/api/4/diskio":
+            i = calls["diskio"] % 3
+            calls["diskio"] += 1
+            rows = [
+                {"disk_name": "sda1", "read_bytes_rate_per_sec": sda1_read[i] * M,
+                 "write_bytes_rate_per_sec": sda1_write[i] * M},
+                {"disk_name": "sdb", "read_bytes_rate_per_sec": sdb_read[i] * M, "write_bytes_rate_per_sec": 0},
+                {"disk_name": "md0", "read_bytes_rate_per_sec": 9e15, "write_bytes_rate_per_sec": 0},
+            ]
+            if i == 1:  # appears for one sample only
+                rows.append({"disk_name": "sdc", "read_bytes_rate_per_sec": 5e14, "write_bytes_rate_per_sec": 0})
+            return httpx.Response(200, json=rows)
+        if path == "/api/4/fs":
+            return httpx.Response(200, json=[
+                {"device_name": "/dev/sda1", "mnt_point": "/", "size": 100, "used": 50, "percent": 50},
+                {"device_name": "/dev/sdb", "mnt_point": "/data", "size": 100, "used": 10, "percent": 10},
+            ])
+        if path == "/api/4/cpu":
+            return httpx.Response(200, json={"total": 5.0})
+        return httpx.Response(404, json={})
+
+    orig_client = server.httpx.AsyncClient
+    orig = {n: getattr(server, n) for n in ("get_gpu_stats", "_get_ip_info")}
+    state_keys = ("history_sample_duration", "history_sample_count", "history_processes_enabled",
+                  "history_process_count", "ping_enabled")
+    orig_state = {k: getattr(server.APP.state, k, None) for k in state_keys}
+
+    class FakeClient(orig_client):  # type: ignore[misc, valid-type]
+        def __init__(self, *a: object, **k: object) -> None:
+            k["transport"] = httpx.MockTransport(handler)
+            super().__init__(*a, **k)
+
+    class Capture(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__(logging.WARNING)
+            self.messages: list[str] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.messages.append(record.getMessage())
+
+    cap_log = Capture()
+    server.logger.addHandler(cap_log)
+    try:
+        server.httpx.AsyncClient = FakeClient
+        server.get_gpu_stats = lambda: []
+        server._get_ip_info = lambda: {}
+        for k, v in zip(state_keys, (0, 3, False, 10, False)):
+            setattr(server.APP.state, k, v)
+        rec = asyncio.run(server.collect_history_sample("http://glances.invalid"))
+        recorded_log = [m for m in cap_log.messages if m.startswith("Rate cap hit")]
+        cap_log.messages.clear()
+        calls.update(network=1, diskio=1)   # the live sample is the spiky one
+        live = asyncio.run(server.collect_history_sample("http://glances.invalid", live=True))
+        live_log = [m for m in cap_log.messages if m.startswith("Rate cap hit")]
+    finally:
+        server.logger.removeHandler(cap_log)
+        server.httpx.AsyncClient = orig_client
+        for n, f in orig.items():
+            setattr(server, n, f)
+        for k, v in orig_state.items():
+            setattr(server.APP.state, k, v)
+
+    # in totals: 1+80+0, 100+80+0, 2+80+1  (eth0 capped; wlan0 bad values -> 0)
+    check(
+        rec.get("network", {}).get("in_mbps") == {"avg": round(344 / 3, 2), "min": 81.0, "max": 180.0},
+        "network: each interface capped, total is their uncapped sum, bad rates ignored",
+        describe(rec.get("network")),
+    )
+    check(
+        rec.get("network", {}).get("out_mbps", {}).get("max") == 100.0,
+        "network out capped per interface too",
+        describe(rec.get("network", {}).get("out_mbps")),
+    )
+    drives = {d["name"]: d for d in rec.get("disk_io", {}).get("drives", [])}
+    check(
+        drives.get("/", {}).get("read_mbps", {}).get("max") == 200.0
+        and drives.get("/", {}).get("write_mbps", {}).get("max") == 200.0
+        and drives.get("/data", {}).get("read_mbps", {}).get("max") == 150.0,
+        "per-drive read and write capped",
+        describe(drives),
+    )
+    check(
+        rec.get("disk_io", {}).get("read_mbps", {}).get("max") == 350.0,
+        "disk total is the uncapped sum of capped drives (200 + 150)",
+        describe(rec.get("disk_io", {}).get("read_mbps")),
+    )
+    check(
+        rec.get("rate_caps") == {"network_mbps": 100.0, "disk_io_mbps": 200.0},
+        "record notes the caps it was taken under (rate_caps)",
+        describe(rec.get("rate_caps")),
+    )
+    expected = [
+        {"metric": "disk_io.read_mbps", "device": "md0", "samples": 3, "of": 3, "raw_max": 9e9, "cap": 200.0},
+        {"metric": "disk_io.read_mbps", "device": "sda1", "drive": "/", "samples": 1, "of": 3, "raw_max": 9e8,
+         "cap": 200.0},
+        {"metric": "disk_io.read_mbps", "device": "sdc", "samples": 1, "of": 1, "raw_max": 5e8, "cap": 200.0},
+        {"metric": "disk_io.write_mbps", "device": "sda1", "drive": "/", "samples": 1, "of": 3, "raw_max": 7e8,
+         "cap": 200.0},
+        {"metric": "network.in_mbps", "interface": "eth0", "samples": 1, "of": 3, "raw_max": 5e6, "cap": 100.0},
+        {"metric": "network.out_mbps", "interface": "eth0", "samples": 1, "of": 3, "raw_max": 3e6, "cap": 100.0},
+    ]
+    check(
+        rec.get("rate_capped") == expected,
+        "rate_capped: one entry per interface/device, its own sample count, raw max",
+        json.dumps(rec.get("rate_capped")),
+    )
+    check(len(recorded_log) == 1, "one 'Rate cap hit' log line per recorded sample", str(recorded_log))
+    check(
+        live.get("rate_capped") and not live_log,
+        "live (/text) samples note caps but never log",
+        f"capped={live.get('rate_capped')} log={live_log}",
+    )
+
+
+def test_history_fetch_js() -> None:
+    """The browser's history cache (static/app.js fetchHistoryData and helpers),
+    run in node against a scripted safeFetch."""
+    print(f"\n{BOLD}history fetch (app.js, node) unit tests{RESET}\n")
+    node = shutil.which("node")
+    if not node:
+        # A silent skip would read as a pass; opt out explicitly instead.
+        if os.environ.get("HORATIO_SKIP_NODE") == "1":
+            print("  SKIP  history fetch JS tests (HORATIO_SKIP_NODE=1, node not installed)")
+        else:
+            fail("history fetch JS tests", "node not installed (set HORATIO_SKIP_NODE=1 to skip)")
+        return
+    src = (Path(__file__).parent / "static" / "app.js").read_text()
+    cfg_src = (Path(__file__).parent / "static" / "config.js").read_text()
+
+    def between(text: str, start: str, end: str) -> str:
+        # The test slices app.js / config.js by these markers; a renamed one is
+        # a test failure that names it, not a crash of the whole suite.
+        a = text.find(start)
+        b = text.find(end, a + 1)
+        if a < 0 or b < 0:
+            raise LookupError(f"marker not found: {start if a < 0 else end!r}")
+        return text[a:b]
+
+
+    try:
+        harness = r"""
+const assert = require('assert');
+let defaultHistoryHours = 24;
+const toasts = [];
+function showError(m) { toasts.push(m); }
+console.warn = () => {};
+const calls = [];
+let responder = null;
+async function safeFetch(url) { calls.push(url); return responder(url); }
+const historyCards = new Map();
+const document = { querySelector: () => null, getElementById: () => null, querySelectorAll: () => [] };
+const HISTORY_METRICS = { cpu: {}, memory: {}, temps: { sideField: 'temps' } };
+const loads = [];
+async function loadHistoryData(metric, hours) { loads.push([metric, hours]); }
+let thresholds = { network_mbps: 3 }, dashboardConfig = {};
+let configBody = null;
+async function fetch() { return { ok: true, json: async () => configBody }; }
+""" + between(src, "const historyFetchInflight", "// Markup for a failed history fetch") \
+        + between(src, "function removeHistoryCard", "// Show history for all metrics") \
+        + between(src, "async function refreshAllHistory", "document.getElementById('refresh-history-btn')?.addEventListener") \
+        + between(cfg_src, "// Ceilings (MB/s)", "// Read a CSS custom property") \
+        + between(cfg_src, "async function loadConfig", "// Update card warning state") + r"""
+const MS = (min) => Date.UTC(2026, 9, 23, 12, min);
+const T = (min) => new Date(MS(min)).toISOString().replace('Z', '+00:00');
+const recs = (...mins) => mins.map(m => ({ timestamp: T(m) }));
+// A server response for a window of `hours` whose clock reads T(nowMin).
+const resp = (nowMin, records, extra = {}, hours = 24) => ({ ok: true, data: {
+  records, count: records.length, skipped_lines: 0, truncated: false,
+  cutoff: MS(nowMin) / 1000 - hours * 3600, now: MS(nowMin) / 1000, ...extra } });
+const since = (url) => { const m = url.match(/since=([^&]+)/); return m ? decodeURIComponent(m[1]) : null; };
+const ok = (r) => Promise.resolve(r);
+const deferred = () => { let r; const p = new Promise(res => { r = res; }); return [p, r]; };
+const card = (hours) => ({ card: { remove() {}, querySelector: () => ({ value: String(hours) }) }, chart: null });
+(async () => {
+  // 1. First load: a full fetch.
+  responder = () => ok(resp(25, recs(0, 20, 10)));
+  let d = await fetchHistoryData(24);
+  assert.strictEqual(since(calls.at(-1)), null, 'first fetch has no since');
+  const firstObj = d;
+  // 2. Any later fetch of a cached window (a reopened card, a range changed
+  //    back, Refresh) tops it up: since = the server's last now - 5 min. The
+  //    late record (15) merges in time order, held ones dedupe, records before
+  //    the server's cutoff drop, and truncated keeps its window meaning.
+  historyCache.get(24).truncated = true;
+  responder = () => ok(resp(30, recs(10, 15, 20, 30), { cutoff: MS(5) / 1000 }));
+  d = await fetchHistoryData(24);
+  assert.strictEqual(Date.parse(since(calls.at(-1))), MS(25) - 300 * 1000, 'reopen tops up from last now - 5 min');
+  assert.deepStrictEqual(d.records.map(r => r.timestamp), [T(10), T(15), T(20), T(30)], 'merged, deduped, sorted, trimmed');
+  assert.strictEqual(d.count, 4);
+  assert.strictEqual(d.truncated, true, 'a truncated window stays truncated after a top-up');
+  assert.strictEqual(firstObj.records.length, 3, 'the cached object a chart holds is not mutated');
+  // 3. Record timestamps never set since: a future-stamped record changes nothing.
+  responder = () => ok(resp(40, recs(35, 400)));
+  await fetchHistoryData(24, { force: true });
+  responder = () => ok(resp(45, recs(42)));
+  await fetchHistoryData(24, { force: true });
+  assert.strictEqual(Date.parse(since(calls.at(-1))), MS(40) - 300 * 1000, 'since from the server clock, not records');
+  // 4. A window with corrupt lines refetches in full; a clean one tops up again.
+  responder = () => ok(resp(5, recs(0), { skipped_lines: 3 }, 12));
+  await fetchHistoryData(12);
+  responder = () => ok(resp(6, recs(0, 5), {}, 12));
+  d = await fetchHistoryData(12, { force: true });
+  assert.strictEqual(since(calls.at(-1)), null, 'window with skipped lines -> full refetch');
+  assert.strictEqual(d.skipped_lines, 0);
+  responder = () => ok(resp(8, recs(7), {}, 12));
+  await fetchHistoryData(12, { force: true });
+  assert.notStrictEqual(since(calls.at(-1)), null, 'clean window -> top-up again');
+  // 5. A backend that reports no clock (OpenWrt): always a full fetch, which replaces.
+  responder = () => ok({ ok: true, data: { records: recs(1, 2), count: 2, skipped_lines: 0 } });
+  await fetchHistoryData(6);
+  responder = () => ok({ ok: true, data: { records: recs(2, 3), count: 2, skipped_lines: 0 } });
+  d = await fetchHistoryData(6, { force: true });
+  assert.strictEqual(since(calls.at(-1)), null, 'no now -> no since');
+  assert.deepStrictEqual(d.records.map(r => r.timestamp), [T(2), T(3)], 'full window replaces');
+  // ...and a since= response without cutoff (an older server) is a full window too.
+  assert.deepStrictEqual(mergeHistoryDelta({ records: recs(0) }, { records: recs(5), count: 1 }).records,
+                         recs(5), 'no cutoff -> replace');
+  // 6. A truncated top-up (gap) refetches in full, without since.
+  let n = 0;
+  responder = (url) => { n++; return since(url)
+    ? ok(resp(50, recs(50), { truncated: true })) : ok(resp(50, recs(30, 40, 50))); };
+  d = await fetchHistoryData(24, { force: true });
+  assert.strictEqual(n, 2, 'truncated delta -> second, full request');
+  assert.strictEqual(since(calls.at(-1)), null);
+  assert.strictEqual(d.count, 3);
+  // 7. A card opened during a Refresh joins it.
+  const [p, resolve] = deferred();
+  responder = () => p;
+  const refreshing = fetchHistoryData(24, { force: true });
+  const opened = fetchHistoryData(24);
+  assert.strictEqual(opened, refreshing, 'non-force call joins the in-flight refresh');
+  resolve(resp(60, recs(40, 50, 60)));
+  assert.strictEqual((await opened).count, 4);
+  // 8. A fetch overtaken by a Refresh does not overwrite the Refresh's result.
+  const [p3, resolve3] = deferred();
+  responder = () => p3;
+  const slow = fetchHistoryData(24);
+  responder = () => ok(resp(70, recs(70)));
+  await fetchHistoryData(24, { force: true });
+  resolve3(resp(65, recs(65)));
+  await slow;
+  assert.strictEqual(historyCache.get(24).now, MS(70) / 1000, 'superseded fetch is not cached');
+  // 9. The last card closes during a Refresh (the real removeHistoryCard), then a
+  //    card reopens: it starts its own fetch, which is cached; the old one isn't.
+  historyCards.set('cpu', card(24));
+  const [p2, resolve2] = deferred();
+  responder = () => p2;
+  const late = fetchHistoryData(24, { force: true });
+  removeHistoryCard('cpu');
+  assert.strictEqual(historyCache.size, 0, 'closing the last card clears the cache');
+  responder = () => ok(resp(90, recs(80, 90)));
+  const reopened = fetchHistoryData(24);
+  assert.notStrictEqual(reopened, late, 'a reopened card does not join the discarded fetch');
+  await reopened;
+  resolve2(resp(75, recs(75)));
+  await late;
+  assert.strictEqual(historyCache.get(24)?.count, 2, 'the reopened fetch is cached, the late one is not');
+  // 10. A failed fetch keeps the cached window.
+  responder = () => ok({ ok: false, errorType: 'timeout', data: { records: [], count: 0 } });
+  d = await fetchHistoryData(24, { force: true });
+  assert.strictEqual(d.ok, false);
+  assert.strictEqual(historyCache.get(24).count, 2, 'failure is not cached; window kept');
+  // 11. Refresh skips a card whose range changed while its fetch was in flight
+  //     (the real refreshAllHistory); the others redraw.
+  const cpu = card(24), mem = card(24);
+  historyCards.clear(); historyCards.set('cpu', cpu); historyCards.set('memory', mem);
+  const [p4, resolve4] = deferred();
+  responder = () => p4;
+  const refresh = refreshAllHistory();
+  cpu.card.querySelector = () => ({ value: '1' });   // the user types 1 h meanwhile
+  resolve4(resp(95, recs(95)));
+  await refresh;
+  assert.deepStrictEqual(loads, [['memory', 24]], 'only the unchanged card redraws at the old range');
+  // 12. config.js: limits from /config.json, validated like the server's _cfg_num.
+  configBody = { thresholds: { network_mbps: 9 }, limits: { network_mbps: 5, disk_io_mbps: 'x', bogus: 7 } };
+  await loadConfig();
+  assert.deepStrictEqual(limits, { network_mbps: 5, disk_io_mbps: 15000 }, 'valid limit taken, bad one ignored');
+  for (const bad of [0, -1, true, 1e10, null, Infinity]) {
+    configBody = { limits: { network_mbps: bad } };
+    await loadConfig();
+    assert.strictEqual(limits.network_mbps, 5, `limit ${bad} rejected`);
+  }
+  assert.deepStrictEqual([clampRate(-3, 10), clampRate(50, 10), clampRate(4, 10), clampRate(NaN, 10), clampRate(undefined, 10)],
+                         [0, 10, 4, 0, 0], 'clampRate');
+  console.log('OK');
+})().catch(e => { console.error(e && e.stack || e); process.exit(1); });
+"""
+    except LookupError as e:
+        fail("history fetch JS tests", str(e))
+        return
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+        f.write(harness)
+        script = f.name
+    try:
+        r = subprocess.run([node, script], capture_output=True, text=True, timeout=30)
+        check(
+            r.returncode == 0 and r.stdout.strip() == "OK",
+            "history cache (top-up on reopen, order, server clock, skipped, no clock, gap, "
+            "in-flight, superseded, close/reopen, failure), refresh vs range change, config.js limits",
+            (r.stderr or r.stdout).strip()[-600:],
+        )
+    finally:
+        os.unlink(script)
 
 
 def test_null_metrics_unit() -> None:
@@ -917,6 +1511,8 @@ def test_tui_unit() -> None:
 def main() -> int:
     global passes, fails
     test_read_history_unit()
+    test_rate_clamp_unit()
+    test_history_fetch_js()
     test_null_metrics_unit()
     test_process_history_unit()
     test_dedupe_fs_unit()
@@ -1128,6 +1724,91 @@ def main() -> int:
         except Exception as e:
             fail("GET /api/history", str(e))
 
+        # ── Incremental history (since=) and gzip ────────────────────
+        try:
+            h = httpx.get(f"{base}/api/history?hours=24", timeout=30).json()
+            check("cutoff" in h, "history response carries cutoff")
+            newest = max(
+                (r["timestamp"] for r in h.get("records", [])),
+                key=lambda t: datetime.fromisoformat(t.replace("Z", "+00:00")),
+                default=None,
+            )
+            if newest:
+                newest_ts = datetime.fromisoformat(newest.replace("Z", "+00:00")).timestamp()
+                r = httpx.get(
+                    f"{base}/api/history", params={"hours": 24, "since": newest}, timeout=30
+                )
+                d = r.json()
+                # The background initial sample can land between the two reads, so
+                # the contract is "strictly newer", not "nothing".
+                check(
+                    r.status_code == 200
+                    and d.get("count") == len(d.get("records", [])) <= 1
+                    and all(
+                        datetime.fromisoformat(x["timestamp"].replace("Z", "+00:00")).timestamp()
+                        > newest_ts
+                        for x in d.get("records", [])
+                    )
+                    and "cutoff" in d,
+                    "GET /api/history?since=<newest> returns only strictly newer records",
+                    describe(d),
+                )
+                r = httpx.get(
+                    f"{base}/api/history/field/temps",
+                    params={"hours": 24, "since": newest},
+                    timeout=30,
+                )
+                check(
+                    r.status_code == 200 and "cutoff" in r.json() and r.json().get("count", 99) <= 1,
+                    "GET /api/history/field/temps?since= works",
+                    describe(r.json()),
+                )
+            else:
+                fail("history since= checks", "no records to take a timestamp from")
+            check(
+                isinstance(h.get("cutoff"), (int, float))
+                and abs(h["cutoff"] - (time.time() - 24 * 3600)) < 120,
+                "history cutoff is the window start (now - hours)",
+                str(h.get("cutoff")),
+            )
+            check(
+                isinstance(h.get("now"), (int, float)) and abs(h["now"] - time.time()) < 120
+                and abs(h["now"] - h["cutoff"] - 24 * 3600) < 1e-6,
+                "history now is the server clock (cutoff + hours)",
+                str(h.get("now")),
+            )
+            if newest and "+" in newest:
+                # Pasted unencoded, the '+' of '+00:00' arrives as a space.
+                r = httpx.get(f"{base}/api/history?hours=24&since={newest}", timeout=30)
+                check(r.status_code == 200, "since= with an unencoded '+00:00' is accepted", r.text[:200])
+            r = httpx.get(f"{base}/api/history?hours=24&since=garbage", timeout=30)
+            check(r.status_code == 400, "GET /api/history?since=garbage -> 400", r.text[:200])
+            r = httpx.get(
+                f"{base}/static/app.js",
+                # Above the 1000-byte gzip minimum, so a missing bypass would show.
+                headers={"Accept-Encoding": "gzip", "Range": "bytes=0-4999"},
+                timeout=30,
+            )
+            check(
+                r.status_code == 206 and "content-encoding" not in r.headers and len(r.content) == 5000,
+                "Range requests are not gzipped (Content-Range stays true)",
+                f"{r.status_code} {dict(r.headers)}",
+            )
+            r = httpx.get(f"{base}/", headers={"Accept-Encoding": "gzip"}, timeout=30)
+            check(
+                r.status_code == 200 and r.headers.get("content-encoding") == "gzip",
+                "responses are gzipped for clients that accept it",
+                str(dict(r.headers)),
+            )
+            r = httpx.get(f"{base}/text", headers={"Accept-Encoding": "identity"}, timeout=30)
+            check(
+                r.status_code == 200 and "content-encoding" not in r.headers,
+                "no gzip without Accept-Encoding: gzip (tui.py path)",
+                str(dict(r.headers)),
+            )
+        except Exception as e:
+            fail("history since= / gzip", str(e))
+
         # ── Raw history export (password-gated: records embed LAN/public/
         # Tailscale IPs, so an unauthenticated bulk export is not offered) ──
         try:
@@ -1220,6 +1901,48 @@ def main() -> int:
                         f"disk_io.drives[{name}].{key} has avg/min/max",
                     )
             check(len(drives_io) > 0, "history has per-drive disk_io")
+
+            # Served rates obey the configured caps (the box's config.json may
+            # set its own; defaults otherwise).
+            try:
+                cfg = httpx.get(f"{base}/config.json", timeout=10).json()
+                lims = cfg.get("limits") if isinstance(cfg.get("limits"), dict) else {}
+
+                def cap_of(key: str, default: float) -> float:
+                    # The server's _cfg_num rules: a number in [1, 1e9], else default.
+                    v = lims.get(key, default)
+                    ok_ = isinstance(v, (int, float)) and not isinstance(v, bool) and 1 <= v <= 1e9
+                    return float(v) if ok_ else default
+
+                dio_cap = cap_of("disk_io_mbps", 15000.0)
+                first_hist = (httpx.get(f"{base}/api/history?hours=24", timeout=30).json()
+                              .get("records") or [{}])[0]
+
+                def within(stats: object, cap: float) -> bool:
+                    return isinstance(stats, dict) and all(
+                        v is None or 0 <= v <= cap for v in stats.values()
+                    )
+
+                for label, rec_ in (("echo", record), ("history", first_hist)):
+                    net = rec_.get("network", {})
+                    dio_ = rec_.get("disk_io", {})
+
+                    def nonneg(stats: object) -> bool:
+                        return isinstance(stats, dict) and all(v is None or v >= 0 for v in stats.values())
+
+                    # Each drive is capped; totals are uncapped sums (non-negative).
+                    check(
+                        all(nonneg(net.get(k)) for k in ("in_mbps", "out_mbps") if k in net)
+                        and all(nonneg(dio_.get(k)) for k in ("read_mbps", "write_mbps") if k in dio_)
+                        and all(
+                            within(d.get(k), dio_cap)
+                            for d in dio_.get("drives", []) for k in ("read_mbps", "write_mbps") if k in d
+                        ),
+                        f"{label} record: drives within limits (disk<={dio_cap}), totals non-negative",
+                        describe({"network": net, "disk_io": dio_}),
+                    )
+            except Exception as e:
+                fail("served rates within limits", str(e))
         else:
             fail("history record returned data")
 

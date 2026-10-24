@@ -24,6 +24,16 @@ let thresholds = {
   ping_ms: 100
 };
 
+// Ceilings (MB/s) for the network and disk I/O cards (config.json "limits").
+// Glances' rates are counter deltas and now and then come out absurd. Each
+// interface and each drive is capped on its own, totals are not; the server
+// caps recorded samples the same way (_RateCaps).
+let limits = {
+  network_mbps: 1250,   // 10 Gbit/s
+  disk_io_mbps: 15000   // a PCIe 5 NVMe
+};
+function clampRate(value, cap) { return Math.min(Math.max(value || 0, 0), cap); }
+
 // Read a CSS custom property value
 function getCssColor(varName) {
   return getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
@@ -227,6 +237,13 @@ async function loadConfig() {
       dashboardConfig = data;
       if (data.thresholds) {
         thresholds = { ...thresholds, ...data.thresholds };
+      }
+      // Validated like the server's _cfg_num, so a bad value never pins the
+      // browser at 0/NaN while the server falls back to its default.
+      if (data.limits && typeof data.limits === 'object') {
+        for (const [k, v] of Object.entries(data.limits)) {
+          if (k in limits && typeof v === 'number' && Number.isFinite(v) && v >= 1 && v <= 1e9) limits[k] = v;
+        }
       }
     }
   } catch (e) {

@@ -93,6 +93,7 @@ curl http://<host>:8080/text?style=simple         # plain ASCII, for scripts and
 | `history.processes_enabled`, `history.process_count` | log the top `process_count` processes by CPU and by memory, plus any holding GPU memory, in each history record (`processes`: pid, name always; ppid, create_time, user, status, threads, cpu_percent, rss_mb, disk_read_kbps, disk_write_kbps, gpu_mem_mib + gpus when known and non-zero); default off, 10. Roughly doubles a record's size at 10, so the 64 MB history tail covers fewer days |
 | `thresholds.*_percent`, `temp_celsius`, `network_mbps`, `disk_io_mbps`, `ping_ms` | orange-card thresholds |
 | `thresholds.power_max_watts`, `power_psu_watts`, `power_warn_fraction` | the power bar's right edge, its dashed PSU line, and the orange threshold as a fraction of the PSU |
+| `limits.network_mbps`, `limits.disk_io_mbps` | ceilings (MB/s) for each network interface and each drive, because Glances' rates occasionally come out absurd (default 1250, i.e. 10 Gbit/s, and 15000). A sample over the cap counts as the cap, so a spike is shortened, not removed. Totals are the sums of the capped interfaces / drives and are not capped themselves (bridges, veths and tunnels count the same traffic more than once). Applies to the live cards, history and `/text`, not to the raw `/api/4/*` endpoints or to history on the OpenWrt backend. A record that hit a cap lists it under `rate_capped` (`metric`, `interface` or `device` + `drive`, `samples` of `of`, `raw_max`, `cap`) and the server logs it; each record notes the caps it was taken under in `rate_caps`. The server reads the limits at startup (restart after changing them); the page reads them on load. Records without `rate_caps` (recorded before the caps) are clamped when read; records with it are served as recorded, so a changed cap applies to new records only |
 
 Runtime settings (poll interval, chart length, grid columns, card order) live in the browser.
 History recording settings can also be changed from the page with the password; they revert to
@@ -130,10 +131,10 @@ again, don't put this on anything besides a trusted LAN!
 | `GET /api/mail`              | Local system mail: `count` and the newest 10 `{date_epoch, subject}`; always 200 with `status` ok/missing/error |
 | `GET /api/storage-health`    | The 15-min collector snapshot (`alarms`, `info`, drives, md, ECC, SEL, backup, failed units, journal errors) with `status` ok/stale/missing/error and `age_sec`; always 200 |
 | `GET /api/sensors`           | The 60 s sensors snapshot (`fans`, `temps`, `power`, `gpus` with nvidia-smi temperatures, driver limits, thermal slowdown and ECC, `alarms`), same shape, stale after 300 s |
-| `GET /api/history`           | History records (query: `hours`, default 24) without the heavy fields (`temps`, `processes`) and `ip`. Each record also carries `cpu_freq` (min/median/avg/max MHz over every core and burst sample, plus the hardware range) where cpufreq sysfs exists |
-| `GET /api/history/field/{name}` | One heavy field over the range, `[{timestamp, <name>}]`: `temps` (every sensor) or `processes` (the per-process rows, when logging is on). The history cards that draw these ask for them alone |
+| `GET /api/history`           | History records (query: `hours`, default 24) without the heavy fields (`temps`, `processes`) and `ip`. Each record also carries `cpu_freq` (min/median/avg/max MHz over every core and burst sample, plus the hardware range) where cpufreq sysfs exists. `since=<timestamp>` (URL-encoded) returns only newer records. Every response has `cutoff` (the window start, for trimming what a client already holds) and `now` (the server's clock, for the next `since`), both epoch seconds. With `since`, `truncated: true` means the read stopped before reaching `since` (refetch without it) and `skipped_lines` counts only the part read |
+| `GET /api/history/field/{name}` | One heavy field over the range, `[{timestamp, <name>}]`: `temps` (every sensor) or `processes` (the per-process rows, when logging is on). The history cards that draw these ask for them alone. Takes `since` like `/api/history` |
 | `POST /api/history/record`   | Record now (rate-limited)                   |
-| `GET /api/history/raw`       | Raw `history.jsonl` download (password)     |
+| `GET /api/history/raw`       | `history.jsonl` as recorded (password): rates as capped when each record was taken, not re-capped |
 | `GET /api/history/settings`  | Current recording settings                  |
 | `POST /api/history/settings` | Update recording settings (password)        |
 | `GET /config.json`           | The config                                  |
@@ -181,6 +182,7 @@ sh install.sh             # install and start on port 8080 (LAN only)
 sh install.sh --uninstall
 ```
 
-Requires `uhttpd-mod-lua` and `luci-lib-jsonc` (installed by the script).
+Requires `uhttpd-mod-lua` and `luci-lib-jsonc` (installed by the script). It does not implement
+`since=` (Refresh reloads the whole window there) or the rate caps on history.
 
 Chart.js (MIT) is fetched at install time; Glances (LGPL) is a Python dependency.

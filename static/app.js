@@ -1697,17 +1697,18 @@ async function fetchDataOnce() {
     const netInEl = document.getElementById('net-in-value');
     const netOutEl = document.getElementById('net-out-value');
     if (network.ok) {
-      let netInRate = 0, netOutRate = 0;
+      // MB/s summed over interfaces, each capped on its own (config.json
+      // limits; Glances' deltas occasionally come out absurd). The total is not
+      // capped: bridges, veths and tunnels count the same traffic again.
+      let inMBps = 0, outMBps = 0;
       if (Array.isArray(network.data)) {
         network.data.forEach(iface => {
           if (iface.interface_name && !iface.interface_name.startsWith('lo')) {
-            netInRate += iface.bytes_recv_rate_per_sec || 0;
-            netOutRate += iface.bytes_sent_rate_per_sec || 0;
+            inMBps += clampRate((iface.bytes_recv_rate_per_sec || 0) / 1e6, limits.network_mbps);
+            outMBps += clampRate((iface.bytes_sent_rate_per_sec || 0) / 1e6, limits.network_mbps);
           }
         });
       }
-      const inMBps = netInRate / 1e6;
-      const outMBps = netOutRate / 1e6;
       pushHistory(history.netIn, inMBps);
       pushHistory(history.netOut, outMBps);
       animateValue(netInEl, inMBps, '', 2);
@@ -1756,22 +1757,23 @@ async function fetchDataOnce() {
             // The total counts the MOUNTED devices only: diskio rows are per block
             // device including partitions and md/dm layers, so every row would count
             // a write on an md mirror three times. No fs data: count every row.
+            // Each device capped on its own, the total is their sum (as in history).
             if (allowedDisks.size === 0 || allowedDisks.has(disk.disk_name)) {
-              diskReadRate += disk.read_bytes_rate_per_sec || 0;
-              diskWriteRate += disk.write_bytes_rate_per_sec || 0;
+              diskReadRate += clampRate((disk.read_bytes_rate_per_sec || 0) / 1e6, limits.disk_io_mbps);
+              diskWriteRate += clampRate((disk.write_bytes_rate_per_sec || 0) / 1e6, limits.disk_io_mbps);
             }
             // Collect per-drive data (only for drives shown in Drive Usage)
             if (disk.disk_name && allowedDisks.has(disk.disk_name)) {
               drives.push({
                 name: deviceToMount[disk.disk_name] || disk.disk_name,
-                readMBps: (disk.read_bytes_rate_per_sec || 0) / 1e6,
-                writeMBps: (disk.write_bytes_rate_per_sec || 0) / 1e6
+                readMBps: clampRate((disk.read_bytes_rate_per_sec || 0) / 1e6, limits.disk_io_mbps),
+                writeMBps: clampRate((disk.write_bytes_rate_per_sec || 0) / 1e6, limits.disk_io_mbps)
               });
             }
           });
         }
-        const readMBps = diskReadRate / 1e6;
-        const writeMBps = diskWriteRate / 1e6;
+        const readMBps = diskReadRate;    // MB/s, summed from capped devices
+        const writeMBps = diskWriteRate;
         pushHistory(history.diskRead, readMBps);
         pushHistory(history.diskWrite, writeMBps);
         animateValue(diskReadEl, readMBps, '', 2);
@@ -2692,56 +2694,95 @@ window.addEventListener('beforeunload', () => {
 // Fetch history data from the server.
 // Concurrent calls for the same time range share one request (e.g. "show all
 // history" creates many cards at once — only one fetch should hit the server).
-const historyFetchInflight = new Map();  // hours -> Promise<data>  (concurrent-dedup)
+const historyFetchInflight = new Map();  // key -> Promise<data>  (concurrent-dedup)
 // Per-range cache so multiple cards at the same range fetch once and share the
 // result (every record carries all metrics). Shared object — READ ONLY across
-// cards; never mutate data.records. No TTL: Refresh (force) is the freshness path.
-const historyCache = new Map();          // hours -> data
+// cards; never mutate data.records. Every fetch tops a cached window up
+// (`since=`, only what is newer), so nothing drawn from the cache is stale.
+const historyCache = new Map();          // key -> data
 const HISTORY_CACHE_MAX = 16;            // bound growth from the free-form range input
 // History reads can be larger/slower than a live poll (a long range over a big
 // file), so allow more time than safeFetch's 5s default before giving up.
 const HISTORY_FETCH_TIMEOUT_MS = 15000;
+// A top-up asks from the server's clock at the last fetch minus this. A record's
+// timestamp is taken before the GPU/sensor/process collection, so the manual and
+// periodic recorders can append out of timestamp order by that collection time
+// (seconds); the overlap re-asks for that stretch and the merge drops duplicates.
+const HISTORY_SINCE_OVERLAP_SEC = 300;
 let historyStaleWarned = false;      // stalled recorder: toast once, re-arm on recovery
 let historyTruncatedWarned = false;  // truncated/skipped: toast once, re-armed by a forced refresh
 let historySkippedWarned = false;
 
-function _historyCacheGet(hours) {
-  if (!historyCache.has(hours)) return undefined;
-  const data = historyCache.get(hours);
-  historyCache.delete(hours); historyCache.set(hours, data);  // LRU: mark most-recently-used
-  return data;
-}
-function _historyCacheSet(hours, data) {
-  historyCache.delete(hours); historyCache.set(hours, data);
+function _historyCacheSet(key, data) {
+  historyCache.delete(key); historyCache.set(key, data);    // LRU: most recent last
   while (historyCache.size > HISTORY_CACHE_MAX) {
-    historyCache.delete(historyCache.keys().next().value);    // evict oldest
+    historyCache.delete(historyCache.keys().next().value);  // evict oldest
   }
+}
+
+// Splice an incremental (`since=`) response onto the cached window: drop held
+// records that aged out of the server's window (its cutoff, so clock skew is
+// moot), add the new ones (skipping any already held), and sort by time. A new
+// object: cards share the cached one. truncated keeps its whole-window meaning
+// (the delta only saw the small tail it parsed). A response without a cutoff
+// did not honour since= (an older server process): it is the full window.
+function mergeHistoryDelta(base, delta) {
+  if (typeof delta.cutoff !== 'number') return delta;
+  const cutoffMs = delta.cutoff * 1000;
+  const held = new Set(base.records.map(r => r.timestamp));
+  const records = base.records
+    .filter(r => Date.parse(r.timestamp) >= cutoffMs)
+    .concat((delta.records || []).filter(r => !held.has(r.timestamp)))
+    .map(r => [Date.parse(r.timestamp), r])
+    .sort((a, b) => a[0] - b[0])
+    .map(([, r]) => r);
+  return { ...delta, records, count: records.length, truncated: base.truncated };
+}
+
+// One history request, with success/failure preserved so callers can tell a
+// real fetch failure apart from genuinely-empty history (both would otherwise
+// look like records: []).
+function requestHistory(hours, field, since) {
+  let url = field ? `/api/history/field/${encodeURIComponent(field)}?hours=${hours}` : `/api/history?hours=${hours}`;
+  if (since) url += `&since=${encodeURIComponent(since)}`;
+  return safeFetch(url, { records: [], count: 0 }, HISTORY_FETCH_TIMEOUT_MS).then(response => {
+    const data = response.data || { records: [], count: 0 };
+    data.ok = response.ok;
+    data.errorType = response.errorType;
+    return data;
+  });
 }
 
 // field: a heavy record field /api/history leaves out (HISTORY_METRICS[..].sideField);
 // fetched alone from /api/history/field/<name>, cached under its own key.
+// force (Refresh): don't join a fetch already in flight, and re-show the
+// truncated / corrupt-lines toasts.
 function fetchHistoryData(hours = defaultHistoryHours, { force = false, field = null } = {}) {
   const key = field ? `${field}:${hours}` : hours;
   if (force) {
-    historyCache.delete(key);
     historyTruncatedWarned = false;  // an explicit refresh re-surfaces a persistent truncation/skip
     historySkippedWarned = false;
-  } else {
-    const cached = _historyCacheGet(key);
-    if (cached) return Promise.resolve(cached);
-    if (historyFetchInflight.has(key)) return historyFetchInflight.get(key);
+  } else if (historyFetchInflight.has(key)) {
+    // A card opened during a Refresh waits for the fresh data.
+    return historyFetchInflight.get(key);
   }
-  const fallback = { records: [], count: 0 };
-  const url = field ? `/api/history/field/${encodeURIComponent(field)}?hours=${hours}` : `/api/history?hours=${hours}`;
-  const promise = safeFetch(url, fallback, HISTORY_FETCH_TIMEOUT_MS)
-    .then(response => {
-      // Preserve success/failure so callers can tell a real fetch failure apart
-      // from genuinely-empty history (both would otherwise look like records: []).
-      const data = response.data || fallback;
-      data.ok = response.ok;
-      data.errorType = response.errorType;
+  const base = historyCache.get(key);
+  // Top up a cached window. Fetch in full when there is none, when the backend
+  // doesn't report its clock (`now`: the OpenWrt one), or when the window has
+  // corrupt lines (their count is only right for a whole-window read).
+  const since = base && typeof base.now === 'number' && !(base.skipped_lines > 0)
+    ? new Date((base.now - HISTORY_SINCE_OVERLAP_SEC) * 1000).toISOString() : null;
+  const promise = requestHistory(hours, field, since)
+    .then(data => {
+      if (!data.ok || !since) return data;
+      // The server hit its byte cap before reaching `since`: there is a gap
+      // between the cached window and what came back, so refetch in full.
+      if (data.truncated) return requestHistory(hours, field, null);
+      return mergeHistoryDelta(base, data);
+    })
+    .then(data => {
       // The toasts below are about the file as a whole; the main fetch raises them.
-      if (response.ok && !field) {
+      if (data.ok && !field) {
         // Latch the corrupt-lines / truncated toasts so cache-miss refreshes
         // don't re-spam; reset when the condition clears (and on a forced refresh).
         if (data.skipped_lines > 0) {
@@ -2771,8 +2812,12 @@ function fetchHistoryData(hours = defaultHistoryHours, { force = false, field = 
             historyStaleWarned = false;
           }
         }
-        _historyCacheSet(key, data);  // cache successful reads only (never a failure)
       }
+      // Cache successful reads only, and only while this is still the current
+      // fetch for its key: one superseded by a Refresh, or dropped when the last
+      // card closed (removeHistoryCard clears the in-flight map), must not
+      // overwrite newer data or refill a cleared cache.
+      if (data.ok && historyFetchInflight.get(key) === promise) _historyCacheSet(key, data);
       return data;
     })
     // Identity check: a forced refresh replaces the map entry with a newer
@@ -3620,7 +3665,8 @@ async function createHistoryCard(metric, hours = defaultHistoryHours) {
     await loadHistoryData(metric, clampedValue);
   };
 
-  rangeInput.addEventListener('change', handleRangeChange);
+  // A change (Enter / blur) also cancels the pending debounced load of the same value.
+  rangeInput.addEventListener('change', () => { clearTimeout(entry.debounceTimer); handleRangeChange(); });
 
   rangeInput.addEventListener('input', () => {
     clearTimeout(entry.debounceTimer);
@@ -3802,7 +3848,9 @@ function removeHistoryCard(metric) {
     entry.card.remove();
     historyCards.delete(metric);
     // Last card closed → drop the shared cache so a later "show" refetches.
-    if (historyCards.size === 0) historyCache.clear();
+    // In-flight fetches go too, so a card reopened meanwhile starts a fresh
+    // fetch that is cached, instead of joining one whose result is discarded.
+    if (historyCards.size === 0) { historyCache.clear(); historyFetchInflight.clear(); }
 
     // Remove active state from history button
     const historyBtn = document.querySelector(`[data-history-metric="${metric}"]`);
@@ -3876,10 +3924,13 @@ async function refreshAllHistory() {
       groups.get(key).metrics.push(metric);
     }
     await Promise.all([...groups.values()].map(async ({ hours, field, metrics }) => {
-      // Force a fresh read (bypass the cache), then redraw every card in the
-      // group from the one shared result.
+      // Top the cached window up from the server (only records newer than it
+      // holds), then redraw every card in the group from the one shared result.
       const data = await fetchHistoryData(hours, { force: true, field });
-      await Promise.all(metrics.map(m => loadHistoryData(m, hours, data)));
+      // A card whose range was changed meanwhile has its own load in flight.
+      const current = metrics.filter(m =>
+        (parseFloat(historyCards.get(m)?.card.querySelector('.history-range-input')?.value) || defaultHistoryHours) === hours);
+      await Promise.all(current.map(m => loadHistoryData(m, hours, data)));
     }));
   } catch (err) {
     console.error('History refresh failed:', err);
