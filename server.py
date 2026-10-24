@@ -2722,7 +2722,12 @@ def _gpu_process_utilization() -> dict[tuple[int, int], tuple[float | None, floa
             ["nvidia-smi", "pmon", "-c", "1", "-s", "u"],
             capture_output=True,
             text=True,
-            timeout=10,
+            # The command column is the kernel's 15-byte comm, which can end
+            # mid-character (or be any bytes a process set): never raise on it.
+            errors="replace",
+            # It takes ~0.1 s; a stalled pmon must not outlast the browser's 5 s
+            # fetch timeout, or the whole process list is lost with it.
+            timeout=2,
         )
     except (OSError, subprocess.SubprocessError) as e:
         logger.debug("nvidia-smi pmon failed: %s", e)
@@ -2748,6 +2753,7 @@ def _get_gpu_processes() -> list[dict[str, Any]]:
         ],
         capture_output=True,
         text=True,
+        errors="replace",  # process paths are bytes, not necessarily UTF-8
         timeout=5,
     )
     if result.returncode != 0:
@@ -2758,6 +2764,7 @@ def _get_gpu_processes() -> list[dict[str, Any]]:
         ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
         capture_output=True,
         text=True,
+        errors="replace",
         timeout=5,
     )
     uuid_to_index: dict[str, int] = {}
@@ -4135,7 +4142,8 @@ JSON API (machine-readable; prefer these for exact values)
   GET /api/history/settings      recording interval and sampling settings
   GET /api/processlist           live process list (arguments stripped)
   GET /api/gpu-info              live NVIDIA GPU details
-  GET /api/gpu-processes         live processes holding GPU memory
+  GET /api/gpu-processes         live processes holding GPU memory, with per-GPU
+                                 gpu_util_percent / gpu_mem_util_percent (null: no sample)
   GET /api/cpu-info              CPU model and core counts
   GET /api/ping                  ping the configured targets now
   GET /api/sensors               fans/temps/power snapshot (root collector, when installed)

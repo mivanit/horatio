@@ -1159,6 +1159,64 @@ def test_null_metrics_unit() -> None:
     )
 
 
+def test_gpu_processes_unit() -> None:
+    """_get_gpu_processes against a fake nvidia-smi on PATH (real subprocess, so
+    the decoding is exercised): the (gpu index, pid) join of compute-apps with
+    pmon, a pmon command name that ends mid-character, and a stalled pmon that
+    must cost only the utilization columns, quickly."""
+    print(f"\n{BOLD}Unit: GPU processes (fake nvidia-smi){RESET}\n")
+    import server
+
+    script = r"""#!/bin/sh
+case "$*" in
+  "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits")
+    printf 'GPU-aaa, 4242, /usr/bin/burn, 100\nGPU-bbb, 4242, /usr/bin/burn, 200\nGPU-aaa, 5151, /opt/caf\303\251, 50\n' ;;
+  "--query-gpu=index,uuid --format=csv,noheader")
+    printf '0, GPU-aaa\n1, GPU-bbb\n' ;;
+  "pmon -c 1 -s u")
+    [ -n "$FAKE_PMON_SLEEP" ] && sleep "$FAKE_PMON_SLEEP"
+    printf '# gpu  pid  type  sm  mem  enc  dec  jpg  ofa  command\n'
+    printf '    0  4242  C  70  40  -  -  -  -  burn\n'
+    printf '    1  4242  C  20  10  -  -  -  -  burn\n'
+    printf '    0  5151  C   -   -  -  -  -  -  caf\303\n' ;;
+  *) exit 1 ;;
+esac
+"""
+    orig_path = os.environ.get("PATH", "")
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = Path(tmp) / "nvidia-smi"
+        fake.write_text(script)
+        fake.chmod(0o755)
+        os.environ["PATH"] = f"{tmp}{os.pathsep}{orig_path}"
+        try:
+            try:
+                rows = server._get_gpu_processes()
+            except Exception as e:  # the decode bug raised here
+                fail("_get_gpu_processes with a non-UTF-8 pmon command name", repr(e))
+                return
+            got = {(r["gpu_index"], r["pid"]): (r["gpu_memory_mib"], r["gpu_util_percent"], r["gpu_mem_util_percent"])
+                   for r in rows}
+            check(
+                got == {(0, 4242): (100.0, 70.0, 40.0), (1, 4242): (200.0, 20.0, 10.0),
+                        (0, 5151): (50.0, None, None)},
+                "_get_gpu_processes: compute-apps joined with pmon on (gpu index, pid); "
+                "'-' -> None; non-UTF-8 names don't raise",
+                repr(got),
+            )
+            os.environ["FAKE_PMON_SLEEP"] = "5"
+            t0 = time.monotonic()
+            rows = server._get_gpu_processes()
+            elapsed = time.monotonic() - t0
+            check(
+                len(rows) == 3 and all(r["gpu_util_percent"] is None for r in rows) and elapsed < 4,
+                "stalled pmon: process list kept, utilization None, well under the browser's 5 s",
+                f"{len(rows)} rows in {elapsed:.1f}s",
+            )
+        finally:
+            os.environ["PATH"] = orig_path
+            os.environ.pop("FAKE_PMON_SLEEP", None)
+
+
 def test_process_history_unit() -> None:
     """build_process_records / aggregate_cpu_freq: pure record shaping."""
     print(f"\n{BOLD}Unit: per-process history and CPU clocks{RESET}\n")
@@ -1186,7 +1244,7 @@ def test_process_history_unit() -> None:
         and by_pid[P + 2]["rss_mb"] == 900.0
         and by_pid[P + 3]["gpu_mem_mib"] == 150.0
         and by_pid[P + 3]["gpus"] == [0, 1]
-        and by_pid[P + 3]["gpu_util_percent"] == 42.5  # summed over its GPUs
+        and by_pid[P + 3].get("gpu_util_percent") == 42.5  # summed over its GPUs
         and "gpu_util_percent" not in by_pid[P + 99]  # pmon had no sample -> no key
         and "gpus" not in by_pid[P + 1]
         and "cpu_percent" not in by_pid[P + 99]
@@ -1196,6 +1254,16 @@ def test_process_history_unit() -> None:
         and json.loads(json.dumps(rows)) == rows,
         "build_process_records: top-2 cpu + top-2 rss + GPU holders, sorted, GPU-only last",
         describe(rows),
+    )
+    ghosts = {r["pid"]: r for r in server.build_process_records([proc(P + 96, 1.0, 1 << 20, "listed")], [
+        {"pid": P + 98, "gpu_index": 0, "gpu_memory_mib": 1.0, "name": "g", "gpu_util_percent": 12.0},
+        {"pid": P + 97, "gpu_index": 0, "gpu_memory_mib": 1.0, "name": "z", "gpu_util_percent": 0.0},
+        {"pid": P + 96, "gpu_index": 0, "gpu_memory_mib": 1.0, "name": "listed", "gpu_util_percent": 0.0}], 5)}
+    check(
+        ghosts[P + 98].get("gpu_util_percent") == 12.0
+        and "gpu_util_percent" not in ghosts[P + 97] and "gpu_util_percent" not in ghosts[P + 96],
+        "build_process_records: GPU-only rows keep utilization; 0 is omitted (listed or GPU-only)",
+        describe(list(ghosts.values())),
     )
     check(
         server.build_process_records([], [], 5) == []
@@ -1533,6 +1601,7 @@ def main() -> int:
     test_history_fetch_js()
     test_null_metrics_unit()
     test_process_history_unit()
+    test_gpu_processes_unit()
     test_dedupe_fs_unit()
     test_mail_and_health_unit()
     test_text_view_unit()

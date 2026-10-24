@@ -123,7 +123,7 @@ again, don't put this on anything besides a trusted LAN!
 | `GET /api/list-endpoints`    | Which file-backed endpoints exist on this box (mail, storage-health, sensors) |
 | `GET /api/gpu-info`          | NVIDIA GPU details                          |
 | `GET /api/cpu-info`          | CPU details from /proc/cpuinfo              |
-| `GET /api/gpu-processes`     | GPU process list: per (GPU, pid) memory plus `gpu_util_percent` / `gpu_mem_util_percent` from `nvidia-smi pmon` (null when the driver had no sample for that pid) |
+| `GET /api/gpu-processes`     | GPU process list: per (GPU, pid) memory plus `gpu_util_percent` / `gpu_mem_util_percent` from `nvidia-smi pmon` (null when the driver had no sample for that pid, pmon is unavailable or slow, or the GPU is past pmon's four) |
 | `GET /api/network-processes` | Per-process network bandwidth (nethogs)     |
 | `GET /api/disk-processes`    | Per-process disk I/O (pidstat)              |
 | `GET /api/ping`              | Ping the configured targets                 |
