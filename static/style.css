@@ -8,7 +8,7 @@
   /* Table layout variables */
   --table-max-height: 200px;
   --table-max-height-large: 400px;
-  --table-min-width: 1100px;  /* 940px fixed columns + 160px for path */
+  --table-min-width: 1160px;  /* fixed columns + a sliver for path: add a new column's width here */
 
   /* Grid layout (column count is set inline as --grid-columns by app.js) */
   --grid-gap: 20px;
@@ -1098,7 +1098,7 @@ h1 {
      This sets grid-template-columns directly, so it wins over the inline
      --grid-columns variable app.js sets. */
   .grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);  /* 1fr's minimum is its content: the wide tables */
     width: 100%;
   }
 

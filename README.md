@@ -104,8 +104,9 @@ History recording settings can also be changed from the page with the password; 
 Meant for a trusted LAN, not public interfaces. probably has many security holes. The dashboard binds to all interfaces and is unauthenticated except
 the raw history download and the settings endpoint. Unauthenticated data includes local IP
 addresses, mail subjects, drive models and serials, and the Glances metrics; the Glances
-process views that carry full command lines are blocked (`/api/4/all`, `/api/4/processlist*`,
-`/api/4/processes*`), and the dashboard's own process list strips arguments. The web process
+proxy forwards only the plugins the UI reads (cpu, percpu, mem, memswap, gpu, network, diskio,
+sensors, load, uptime, system, fs), so Glances' process views with full command lines are
+unreachable, and the dashboard's own process list strips arguments. The web process
 runs as an unprivileged user under `ProtectSystem=strict` and never runs `sudo`, `smartctl` or
 `ipmitool`: the collector runs as root on its own timers and the web process only reads the
 JSON it writes. The IP card and each history record ask `api.ipify.org` for the public address.

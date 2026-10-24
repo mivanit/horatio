@@ -28,7 +28,6 @@ import logging
 import mailbox
 import math
 import os
-import posixpath
 import re
 import secrets
 import socket
@@ -293,6 +292,9 @@ def _verify_password(password: str) -> bool:
 AUTH_MAX_FAILS: Final[int] = 5
 AUTH_LOCKOUT_SEC: Final[int] = 60
 _auth_failures: dict[str, tuple[int, float]] = {}  # ip -> (consecutive_fails, locked_until)
+# One KDF at a time: a burst of guesses must not fill the thread pool that the
+# recorder and the threaded cards share.
+_kdf_lock: asyncio.Lock = asyncio.Lock()
 
 
 async def _verify_password_throttled(request: Request, password: str) -> Response | None:
@@ -316,10 +318,13 @@ async def _verify_password_throttled(request: Request, password: str) -> Respons
         )
     if until:
         fails = 0  # a served lockout resets the streak so a returning user starts fresh
-    if not await asyncio.to_thread(_verify_password, password):
-        fails += 1
-        locked = now + AUTH_LOCKOUT_SEC if fails >= AUTH_MAX_FAILS else 0.0
-        _auth_failures[ip] = (fails, locked)
+    # Count the attempt before the KDF runs, so concurrent guesses each see the
+    # earlier ones and the lockout holds under a burst; a correct one clears it.
+    fails += 1
+    _auth_failures[ip] = (fails, now + AUTH_LOCKOUT_SEC if fails >= AUTH_MAX_FAILS else 0.0)
+    async with _kdf_lock:
+        ok = await asyncio.to_thread(_verify_password, password)
+    if not ok:
         return Response(
             content=json.dumps({"error": "Incorrect password"}),
             status_code=403,
@@ -1591,21 +1596,47 @@ async def record_initial_sample(glances_url: str) -> None:
         logger.warning("Failed to record startup history: %s", e)
 
 
+GLANCES_MAX_MISSES: Final[int] = 3  # failed 5 s probes in a row (~30 s) before a restart
+
+
+async def _glances_answers() -> bool:
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{APP.state.glances_url}/api/4/cpu", timeout=5.0)
+        return resp.status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
 async def check_disconnected_clients() -> None:
-    """Background task (every 5 s): restart Glances if it died, and log clients
-    inactive for 30+ seconds."""
+    """Background task (every 5 s): restart Glances if it died or stopped
+    answering, and log clients inactive for 30+ seconds."""
     while True:
         await asyncio.sleep(5)
         try:
-            # systemd only restarts the unit when THIS process exits; a dead Glances
-            # would otherwise leave every card 502 and the history partial for good.
-            # At most one restart a minute: a Glances that cannot start at all must
-            # not be respawned every 5 s forever.
+            # systemd only restarts the unit when THIS process exits; a dead or
+            # hung Glances (stuck on a dead mount, a sensor read) would otherwise
+            # leave every card 502 and the history partial for good. At most one
+            # restart a minute: a Glances that cannot start at all must not be
+            # respawned every 5 s forever.
             glances = APP.state.glances_process
-            if glances.poll() is not None and time.time() - APP.state.glances_started_at >= 60:
-                logger.error("Glances exited with code %s; restarting (see logs/glances.log)", glances.returncode)
+            why = None
+            if glances.poll() is not None:
+                why = f"exited with code {glances.returncode}"
+            elif await _glances_answers():
+                APP.state.glances_misses = 0
+            else:
+                APP.state.glances_misses = getattr(APP.state, "glances_misses", 0) + 1
+                if APP.state.glances_misses >= GLANCES_MAX_MISSES:
+                    why = f"has not answered for {APP.state.glances_misses} checks"
+            if why and time.time() - APP.state.glances_started_at >= 60:
+                logger.error("Glances %s; restarting (see logs/glances.log)", why)
+                if glances.poll() is None:
+                    glances.kill()
+                    await asyncio.to_thread(glances.wait, 5)
                 APP.state.glances_process = start_glances(APP.state.glances_port)
                 APP.state.glances_started_at = time.time()
+                APP.state.glances_misses = 0
             now: float = time.time()
             disconnected: list[str] = [
                 ip for ip, ts in client_last_seen.items() if now - ts > CLIENT_TIMEOUT
@@ -1921,7 +1952,9 @@ def _read_history(
                             else ""
                         )
                         # Handle both formats: with and without Z suffix
-                        # (empty/missing timestamp raises ValueError -> skipped)
+                        # (empty/missing/non-string timestamp raises ValueError -> skipped)
+                        if not isinstance(ts_str, str):
+                            raise ValueError("timestamp is not a string")
                         ts_str = ts_str.replace("Z", "+00:00")
                         ts = datetime.fromisoformat(ts_str).timestamp()
                     except (json.JSONDecodeError, ValueError):
@@ -2035,7 +2068,8 @@ async def get_history(hours: float = 24, since: str | None = None) -> Response:
     since_ts = _parse_since(since)
     if isinstance(since_ts, Response):
         return since_ts
-    result = await asyncio.to_thread(_read_history, hours, since=since_ts)
+    async with _history_read_lock:
+        result = await asyncio.to_thread(_read_history, hours, since=since_ts)
 
     if isinstance(result, str):
         return Response(
@@ -2055,20 +2089,17 @@ async def get_history(hours: float = 24, since: str | None = None) -> Response:
         rec.pop("ip", None)
         for name in HISTORY_SIDE_FIELDS:
             rec.pop(name, None)
-    return Response(
-        content=json.dumps(
-            {
-                "records": records,
-                "count": len(records),
-                "skipped_lines": skipped,
-                "truncated": truncated,
-                "cutoff": cutoff,
-                "now": cutoff + hours * 3600,
-                "recording": _recording_health(),
-            }
-        ),
-        media_type="application/json",
-    )
+    body = {
+        "records": records,
+        "count": len(records),
+        "skipped_lines": skipped,
+        "truncated": truncated,
+        "cutoff": cutoff,
+        "now": cutoff + hours * 3600,
+        "recording": _recording_health(),
+    }
+    # A long range is many MB of JSON: encode it off the event loop.
+    return Response(content=await asyncio.to_thread(json.dumps, body), media_type="application/json")
 
 
 @APP.get("/api/history/field/{name}")
@@ -2092,7 +2123,8 @@ async def get_history_field(
     since_ts = _parse_since(since)
     if isinstance(since_ts, Response):
         return since_ts
-    result = await asyncio.to_thread(_read_history, hours, since=since_ts)
+    async with _history_read_lock:
+        result = await asyncio.to_thread(_read_history, hours, since=since_ts)
     if isinstance(result, str):
         return Response(
             content=json.dumps({"error": "Failed to read history", "detail": result}),
@@ -2104,20 +2136,16 @@ async def get_history_field(
         {"timestamp": rec.get("timestamp"), **({name: rec[name]} if name in rec else {})}
         for rec in records
     ]
-    return Response(
-        content=json.dumps(
-            {
-                "field": name,
-                "records": slim,
-                "count": len(slim),
-                "skipped_lines": skipped,
-                "truncated": truncated,
-                "cutoff": cutoff,
-                "now": cutoff + hours * 3600,
-            }
-        ),
-        media_type="application/json",
-    )
+    body = {
+        "field": name,
+        "records": slim,
+        "count": len(slim),
+        "skipped_lines": skipped,
+        "truncated": truncated,
+        "cutoff": cutoff,
+        "now": cutoff + hours * 3600,
+    }
+    return Response(content=await asyncio.to_thread(json.dumps, body), media_type="application/json")
 
 
 @APP.get("/api/history/raw")
@@ -2837,6 +2865,7 @@ def _run_pidstat(duration: int, timeout: int) -> subprocess.CompletedProcess[str
         ["pidstat", "-d", str(duration), "1"],
         capture_output=True,
         text=True,
+        errors="replace",  # process names/paths are bytes, not necessarily UTF-8
         timeout=timeout,
     )
 
@@ -2963,6 +2992,7 @@ def _run_nethogs(cycles: int, timeout: int) -> subprocess.CompletedProcess[str]:
         ["nethogs", "-t", "-c", str(cycles), "-d", "1"],
         capture_output=True,
         text=True,
+        errors="replace",  # process names/paths are bytes, not necessarily UTF-8
         timeout=timeout,
     )
 
@@ -3305,13 +3335,21 @@ async def sensors_snapshot() -> Response:
     return Response(content=json.dumps(result), media_type="application/json")
 
 
+# The Glances plugins the UI reads, the only ones the /api proxy forwards. An
+# allowlist, not a deny-list: Glances decodes and normalizes the path again, so
+# any blocked view (/4/processlist, /4/all: full command lines) has encoded
+# spellings (process%256cist, /api/../api/4/...) a deny-list check never sees.
+GLANCES_PROXY_PLUGINS: Final[tuple[str, ...]] = (
+    "cpu", "percpu", "mem", "memswap", "gpu", "network", "diskio", "sensors",
+    "load", "uptime", "system", "fs",
+)
+
+
 @APP.get("/api/list-endpoints")
 async def list_endpoints() -> Response:
     """Return list of all API endpoints this server implements."""
     endpoints = [
-        "/4/cpu", "/4/percpu", "/4/mem", "/4/memswap", "/4/gpu",
-        "/4/network", "/4/diskio", "/4/sensors", "/4/load", "/4/uptime",
-        "/4/system", "/4/fs",
+        *(f"/4/{plugin}" for plugin in GLANCES_PROXY_PLUGINS),
         "/cpu-info", "/gpu-info", "/ip-info", "/ping",
         "/gpu-processes", "/disk-processes", "/network-processes",
         "/processlist",
@@ -3328,15 +3366,13 @@ async def list_endpoints() -> Response:
 
 @APP.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def proxy_api(path: str, request: Request) -> Response:
-    """Proxy all /api/* requests to Glances."""
-    # Glances' raw process views carry full cmdlines (/4/all, /4/processlist,
-    # /4/processlist/top/N, /4/processes/<pid>, ...); /api/processlist is the
-    # sanitized route and the only one the UI calls.
-    # The deny check sees the path with "." and ".." collapsed, which is what
-    # Glances will see ("4/x/../processlist"); the request itself forwards the
-    # path as sent, so "//" and a trailing slash reach Glances untouched.
-    resolved = posixpath.normpath("/" + path)[1:]
-    if resolved == "4/all" or resolved.startswith(("4/processlist", "4/processes", "4/programlist")):
+    """Proxy the UI's Glances plugins (GLANCES_PROXY_PLUGINS) to Glances.
+
+    Exact match on the decoded path, so what is forwarded is one of the allowed
+    literals. Everything else is 404, including Glances' raw process views
+    (full command lines); /api/processlist is the sanitized route.
+    """
+    if not path.startswith("4/") or path[2:] not in GLANCES_PROXY_PLUGINS:
         return Response(status_code=404)
     glances_url: str = request.app.state.glances_url
     async with httpx.AsyncClient() as client:
@@ -4190,7 +4226,8 @@ async def text_view(
     hours = max(0.1, min(hours, 8760))
     rows = max(1, min(rows, 500))
     requested_rows = rows
-    result = await asyncio.to_thread(_read_history_cached, hours)
+    async with _history_read_lock:
+        result = await asyncio.to_thread(_read_history_cached, hours)
     if isinstance(result, str):
         return Response(
             content=f"Failed to read history: {result}\n",
@@ -4226,23 +4263,29 @@ async def text_view(
             sparks=sparks,
         )
 
-    body = render(table)
-    if height is not None:
-        height = max(5, height)
-        if table and body.count("\n") > height:
-            # Asked for the table: shrink it to the rows that fit (at least 3)
-            # before cutting. It shows min(rows, records) rows, so shrink that.
-            shown = min(rows, len(records))
-            rows = max(3, shown - (body.count("\n") - height))
-            body = render(True)
-            if body.count("\n") > height:
-                # Still too tall: the table replaces the sparklines, then fills
-                # whatever room that frees.
-                body = render(True, sparks=False)
-                over = body.count("\n") - height  # negative = spare lines
-                rows = max(3, min(requested_rows, min(rows, len(records)) - over))
-                body = render(True, sparks=False)
-        body = _fit_height(body, height, depth)
+    def layout() -> str:
+        nonlocal rows, height
+        body = render(table)
+        if height is not None:
+            height = max(5, height)
+            if table and body.count("\n") > height:
+                # Asked for the table: shrink it to the rows that fit (at least 3)
+                # before cutting. It shows min(rows, records) rows, so shrink that.
+                shown = min(rows, len(records))
+                rows = max(3, shown - (body.count("\n") - height))
+                body = render(True)
+                if body.count("\n") > height:
+                    # Still too tall: the table replaces the sparklines, then fills
+                    # whatever room that frees.
+                    body = render(True, sparks=False)
+                    over = body.count("\n") - height  # negative = spare lines
+                    rows = max(3, min(requested_rows, min(rows, len(records)) - over))
+                    body = render(True, sparks=False)
+            body = _fit_height(body, height, depth)
+        return body
+
+    # A long window takes a second or more to render: keep it off the event loop.
+    body = await asyncio.to_thread(layout)
     return Response(content=body, media_type="text/plain; charset=utf-8")
 
 
@@ -4260,6 +4303,10 @@ def _fit_height(body: str, height: int, color: bool | str) -> str:
 _LIVE_TTL: Final[float] = 1.0
 _live_cache: dict[str, Any] = {"at": 0.0, "record": None}
 _live_lock = asyncio.Lock()
+# One history read at a time: a year-long range over a large file parses up to
+# HISTORY_MAX_TAIL_READ of JSON (hundreds of MB in Python objects); several at
+# once could exhaust a small box. Short and since= reads take milliseconds.
+_history_read_lock = asyncio.Lock()
 _history_cache: dict[str, Any] = {"key": None, "result": None}
 
 

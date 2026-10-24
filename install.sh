@@ -125,12 +125,24 @@ echo "Downloading Chart.js..."
 # on a deliberate upgrade (get the new hash with `sha256sum chart.umd.min.js`).
 CHARTJS_VERSION="4.5.1"
 CHARTJS_SHA256="48444a82d4edcb5bec0f1965faacdde18d9c17db3063d042abada2f705c9f54a"
-curl -fsSL -o "$SCRIPT_DIR/static/chart.umd.min.js" \
-  "https://cdn.jsdelivr.net/npm/chart.js@${CHARTJS_VERSION}/dist/chart.umd.min.js"
-echo "${CHARTJS_SHA256}  $SCRIPT_DIR/static/chart.umd.min.js" | sha256sum -c - || {
-  echo "Error: Chart.js checksum mismatch: refusing to install an unexpected file." >&2
-  exit 1
-}
+CHARTJS="$SCRIPT_DIR/static/chart.umd.min.js"
+# Verify before replacing: the running service serves this file, so a captive
+# portal page or a cut-off download must never land on it.
+if echo "${CHARTJS_SHA256}  $CHARTJS" | sha256sum -c --status - >/dev/null 2>&1; then
+  echo "Chart.js ${CHARTJS_VERSION} already present."
+else
+  CHARTJS_TMP="$(mktemp "$SCRIPT_DIR/static/.chart.XXXXXX")"
+  curl -fsSL -o "$CHARTJS_TMP" \
+    "https://cdn.jsdelivr.net/npm/chart.js@${CHARTJS_VERSION}/dist/chart.umd.min.js" \
+    || { rm -f "$CHARTJS_TMP"; exit 1; }
+  echo "${CHARTJS_SHA256}  $CHARTJS_TMP" | sha256sum -c --status - || {
+    rm -f "$CHARTJS_TMP"
+    echo "Error: Chart.js checksum mismatch: refusing to install an unexpected file." >&2
+    exit 1
+  }
+  chmod 644 "$CHARTJS_TMP"
+  mv "$CHARTJS_TMP" "$CHARTJS"
+fi
 
 echo "Installing $SERVICE_FILE..."
 # The template's placeholders /opt/horatio and User=horatio become this checkout

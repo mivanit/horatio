@@ -250,11 +250,13 @@ def test_read_history_unit() -> None:
             )
 
             # 5. Malformed lines mid-file are skipped and counted, neighbors kept
-            hist.write_text(_history_line(3) + "not json\n" + "42\n" + _history_line(2))
+            #    (including valid JSON whose timestamp is not a string)
+            hist.write_text(_history_line(3) + "not json\n" + "42\n" + '{"timestamp": null}\n'
+                            + '{"timestamp": 5}\n' + _history_line(2))
             records, skipped = read(24)
             check(
-                len(records) == 2 and skipped == 2,
-                "malformed mid-file lines skipped and counted",
+                len(records) == 2 and skipped == 4,
+                "malformed mid-file lines (incl. non-string timestamps) skipped and counted",
                 describe(records),
             )
 
@@ -822,6 +824,10 @@ const card = (hours) => ({ card: { remove() {}, querySelector: () => ({ value: S
   d = await fetchHistoryData(6, { force: true });
   assert.strictEqual(since(calls.at(-1)), null, 'no now -> no since');
   assert.deepStrictEqual(d.records.map(r => r.timestamp), [T(2), T(3)], 'full window replaces');
+  let before = calls.length;
+  d = await fetchHistoryData(6);
+  assert.strictEqual(calls.length, before, 'no clock: a toggle / reopen is served from the cache');
+  assert.strictEqual(d.count, 2);
   // ...and a since= response without cutoff (an older server) is a full window too.
   assert.deepStrictEqual(mergeHistoryDelta({ records: recs(0) }, { records: recs(5), count: 1 }).records,
                          recs(5), 'no cutoff -> replace');
@@ -870,6 +876,11 @@ const card = (hours) => ({ card: { remove() {}, querySelector: () => ({ value: S
   d = await fetchHistoryData(24, { force: true });
   assert.strictEqual(d.ok, false);
   assert.strictEqual(historyCache.get(24).count, 2, 'failure is not cached; window kept');
+  // ...and a non-Refresh fetch that fails (a toggle or a card opened while the
+  // server restarts) keeps drawing the cached window instead of an error box.
+  d = await fetchHistoryData(24);
+  assert.strictEqual(d.ok, true, 'failed top-up falls back to the cached window');
+  assert.strictEqual(d.count, 2);
   // 11. Refresh skips a card whose range changed while its fetch was in flight
   //     (the real refreshAllHistory); the others redraw.
   const cpu = card(24), mem = card(24);
@@ -906,11 +917,77 @@ const card = (hours) => ({ card: { remove() {}, querySelector: () => ({ value: S
         check(
             r.returncode == 0 and r.stdout.strip() == "OK",
             "history cache (top-up on reopen, order, server clock, skipped, no clock, gap, "
-            "in-flight, superseded, close/reopen, failure), refresh vs range change, config.js limits",
+            "in-flight, superseded, close/reopen, failure + cached fallback), refresh vs range change, "
+            "config.js limits",
             (r.stderr or r.stdout).strip()[-600:],
         )
     finally:
         os.unlink(script)
+
+
+def test_auth_throttle_unit() -> None:
+    """_verify_password_throttled under a concurrent burst: the lockout counts
+    attempts before the KDF, so only AUTH_MAX_FAILS guesses reach it, one at a
+    time, and the rest get 429 at once."""
+    print(f"\n{BOLD}Unit: password lockout under a burst{RESET}\n")
+    import types
+
+    import server
+
+    running = {"now": 0, "max": 0, "calls": 0}
+
+    def slow_wrong(password: str) -> bool:
+        running["now"] += 1
+        running["calls"] += 1
+        running["max"] = max(running["max"], running["now"])
+        time.sleep(0.05)
+        running["now"] -= 1
+        return password == "right"
+
+    orig = server._verify_password
+    server._verify_password = slow_wrong
+    server._auth_failures.clear()
+    req = types.SimpleNamespace(client=types.SimpleNamespace(host="198.51.100.7"))
+
+    async def burst() -> list:
+        return await asyncio.gather(*(server._verify_password_throttled(req, "wrong") for _ in range(20)))
+
+    try:
+        codes = sorted(r.status_code for r in asyncio.run(burst()))
+        n = server.AUTH_MAX_FAILS
+        check(
+            codes == [403] * n + [429] * (20 - n) and running["calls"] == n and running["max"] == 1,
+            f"20 concurrent wrong guesses: {n} checked (one at a time), the rest locked out",
+            f"codes={codes} kdf_calls={running['calls']} max_concurrent={running['max']}",
+        )
+        server._auth_failures.clear()
+        ok_resp = asyncio.run(server._verify_password_throttled(req, "right"))
+        check(ok_resp is None and req.client.host not in server._auth_failures,
+              "a correct password passes and clears the streak")
+    finally:
+        server._verify_password = orig
+        server._auth_failures.clear()
+
+
+def test_subprocess_decoding_unit() -> None:
+    """pidstat output with a process name cut mid-character must not raise
+    (the Disk I/O Processes card errored on every capture)."""
+    print(f"\n{BOLD}Unit: non-UTF-8 subprocess output{RESET}\n")
+    import server
+
+    orig_path = os.environ.get("PATH", "")
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = Path(tmp) / "pidstat"
+        fake.write_text("#!/bin/sh\nprintf 'Average:  1000  4242  12.00  3.00  0.00  caf\\303\\n'\n")
+        fake.chmod(0o755)
+        os.environ["PATH"] = f"{tmp}{os.pathsep}{orig_path}"
+        try:
+            out = server._run_pidstat(1, 5).stdout
+            check("caf�" in out, "_run_pidstat: invalid UTF-8 replaced, not raised", repr(out))
+        except Exception as e:
+            fail("_run_pidstat with non-UTF-8 output", repr(e))
+        finally:
+            os.environ["PATH"] = orig_path
 
 
 def test_null_metrics_unit() -> None:
@@ -1599,6 +1676,8 @@ def main() -> int:
     test_read_history_unit()
     test_rate_clamp_unit()
     test_history_fetch_js()
+    test_auth_throttle_unit()
+    test_subprocess_decoding_unit()
     test_null_metrics_unit()
     test_process_history_unit()
     test_gpu_processes_unit()
@@ -1724,7 +1803,10 @@ def main() -> int:
         from urllib.parse import urlsplit
 
         host = urlsplit(base)
-        for path in ("/api/4/x/../processlist", "/api/4/./all", "/api/4/%2e%2e/4/processlist"):
+        # Glances decodes again: double-encoded and ../-prefixed spellings too.
+        for path in ("/api/4/x/../processlist", "/api/4/./all", "/api/4/%2e%2e/4/processlist",
+                     "/api/4/process%256cist", "/api/4/a%256cl", "/api/%2e%2e/api/4/processlist",
+                     "/api/../api/4/processlist", "/api/4/cpu/../processlist", "/api/4/config"):
             try:
                 conn = http.client.HTTPConnection(host.hostname, host.port, timeout=10)
                 conn.request("GET", path)

@@ -2037,7 +2037,7 @@ async function fetchDataOnce() {
       const maxW = thresholds.power_max_watts || 1200;
       const psuW = thresholds.power_psu_watts || 1100;
       const warnFrac = thresholds.power_warn_fraction || 0.8;
-      const segClass = l => 'power-seg-' + l.toLowerCase().replaceAll(' ', '');   // "GPU 0" -> power-seg-gpu0
+      const segClass = l => 'power-seg-' + l.toLowerCase().replace(/[^a-z0-9-]/g, '');   // "GPU 0" -> power-seg-gpu0
       const segs = parts.map(p =>
         `<div class="power-seg ${segClass(p.label)}" style="width:${Math.min(100, p.value / maxW * 100).toFixed(2)}%" title="${escapeHtml(p.label)} ${Math.round(p.value)} W"></div>`).join('');
       // Legend labels take their segment's colour (dimmed by CSS) so the bar reads without hovering.
@@ -2368,7 +2368,6 @@ historyLengthBtn.addEventListener('click', () => {
     options: [30, 60, 120, 300].map(n => ({ value: n, label: String(n) })),
     currentValue: historyLength,
     onSelect: (val) => {
-      historyLength = val;
       historyLengthBtn.textContent = val;
       localStorage.setItem('historyLength', val);
 
@@ -2793,6 +2792,9 @@ function fetchHistoryData(hours = defaultHistoryHours, { force = false, field = 
     return historyFetchInflight.get(key);
   }
   const base = historyCache.get(key);
+  // A backend that reports no clock (OpenWrt) can't be topped up: serve the
+  // cached window; Refresh still refetches it in full.
+  if (!force && base && typeof base.now !== 'number') return Promise.resolve(base);
   // Top up a cached window. Fetch in full when there is none, when the backend
   // doesn't report its clock (`now`: the OpenWrt one), or when the window has
   // corrupt lines (their count is only right for a whole-window read).
@@ -2800,7 +2802,10 @@ function fetchHistoryData(hours = defaultHistoryHours, { force = false, field = 
     ? new Date((base.now - HISTORY_SINCE_OVERLAP_SEC) * 1000).toISOString() : null;
   const promise = requestHistory(hours, field, since)
     .then(data => {
-      if (!data.ok || !since) return data;
+      // A failed fetch keeps drawing the cached window (server restarting,
+      // Wi-Fi drop); only Refresh reports the failure.
+      if (!data.ok) return !force && base ? base : data;
+      if (!since) return data;
       // The server hit its byte cap before reaching `since`: there is a gap
       // between the cached window and what came back, so refetch in full.
       if (data.truncated) return requestHistory(hours, field, null);
