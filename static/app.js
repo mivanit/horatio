@@ -376,6 +376,7 @@ function fillHistoryGaps(count) {
       if (arr.length > historyLength) arr.shift();
     });
   }
+  updatePingLossBand();
 }
 
 // Render functions for cached cards
@@ -613,7 +614,7 @@ function renderHardware(data) {
   // The sensors alarms count only from a fresh snapshot (same 5 min rule as the
   // fans / temps / power cards). Stale, missing, errored or never fetched means
   // its alarm list is unknown, not clear: flagged like a stale state.json.
-  const sen = getFreshCache('sensors', 300000);
+  const sen = getFreshSnapshot('sensors', 300000);
   const sensorsUnknown = sen?.status !== 'ok';
   const alarms = [...(Array.isArray(data?.alarms) ? data.alarms : []),
                   ...(!sensorsUnknown && Array.isArray(sen.alarms) ? sen.alarms : [])];
@@ -1610,7 +1611,7 @@ async function fetchDataOnce() {
     // GPU (handle multiple GPUs)
     if (gpu.ok) {
       const gpuArray = Array.isArray(gpu.data) ? gpu.data : (gpu.data ? [gpu.data] : []);
-      const validGpus = gpuArray.filter(g => g && g.proc !== undefined);
+      const validGpus = gpuArray.filter(g => g && (g.proc !== undefined || g.mem !== undefined));
 
       if (validGpus.length > 0) {
         // Initialize history arrays if GPU count changed
@@ -1668,39 +1669,50 @@ async function fetchDataOnce() {
         const gpuInfoData = getCache('gpuInfo') || [];
         const gpuMemTotals = [];
         let maxGpuMemGiB = 0;
-        const hasGpuInfo = gpuInfoData.length > 0;
+        let maxGpuUtil = null, maxGpuMem = null;
         validGpus.forEach((g, i) => {
-          const proc = g.proc || 0;
-          const memPercent = g.mem || 0;
+          // Glances uses null when an NVML field is unavailable. Keep each
+          // metric independent: a missing reading is a gap, never idle/empty.
+          const proc = Number.isFinite(g.proc) ? g.proc : null;
+          const memPercent = Number.isFinite(g.mem) ? g.mem : null;
           pushHistory(history.gpus[i], proc);
-          // Animate GPU usage percentage
-          animateValue(document.getElementById(`gpu-usage-${i}`), proc, '', 0);
+          const usageEl = document.getElementById(`gpu-usage-${i}`);
+          if (proc != null) {
+            animateValue(usageEl, proc, '', 0);
+            maxGpuUtil = Math.max(maxGpuUtil ?? proc, proc);
+          } else {
+            usageEl.textContent = '--';
+            delete usageEl.dataset.value;
+          }
           // Compute memory GiB from Glances mem% and cached nvidia-smi total
           const gpuInfoEntry = gpuInfoData.find(gi => gi.index === i);
-          if (gpuInfoEntry) {
-            const totalGiB = gpuInfoEntry.memory_total / 1024;
-            const usedGiB = memPercent / 100 * totalGiB;
-            pushHistory(history.gpuMems[i], usedGiB);
+          const totalMiB = gpuInfoEntry?.memory_total;
+          const totalGiB = Number.isFinite(totalMiB) && totalMiB > 0 ? totalMiB / 1024 : null;
+          if (totalGiB != null) {
             gpuMemTotals[i] = totalGiB;
             if (totalGiB > maxGpuMemGiB) maxGpuMemGiB = totalGiB;
-            animateValue(document.getElementById(`gpu-mem-used-${i}`), usedGiB, '', 1);
-            document.getElementById(`gpu-mem-total-${i}`).textContent = totalGiB.toFixed(1);
+          }
+          const usedGiB = memPercent != null && totalGiB != null ? memPercent / 100 * totalGiB : null;
+          pushHistory(history.gpuMems[i], usedGiB);
+          const usedEl = document.getElementById(`gpu-mem-used-${i}`);
+          document.getElementById(`gpu-mem-total-${i}`).textContent = totalGiB != null ? totalGiB.toFixed(1) : '--';
+          if (usedGiB != null) {
+            animateValue(usedEl, usedGiB, '', 1);
+            maxGpuMem = Math.max(maxGpuMem ?? memPercent, memPercent);
           } else {
-            // No gpu-info cache yet — skip history and display until it arrives
-            pushHistory(history.gpuMems[i], null);
+            usedEl.textContent = '--';
+            delete usedEl.dataset.value;
           }
         });
         // Update GPU memory chart Y-axis max and store totals for tooltip
         charts.gpuMem.options.scales.y.max = Math.ceil(maxGpuMemGiB) || 24;
         charts.gpuMem._gpuMemTotals = gpuMemTotals;
 
-        updateCardNoData('gpu', true);
-        updateCardNoData('gpu-mem', hasGpuInfo);
-        // Check GPU warning thresholds (max across all GPUs)
-        const maxGpuUtil = Math.max(...validGpus.map(g => g.proc || 0));
-        const maxGpuMem = Math.max(...validGpus.map(g => g.mem || 0));
-        updateCardWarning('gpu', maxGpuUtil, thresholds.gpu_util_percent);
-        updateCardWarning('gpu-mem', maxGpuMem, thresholds.gpu_memory_percent);
+        updateCardNoData('gpu', maxGpuUtil != null);
+        updateCardNoData('gpu-mem', maxGpuMem != null);
+        // Warn from available readings only; partial multi-GPU data stays useful.
+        updateCardWarning('gpu', maxGpuUtil ?? 0, thresholds.gpu_util_percent);
+        updateCardWarning('gpu-mem', maxGpuMem ?? 0, thresholds.gpu_memory_percent);
       } else {
         for (const id of ['gpu-value', 'gpu-mem-value']) {
           const el = document.getElementById(id);
@@ -1904,9 +1916,9 @@ async function fetchDataOnce() {
     // RAPL are root-only, so Glances cannot see them). Only a fresh snapshot is
     // drawn -- a stale/missing one is skipped so old values are never shown as
     // live -- and its own age (not the fetch time) goes in the three headers.
-    // Fetched every 30 s; after 5 min of failed refetches (the server's own stale
-    // threshold) the cards go away rather than showing an old reading as live.
-    const sen = getFreshCache('sensors', 300000);
+    // Match the server's five-minute limit, including the snapshot's age when
+    // fetched, even if subsequent HTTP refreshes fail.
+    const sen = getFreshSnapshot('sensors', 300000);
     // The driver's own per-GPU limits (nvidia-smi -q, via the same snapshot), by index.
     const gpuLimits = new Map(sen?.status === 'ok' ? (sen.gpus ?? []).map(g => [g.index, g.limits ?? {}]) : []);
 
@@ -2121,21 +2133,7 @@ async function fetchDataOnce() {
       });
       // This slot was actually measured (see history.pingGap).
       pushHistory(history.pingGap, false);
-      // Measured failures remain outages even when no success is left in the
-      // window. pingGap excludes initial padding and disconnect/pause slots.
-      const pingBand = charts.ping.data.datasets[0];
-      if (pingBand && pingBand.label === 'loss' && history.pings.length) {
-        const bandColors = cfgTargets.map((t, i) => getCssColor('--color-ping-' + i) || GPU_COLORS[i % GPU_COLORS.length]);
-        const slotLoss = (i) => cfgTargets.map((t, k) =>
-          (history.pings[k][i] == null && !history.pingGap[i]) ? 1 : 0);
-        pingBand.data = history.pings[0].map((_, i) => slotLoss(i).some(l => l > 0) ? 1 : null);
-        pingBand.backgroundColor = history.pings[0].map((_, i) => {
-          const ls = slotLoss(i);
-          return ls.some(l => l > 0)
-            ? pingBandPattern(cfgTargets.map((t, k) => ({ color: bandColors[k], loss: ls[k] })))
-            : 'rgba(0,0,0,0)';
-        });
-      }
+      updatePingLossBand();
       charts.ping.update();
       updateCardNoData('ping', true);
       updateCardWarning('ping', worstMs, thresholds.ping_ms);

@@ -59,6 +59,25 @@ function resizeHistory(newLength) {
   history.gpuMems.forEach(resizeArray);
   history.diskDriveReads.forEach(resizeArray);
   history.diskDriveWrites.forEach(resizeArray);
+  updatePingLossBand();
+}
+
+// Derived from the measured slots, so resizing and reconnect gaps must update
+// the band too, even while polling is paused or the next ping request fails.
+function updatePingLossBand() {
+  const band = charts.ping.data.datasets[0];
+  if (!band || band.label !== 'loss' || !history.pings.length) return;
+  const targets = dashboardConfig.ping_targets || DEFAULT_PING_TARGETS;
+  const colors = targets.map((_, i) => getCssColor('--color-ping-' + i) || GPU_COLORS[i % GPU_COLORS.length]);
+  const slotLoss = i => targets.map((_, k) =>
+    history.pings[k][i] == null && !history.pingGap[i] ? 1 : 0);
+  band.data = history.pings[0].map((_, i) => slotLoss(i).some(loss => loss > 0) ? 1 : null);
+  band.backgroundColor = history.pings[0].map((_, i) => {
+    const losses = slotLoss(i);
+    return losses.some(loss => loss > 0)
+      ? pingBandPattern(targets.map((_, k) => ({ color: colors[k], loss: losses[k] })))
+      : 'rgba(0,0,0,0)';
+  });
 }
 
 // Generate time labels for x-axis (seconds ago)

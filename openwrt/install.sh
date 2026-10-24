@@ -87,7 +87,9 @@ else
 fi
 
 # --- Detect LAN IP ---
-LAN_IP=$(uci get network.lan.ipaddr 2>/dev/null || echo "")
+if [ -z "${LAN_IP:-}" ]; then
+    LAN_IP=$(uci get network.lan.ipaddr 2>/dev/null || echo "")
+fi
 LAN_IP="${LAN_IP%%/*}"
 if [ -z "$LAN_IP" ]; then
     # Fallback: first non-loopback IPv4

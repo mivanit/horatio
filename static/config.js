@@ -153,6 +153,8 @@ function hideError() {
 
 // Update connection status based on card states
 function updateConnectionStatus() {
+  // A poll already in flight can finish after Disconnect stopped the timers.
+  if (!isConnected) return;
   const statusEl = document.getElementById('status');
   const statusText = statusEl.querySelector('.status-text');
   const spinner = statusEl.querySelector('.spinner');

@@ -30,7 +30,12 @@ if name == "test-uhttpd-service":
 with (root / "events").open("a") as out:
     out.write(json.dumps(event) + "\n")
 if name == "uci" and args[:2] == ["get", "network.lan.ipaddr"]:
-    print("192.168.1.1")
+    print(os.environ.get("HORATIO_DETECTED_LAN_IP", "192.168.1.1"))
+elif name == "ip":
+    print("    inet 127.0.0.1/8 scope host lo")
+    address = os.environ.get("HORATIO_INTERFACE_IP", "192.168.2.1/24")
+    if address:
+        print("    inet " + address + " scope global br-lan")
 elif name == "wget" and args[-1].startswith("https://"):
     dest = pathlib.Path(args[args.index("-qO") + 1])
     mode = os.environ.get("HORATIO_DOWNLOAD_MODE", "success")
@@ -67,13 +72,16 @@ class InstallerTests(unittest.TestCase):
         mock = self.bin / "mock"
         mock.write_text(MOCK)
         mock.chmod(0o755)
-        for name in ("uci", "uhttpd", "apk", "wget", "crontab", "sleep",
+        for name in ("uci", "uhttpd", "apk", "wget", "crontab", "sleep", "ip",
                      "test-uhttpd-service", "test-cron-service"):
             (self.bin / name).symlink_to(mock)
 
-    def run_install(self, mode="success"):
+    def run_install(self, mode="success", *, extra_env=None):
         env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
                    HORATIO_INSTALL_TEST=str(self.root), HORATIO_DOWNLOAD_MODE=mode)
+        env.pop("LAN_IP", None)
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(["sh", str(self.script)], env=env, text=True,
                               capture_output=True, timeout=10)
 
@@ -132,6 +140,33 @@ class InstallerTests(unittest.TestCase):
             self.assertIsNotNone(router)
             self.assertIsNotNone(linux)
             self.assertEqual(router.group(1), linux.group(1))
+
+    def test_lan_ip_override_skips_detection_and_strips_cidr(self):
+        for address in ("192.168.50.1", "192.168.50.1/24"):
+            with self.subTest(address=address):
+                result = self.run_install(extra_env={"LAN_IP": address})
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertIn(["add_list", "uhttpd.dashboard.listen_http=192.168.50.1:8080"],
+                              [event["args"] for event in self.events("uci")])
+                self.assertNotIn(["get", "network.lan.ipaddr"],
+                                 [event["args"] for event in self.events("uci")])
+                self.assertEqual(self.events("ip"), [])
+                self.assertEqual(self.events("wget")[-1]["args"][-1],
+                                 "http://192.168.50.1:8080/api/4/load")
+
+    def test_empty_override_uses_detected_lan_ip(self):
+        result = self.run_install(extra_env={"LAN_IP": "", "HORATIO_DETECTED_LAN_IP": "192.168.3.1/24"})
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn(["add_list", "uhttpd.dashboard.listen_http=192.168.3.1:8080"],
+                      [event["args"] for event in self.events("uci")])
+        self.assertEqual(self.events("ip"), [])
+
+    def test_missing_uci_address_falls_back_to_non_loopback_interface(self):
+        result = self.run_install(extra_env={"HORATIO_DETECTED_LAN_IP": ""})
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn(["add_list", "uhttpd.dashboard.listen_http=192.168.2.1:8080"],
+                      [event["args"] for event in self.events("uci")])
+        self.assertEqual(len(self.events("ip")), 1)
 
 
 if __name__ == "__main__":

@@ -116,7 +116,7 @@ fi
 
 echo "Syncing Python environment..."
 # --locked: never rewrite uv.lock on the box; fail loudly if it disagrees with pyproject.
-uv sync --locked --link-mode copy
+uv sync --project "$SCRIPT_DIR" --locked --link-mode copy
 [ -x "$SCRIPT_DIR/.venv/bin/python" ] || { echo "Error: .venv/bin/python missing after uv sync" >&2; exit 1; }
 
 echo "Downloading Chart.js..."
