@@ -13,13 +13,14 @@ local metrics = nil
 
 local HISTORY_FILE = "/tmp/dashboard-history.jsonl"
 local LAST_RECORD_FILE = "/tmp/dashboard-last-record"  -- epoch of the last append
-local CLAIM_LOCK = "/tmp/dashboard-record.lock"        -- mkdir lock: one recorder per interval
+local RECORD_LOCK = "/tmp/dashboard-history.lock"      -- stable inode; never unlink a kernel lockfile
 local RECORD_INTERVAL = 600   -- max one piggyback record per this many seconds
 local MIN_MANUAL_INTERVAL = 60
 local INITIAL_TAIL_READ = 1048576  -- 1 MiB tail window, doubled until it covers the range
 -- Past this (config history.max_file_mb) the older part of the file is gzipped
 -- to history-<UTC time>.jsonl.gz beside it and the file keeps its newest half.
 M.max_file_bytes = 256 * 1048576
+M.max_read_bytes = 4 * 1048576  -- bound per-request parsing and response memory on routers
 
 -- state_dir: where the tmpfs state files go (tests point it elsewhere).
 function M.init(cfg, metrics_module, dashboard_dir, state_dir)
@@ -27,7 +28,7 @@ function M.init(cfg, metrics_module, dashboard_dir, state_dir)
     metrics = metrics_module
     if state_dir then
         LAST_RECORD_FILE = state_dir .. "/dashboard-last-record"
-        CLAIM_LOCK = state_dir .. "/dashboard-record.lock"
+        RECORD_LOCK = state_dir .. "/dashboard-history.lock"
     end
     local hist_cfg = config.history or {}
     RECORD_INTERVAL = hist_cfg.record_interval or 600
@@ -162,7 +163,39 @@ local function sh(cmd)
     return r == true or r == 0
 end
 
+local function shell_quote(value)
+    return "'" .. value:gsub("'", "'\\''") .. "'"
+end
+
+-- Open after uhttpd forks the request. POSIX locks are process-owned and are
+-- released by the kernel on exit, including SIGKILL; no stale-owner reaper.
+local function with_record_lock(fn)
+    local nixio = require("nixio")
+    local lock, code, err = nixio.open(RECORD_LOCK, "w", "600") -- same inode on every open
+    if not lock then return {error = "Recording failed", detail = tostring(err or code)} end
+    local acquired
+    acquired, code, err = lock:lock("tlock")
+    if not acquired then
+        lock:close()
+        if code == nixio.const.EAGAIN or code == nixio.const.EACCES then
+            return {status = "skipped", reason = "busy", retry_after = 1}
+        end
+        return {error = "Recording failed", detail = tostring(err or code)}
+    end
+    local ok, result = pcall(fn)
+    local closed, close_code, close_err = lock:close()
+    if not ok then return {error = "Recording failed", detail = tostring(result)} end
+    if not closed then
+        result.warning = result.warning or "History lock close failed"
+        result.detail = tostring(close_err or close_code)
+    end
+    return result
+end
+
+local rotate_locked
+
 -- Append a record to the JSONL file.
+-- The caller holds RECORD_LOCK until any rotation has finished.
 -- Returns ok, err so callers can report a failed write instead of claiming
 -- success: a read-only or full filesystem must not surface as {status = "ok"}.
 local function append_record(record)
@@ -179,57 +212,112 @@ local function append_record(record)
         io.stderr:write("[dashboard] history append FAILED: " .. err .. "\n")
         return false, err
     end
-    f:write(json_line .. "\n")
-    local size = f:seek("end")
-    f:close()
-    if size and size > M.max_file_bytes then M.rotate() end
+    local written, write_err = f:write(json_line .. "\n")
+    local size, seek_err = f:seek("end")
+    local closed, close_err = f:close()
+    if not written or not size or not closed then
+        return false, tostring(write_err or seek_err or close_err)
+    end
+    if size > M.max_file_bytes then
+        local rotated, rotation_err = rotate_locked()
+        if not rotated then return true, rotation_err end
+    end
     return true
 end
 
--- Copy n bytes (to EOF when nil) from src to out in 64 KiB chunks; false if a
--- write failed (full flash).
-local function copy(src, out, n)
-    while n == nil or n > 0 do
-        local chunk = src:read(n and math.min(n, 65536) or 65536)
-        if not chunk or chunk == "" then return true end
-        if not out:write(chunk) then return false end
-        if n then n = n - #chunk end
+-- Every byte must arrive. EOF before n bytes and read errors are failures,
+-- even if gzip can make a valid archive from the incomplete input it received.
+local function copy_exact(src, out, n)
+    while n > 0 do
+        local chunk, read_err = src:read(math.min(n, 65536))
+        if read_err then return false, read_err end
+        if not chunk or chunk == "" then return false, "unexpected end of history file" end
+        local written, write_err = out:write(chunk)
+        if not written then return false, write_err end
+        n = n - #chunk
     end
     return true
+end
+
+-- Reserve a name exclusively: two rotations in one second, or a clock reset,
+-- must not overwrite an earlier archive. Only this attempt's file is removed
+-- on failure; the numeric suffix is used only for existing names.
+local function reserve_archive()
+    local nixio = require("nixio")
+    local flags = nixio.open_flags("wronly", "creat", "excl")
+    local stem = HISTORY_FILE:gsub("%.jsonl$", "") .. os.date("!-%Y%m%dT%H%M%SZ")
+    local suffix = 0
+    while true do
+        local path = stem .. (suffix == 0 and "" or "-" .. suffix) .. ".jsonl.gz"
+        local f, code, err = nixio.open(path, flags, "600")
+        if f then
+            local closed, close_code, close_err = f:close()
+            if closed then return path end
+            os.remove(path)
+            return nil, close_err or close_code
+        end
+        if code ~= nixio.const.EEXIST then return nil, err or code end
+        suffix = suffix + 1
+    end
 end
 
 -- Gzip everything but the newest max_file_bytes / 2 (whole lines) to an archive
--- beside the file, then keep only that newest part. The old part is streamed
--- straight into gzip, so no uncompressed copy hits the flash. If the archive
--- doesn't verify or the rewrite fails, the file is left as it is.
-function M.rotate()
-    local f = io.open(HISTORY_FILE, "rb")
-    if not f then return end
-    local size = f:seek("end")
-    f:seek("set", size - math.floor(M.max_file_bytes / 2))
-    f:read("*l")
-    local split = f:seek()
-    if split <= 0 or split >= size then f:close() return end
-
-    local archive = HISTORY_FILE:gsub("%.jsonl$", "") .. os.date("!-%Y%m%dT%H%M%SZ.jsonl.gz")
-    local gz = io.popen("gzip > '" .. archive .. "'", "w")
-    if not gz then f:close() return end
-    f:seek("set", 0)
-    copy(f, gz, split)
-    gz:close()
-    if not sh("gzip -t '" .. archive .. "' 2>/dev/null") then
-        io.stderr:write("[dashboard] history rotate FAILED: " .. archive .. " did not verify\n")
-        os.remove(archive)
-        f:close()
-        return
+-- beside the file, then atomically replace the live file with its newest part.
+-- The writer lock is already held. Until rename succeeds, every failure keeps
+-- the live file and removes this attempt's archive and incomplete replacement.
+rotate_locked = function()
+    local f, gz, out, archive
+    local tmp, tmp_created = HISTORY_FILE .. ".tmp", false
+    local function checked(value, err)
+        if not value then error(tostring(err or "history I/O failed"), 0) end
+        return value
     end
+    local ok, err = pcall(function()
+        f = checked(io.open(HISTORY_FILE, "rb"))
+        local size = checked(f:seek("end"))
+        if size <= M.max_file_bytes then return end
+        checked(f:seek("set", size - math.floor(M.max_file_bytes / 2)))
+        checked(f:read("*l"))
+        local split = checked(f:seek())
+        if split <= 0 or split >= size then return end
 
-    local tmp = HISTORY_FILE .. ".tmp"
-    local out = io.open(tmp, "wb")
-    if not out then f:close() return end
-    local ok = copy(f, out) and out:close()
-    f:close()
-    if ok then os.rename(tmp, HISTORY_FILE) else os.remove(tmp) end
+        -- uhttpd resets SIGPIPE in its worker. A failed gzip must become a
+        -- checked write error so this attempt's files can be cleaned up.
+        local nixio = require("nixio")
+        local ignored, _, signal_err = nixio.signal(nixio.const.SIGPIPE, "ign")
+        checked(ignored, signal_err)
+        archive = checked(reserve_archive())
+        gz = checked(io.popen("gzip > " .. shell_quote(archive), "w"))
+        checked(f:seek("set", 0))
+        checked(copy_exact(f, gz, split))
+        checked(gz:flush())
+        local pipe = gz
+        gz = nil
+        checked(pipe:close())
+        checked(sh("gzip -t " .. shell_quote(archive) .. " 2>/dev/null"), "archive verification failed")
+
+        out = checked(io.open(tmp, "wb"))
+        tmp_created = true
+        checked(copy_exact(f, out, size - split))
+        checked(out:flush())
+        local tail = out
+        out = nil
+        checked(tail:close())
+        local source = f
+        f = nil
+        checked(source:close())
+        checked(os.rename(tmp, HISTORY_FILE))
+        tmp_created = false
+    end)
+    for _, handle in pairs({f, gz, out}) do
+        local closed, close_err = handle:close()
+        if not closed and ok then ok, err = false, close_err end
+    end
+    if not ok then
+        if archive then os.remove(archive) end
+        if tmp_created then os.remove(tmp) end
+    end
+    return ok, err
 end
 
 local function read_last_record_time()
@@ -254,24 +342,28 @@ local function due(now, interval)
     return not (elapsed >= 0 and elapsed < interval)
 end
 
--- Claim this interval's record before sampling. uhttpd runs each request in its
--- own process and a poll sends ~9 at once: without a claim every one of them
--- found the record due and appended its own. mkdir is atomic, so exactly one
--- process wins and stamps the interval; the lock is held only for that check.
--- A lock left by a killed process is removed once it is a minute old.
-local function claim(interval)
-    if not sh("mkdir " .. CLAIM_LOCK .. " 2>/dev/null") then
-        sh("find " .. CLAIM_LOCK .. " -maxdepth 0 -mmin +1 -exec rmdir {} \\; 2>/dev/null")
-        return false
-    end
-    -- The clock is read inside the lock: a process that read it before the
-    -- previous winner stamped the next second would see elapsed = -1, which
-    -- due() takes for a clock gone backwards, and record again.
-    local now = os.time()
-    local won = due(now, interval)
-    if won then write_last_record_time(now) end
-    sh("rmdir " .. CLAIM_LOCK)
-    return won
+-- Check the interval inside the writer lock, then retain it through the
+-- append and any rotation. Piggyback claims still stamp before sampling so a
+-- failed sample waits for the next interval; manual records stamp on success.
+local function record(interval, stamp_before)
+    return with_record_lock(function()
+        local now = os.time()
+        local elapsed = now - read_last_record_time()
+        if elapsed >= 0 and elapsed < interval then
+            return {status = "skipped", reason = "rate_limited", retry_after = interval - elapsed}
+        end
+        if stamp_before then write_last_record_time(now) end
+        local snapshot = build_record()
+        local written, write_err = append_record(snapshot)
+        if not written then return {error = "Recording failed", detail = write_err} end
+        if not stamp_before then write_last_record_time(now) end
+        local result = {status = "ok", record = snapshot}
+        if write_err then
+            result.warning, result.detail = "History rotation failed", tostring(write_err)
+            io.stderr:write("[dashboard] history rotation FAILED: " .. result.detail .. "\n")
+        end
+        return result
+    end)
 end
 
 -- Called on every API request (handler.lua); records if RECORD_INTERVAL has
@@ -280,33 +372,18 @@ end
 -- retried until the next interval.
 function M.maybe_record()
     if not metrics then return end
-    local now = os.time()
-    if not due(now, RECORD_INTERVAL) or not claim(RECORD_INTERVAL) then return end
-    local ok, record = pcall(build_record)
-    if not ok then
-        io.stderr:write("[dashboard] history recording FAILED: " .. tostring(record) .. "\n")
-        return
+    if not due(os.time(), RECORD_INTERVAL) then return end
+    local result = record(RECORD_INTERVAL, true)
+    if result.error then
+        io.stderr:write("[dashboard] history recording FAILED: " .. tostring(result.detail) .. "\n")
     end
-    append_record(record)
 end
 
 -- POST /api/history/record (cron and manual). Rate-limited via the same
 -- timestamp file.
 function M.record_now()
     if not metrics then return {error = "not initialized"} end
-    local now = os.time()
-    local elapsed = now - read_last_record_time()
-    if elapsed >= 0 and elapsed < MIN_MANUAL_INTERVAL then
-        return {status = "skipped", reason = "rate_limited", retry_after = MIN_MANUAL_INTERVAL - elapsed}
-    end
-    local ok, record = pcall(build_record)
-    if not ok then return {error = "Recording failed", detail = tostring(record)} end
-    local written, write_err = append_record(record)
-    if not written then
-        return {error = "Recording failed", detail = write_err}
-    end
-    write_last_record_time(now)
-    return {status = "ok", record = record}
+    return record(MIN_MANUAL_INTERVAL, false)
 end
 
 -- Compute local-to-UTC offset in seconds (positive if east of UTC)
@@ -317,23 +394,28 @@ end
 
 -- Read history (GET /api/history?hours=N)
 -- Records are appended chronologically, so read a window from the end of the
--- file and double it until the oldest record in the window predates the cutoff.
+-- file and double it until the oldest record predates the cutoff, or the
+-- router's read cap is reached. truncated tells the client the range is partial.
 function M.get(hours)
     hours = math.max(0.1, math.min(hours or 24, 8760))
     local cutoff = os.time() - (hours * 3600)
     local offset = tz_offset()
 
     local f = io.open(HISTORY_FILE, "rb")
-    if not f then return {records = {}, count = 0, skipped_lines = 0} end
+    if not f then return {records = {}, count = 0, skipped_lines = 0, truncated = false} end
 
     local jsonc = require("luci.jsonc")
-    local size = f:seek("end")
-    local read_size = INITIAL_TAIL_READ
+    local size, size_err = f:seek("end")
+    if not size then f:close() error(tostring(size_err)) end
+    local read_size = math.min(INITIAL_TAIL_READ, M.max_read_bytes)
 
     while true do
         local start = math.max(0, size - read_size)
-        f:seek("set", start)
-        local data = f:read(size - start) or ""
+        local position, seek_err = f:seek("set", start)
+        if not position then f:close() error(tostring(seek_err)) end
+        local data, read_err = f:read(size - start)
+        if read_err then f:close() error(tostring(read_err)) end
+        data = data or ""
         if start > 0 then
             -- Drop the (likely partial) line the window starts in
             local nl = data:find("\n", 1, true)
@@ -348,7 +430,7 @@ function M.get(hours)
             if line ~= "" then
                 local ts = nil
                 local record = jsonc.parse(line)
-                if type(record) == "table" and record.timestamp then
+                if type(record) == "table" and type(record.timestamp) == "string" then
                     -- Parse ISO timestamp (UTC) to epoch for filtering
                     local y, mo, d, h, mi, s = record.timestamp:match(
                         "(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)")
@@ -374,14 +456,15 @@ function M.get(hours)
             end
         end
 
-        if start == 0 or (first_ts and first_ts < cutoff) then
+        local covered = start == 0 or (first_ts and first_ts < cutoff)
+        if covered or read_size >= M.max_read_bytes then
             f:close()
             if skipped > 0 then
                 io.stderr:write("[dashboard] history read: skipped " .. skipped .. " malformed lines\n")
             end
-            return {records = records, count = #records, skipped_lines = skipped}
+            return {records = records, count = #records, skipped_lines = skipped, truncated = not covered}
         end
-        read_size = read_size * 2
+        read_size = math.min(read_size * 2, M.max_read_bytes)
     end
 end
 

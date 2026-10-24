@@ -52,10 +52,11 @@ command -v uhttpd >/dev/null 2>&1 || { error "uhttpd not found."; exit 1; }
 # --- Dependencies ---
 info "Checking dependencies..."
 if command -v apk >/dev/null 2>&1; then
-    apk add uhttpd-mod-lua luci-lib-jsonc
+    apk add uhttpd-mod-lua luci-lib-jsonc luci-lib-nixio
 elif command -v opkg >/dev/null 2>&1; then
     opkg list-installed | grep -q uhttpd-mod-lua || opkg install uhttpd-mod-lua
     opkg list-installed | grep -q luci-lib-jsonc || opkg install luci-lib-jsonc
+    opkg list-installed | grep -q luci-lib-nixio || opkg install luci-lib-nixio
 fi
 
 # --- Chart.js ---

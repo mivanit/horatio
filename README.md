@@ -90,7 +90,7 @@ curl http://<host>:8080/text?style=simple         # plain ASCII, for scripts and
 | `history.record_interval` | seconds between history records (default 600) |
 | `history.min_record_interval` | minimum seconds between manual "record now" requests, 0 to disable (default 60) |
 | `history.sample_duration`, `history.sample_count` | each record averages `sample_count` samples over `sample_duration` seconds |
-| `history.max_file_mb` | OpenWrt backend only: past this size the older part of `logs/history.jsonl` is gzipped to `logs/history-<UTC time>.jsonl.gz` and the file keeps its newest half (default 256). The archives are kept, but the page reads only `history.jsonl` |
+| `history.max_file_mb` | OpenWrt backend only: past this size the older part of `logs/history.jsonl` is gzipped beside it and the file keeps its newest half (default 256). Archives are retained. Rotation needs free space for the compressed archive and the retained half; choose a smaller value on limited flash. History requests read at most the newest 4 MiB and report `truncated` when the requested range does not fit |
 | `history.processes_enabled`, `history.process_count` | log the top `process_count` processes by CPU and by memory, plus any holding GPU memory, in each history record (`processes`: pid, name always; ppid, create_time, user, status, threads, cpu_percent, rss_mb, disk_read_kbps, disk_write_kbps, gpu_mem_mib + gpus, gpu_util_percent when known and non-zero); default off, 10. Roughly doubles a record's size at 10, so the 64 MB history tail covers fewer days |
 | `thresholds.*_percent`, `temp_celsius`, `network_mbps`, `disk_io_mbps`, `ping_ms` | orange-card thresholds |
 | `thresholds.power_max_watts`, `power_psu_watts`, `power_warn_fraction` | the power bar's right edge, its dashed PSU line, and the orange threshold as a fraction of the PSU |
@@ -163,6 +163,8 @@ horatio/
 
 ## Development
 
+Node.js is required for the browser history tests run by `test.py`.
+
 ```bash
 cp config.example.json config.json   # once
 uv sync
@@ -184,7 +186,15 @@ sh install.sh             # install and start on port 8080 (LAN only)
 sh install.sh --uninstall
 ```
 
-Requires `uhttpd-mod-lua` and `luci-lib-jsonc` (installed by the script). It does not implement
-`since=` (Refresh reloads the whole window there) or the rate caps on history.
+Requires `uhttpd-mod-lua`, `luci-lib-jsonc`, and `luci-lib-nixio` (installed by the
+script; rerun it when updating). A kernel file lock serializes recording and
+rotation and releases automatically if a request worker exits. A successfully
+saved record whose rotation failed returns a warning; its original history is
+retained. It does not implement `since=` (Refresh reloads the whole window there)
+or the rate caps on history.
+
+Run the OpenWrt history tests with `lua5.1 openwrt/test_history.lua` from the
+checkout root, using Lua 5.1 with Nixio installed. The tests use temporary files,
+forked contenders, and injected I/O failures; they do not touch recorded history.
 
 Chart.js (MIT) is fetched at install time; Glances (LGPL) is a Python dependency.

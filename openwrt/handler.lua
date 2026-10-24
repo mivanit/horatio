@@ -126,7 +126,8 @@ routes["/history/field/temps"] = function(env)
     local r = history.get(tonumber(params.hours) or 24)
     local slim = {}
     for i, rec in ipairs(r.records) do slim[i] = {timestamp = rec.timestamp, temps = rec.temps} end
-    send_json({field = "temps", records = slim, count = #slim, skipped_lines = r.skipped_lines})
+    send_json({field = "temps", records = slim, count = #slim,
+        skipped_lines = r.skipped_lines, truncated = r.truncated})
 end
 
 routes["/history/settings"] = function(env)

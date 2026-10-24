@@ -2749,8 +2749,8 @@ function _historyCacheSet(key, data) {
 // Splice an incremental (`since=`) response onto the cached window: drop held
 // records that aged out of the server's window (its cutoff, so clock skew is
 // moot), add the new ones (skipping any already held), and sort by time. A new
-// object: cards share the cached one. truncated keeps its whole-window meaning
-// (the delta only saw the small tail it parsed). A response without a cutoff
+// object: cards share the cached one. A truncated prefix stays relevant until
+// it ages out of the requested window. A response without a cutoff
 // did not honour since= (an older server process): it is the full window.
 function mergeHistoryDelta(base, delta) {
   if (typeof delta.cutoff !== 'number') return delta;
@@ -2762,7 +2762,10 @@ function mergeHistoryDelta(base, delta) {
     .map(r => [Date.parse(r.timestamp), r])
     .sort((a, b) => a[0] - b[0])
     .map(([, r]) => r);
-  return { ...delta, records, count: records.length, truncated: base.truncated };
+  // Once a held record predates the new cutoff, the omitted prefix is outside
+  // the window. An empty cache cannot establish that boundary.
+  const truncated = !!base.truncated && !base.records.some(r => Date.parse(r.timestamp) <= cutoffMs);
+  return { ...delta, records, count: records.length, truncated };
 }
 
 // One history request, with success/failure preserved so callers can tell a
@@ -2785,12 +2788,16 @@ function requestHistory(hours, field, since) {
 // truncated / corrupt-lines toasts.
 function fetchHistoryData(hours = defaultHistoryHours, { force = false, field = null } = {}) {
   const key = field ? `${field}:${hours}` : hours;
+  // Share the request, not its failure policy: a toggle joining Refresh still
+  // draws cached data on failure, while the Refresh caller sees the error.
+  const forCaller = promise => force ? promise : promise.then(data =>
+    data.ok ? data : (historyCache.get(key) || data));
   if (force) {
     historyTruncatedWarned = false;  // an explicit refresh re-surfaces a persistent truncation/skip
     historySkippedWarned = false;
   } else if (historyFetchInflight.has(key)) {
     // A card opened during a Refresh waits for the fresh data.
-    return historyFetchInflight.get(key);
+    return forCaller(historyFetchInflight.get(key));
   }
   const base = historyCache.get(key);
   // A backend that reports no clock (OpenWrt) can't be topped up: serve the
@@ -2803,13 +2810,12 @@ function fetchHistoryData(hours = defaultHistoryHours, { force = false, field = 
     ? new Date((base.now - HISTORY_SINCE_OVERLAP_SEC) * 1000).toISOString() : null;
   const promise = requestHistory(hours, field, since)
     .then(data => {
-      // A failed fetch keeps drawing the cached window (server restarting,
-      // Wi-Fi drop); only Refresh reports the failure.
-      if (!data.ok) return !force && base ? base : data;
-      if (!since) return data;
-      // The server hit its byte cap before reaching `since`: there is a gap
-      // between the cached window and what came back, so refetch in full.
-      if (data.truncated) return requestHistory(hours, field, null);
+      if (!data.ok || !since) return data;
+      // A truncated delta leaves a gap; a clock rewind can also add an older
+      // edge to the window that `since` excludes. Both need a full read.
+      const rewound = (typeof data.now === 'number' && data.now < base.now) ||
+        (typeof data.cutoff === 'number' && data.cutoff < base.cutoff);
+      if (data.truncated || rewound) return requestHistory(hours, field, null);
       return mergeHistoryDelta(base, data);
     })
     .then(data => {
@@ -2856,7 +2862,7 @@ function fetchHistoryData(hours = defaultHistoryHours, { force = false, field = 
     // promise, and an older one settling later must not delete it.
     .finally(() => { if (historyFetchInflight.get(key) === promise) historyFetchInflight.delete(key); });
   historyFetchInflight.set(key, promise);
-  return promise;
+  return forCaller(promise);
 }
 
 // Markup for a failed history fetch — visibly distinct from the "No history
@@ -3952,17 +3958,19 @@ async function refreshAllHistory() {
       const hours = parseFloat(entry.card.querySelector('.history-range-input')?.value) || defaultHistoryHours;
       const field = HISTORY_METRICS[metric].sideField || null;
       const key = `${field || ''}|${hours}`;
-      if (!groups.has(key)) groups.set(key, { hours, field, metrics: [] });
-      groups.get(key).metrics.push(metric);
+      if (!groups.has(key)) groups.set(key, { hours, field, cards: [] });
+      groups.get(key).cards.push({ metric, entry, loadSeq: ++entry.loadSeq });
     }
-    await Promise.all([...groups.values()].map(async ({ hours, field, metrics }) => {
+    await Promise.all([...groups.values()].map(async ({ hours, field, cards }) => {
       // Top the cached window up from the server (only records newer than it
       // holds), then redraw every card in the group from the one shared result.
       const data = await fetchHistoryData(hours, { force: true, field });
-      // A card whose range was changed meanwhile has its own load in flight.
-      const current = metrics.filter(m =>
-        (parseFloat(historyCards.get(m)?.card.querySelector('.history-range-input')?.value) || defaultHistoryHours) === hours);
-      await Promise.all(current.map(m => loadHistoryData(m, hours, data)));
+      // A reopened card or a newer load/Refresh owns its own result. Also skip
+      // ranges edited while their debounced load is still pending.
+      const current = cards.filter(({ metric, entry, loadSeq }) =>
+        historyCards.get(metric) === entry && entry.loadSeq === loadSeq &&
+        (parseFloat(entry.card.querySelector('.history-range-input')?.value) || defaultHistoryHours) === hours);
+      await Promise.all(current.map(({ metric }) => loadHistoryData(metric, hours, data)));
     }));
   } catch (err) {
     console.error('History refresh failed:', err);
