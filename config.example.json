@@ -1,5 +1,5 @@
 {
-  "_comment": "Copied to config.json by install.sh on first run; config.json is gitignored and never overwritten. power_max_watts is the bar's right edge, power_psu_watts the dashed line, power_warn_fraction the orange threshold as a fraction of the PSU.",
+  "_comment": "Copied to config.json by install.sh on first run; config.json is gitignored and never overwritten. power_max_watts is the bar's right edge, power_psu_watts the dashed line, power_warn_fraction the orange threshold as a fraction of the PSU. limits.* are MB/s ceilings for each network interface and each drive (10 Gbit/s is 1250; a PCIe 5 NVMe about 15000): a sample over the cap counts as the cap and the record notes it under rate_capped; totals are sums and not capped. The server reads them at startup.",
   "title": "Horatio",
   "title_emoji": "🔭 Horatio",
   "ping_targets": [
@@ -13,6 +13,10 @@
     "sample_count": 5,
     "processes_enabled": false,
     "process_count": 10
+  },
+  "limits": {
+    "network_mbps": 1250,
+    "disk_io_mbps": 15000
   },
   "thresholds": {
     "cpu_percent": 50,

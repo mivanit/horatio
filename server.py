@@ -29,6 +29,7 @@ import mailbox
 import math
 import os
 import posixpath
+import re
 import secrets
 import socket
 import statistics
@@ -40,13 +41,14 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 STATIC_DIR: Final[Path] = Path(__file__).parent / "static"
 INDEX_FILE: Final[Path] = Path(__file__).parent / "index.html"
@@ -121,6 +123,35 @@ def _cfg_int(
     return value
 
 
+def _cfg_num(
+    cfg: dict[str, Any],
+    key: str,
+    default: float,
+    lo: float,
+    hi: float,
+    section: str,
+) -> float:
+    """Read a numeric (int or float) setting, like _cfg_int. The range check
+    also rejects inf and NaN (every comparison with them is False)."""
+    value = cfg.get(key, default)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not (lo <= value <= hi)
+    ):
+        logging.getLogger("dashboard").warning(
+            "config.json %s.%s=%r is invalid or outside [%g, %g]; using %g",
+            section,
+            key,
+            value,
+            lo,
+            hi,
+            default,
+        )
+        return float(default)
+    return float(value)
+
+
 _CONFIG: Final[dict[str, Any]] = _load_config()
 
 # History recording settings (defaults, runtime values stored on APP.state).
@@ -155,6 +186,34 @@ if not isinstance(_processes_enabled, bool):
     )
     _processes_enabled = False
 DEFAULT_HISTORY_PROCESSES_ENABLED: Final[bool] = _processes_enabled
+
+
+
+def _read_limits(cfg: dict[str, Any]) -> tuple[float, float]:
+    """(network_mbps, disk_io_mbps) ceilings from config.json's "limits".
+
+    Glances' rates are a counter delta over its own elapsed time and now and then
+    come out absurd (counter wrap, interface churn). Each interface's and each
+    drive's samples are clamped to these when a record is collected (_RateCaps);
+    totals are not capped. Records from before the caps are clamped when served
+    (clamp_record_rates). Read once at startup.
+    Defaults: 10 Gbit/s ~ 1250 MB/s; a PCIe 5 NVMe ~ 15 GB/s.
+    """
+    limits: Any = cfg.get("limits", {})
+    if not isinstance(limits, dict):
+        logging.getLogger("dashboard").warning(
+            "config.json: 'limits' is not an object; using defaults"
+        )
+        limits = {}
+    return (
+        _cfg_num(limits, "network_mbps", 1250.0, 1, 1e9, "limits"),
+        _cfg_num(limits, "disk_io_mbps", 15000.0, 1, 1e9, "limits"),
+    )
+
+
+_LIMITS: Final[tuple[float, float]] = _read_limits(_CONFIG)
+MAX_NETWORK_MBPS: Final[float] = _LIMITS[0]
+MAX_DISK_IO_MBPS: Final[float] = _LIMITS[1]
 
 
 # Password hashing
@@ -956,14 +1015,16 @@ def build_process_records(
     return rows
 
 
-async def collect_history_sample(glances_url: str) -> dict[str, Any]:
+async def collect_history_sample(glances_url: str, live: bool = False) -> dict[str, Any]:
     """Collect a single history sample from all data sources.
 
     Takes samples over the configured duration and computes min/avg/max
-    for volatile metrics.
+    for volatile metrics. ``live`` (the /text snapshot) takes one immediate
+    sample with no process list or IP lookup, so a request returns in about a
+    second instead of a whole sample window, and never calls out to ipify.
     """
-    sample_duration: int = APP.state.history_sample_duration
-    sample_count: int = APP.state.history_sample_count
+    sample_duration: int = 0 if live else APP.state.history_sample_duration
+    sample_count: int = 1 if live else APP.state.history_sample_count
     sample_interval: float = sample_duration / max(1, sample_count)
 
     cpu_samples: list[float] = []
@@ -971,13 +1032,16 @@ async def collect_history_sample(glances_url: str) -> dict[str, Any]:
     percpu_samples: dict[int, list[Any]] = {}
     net_in_samples: list[float] = []
     net_out_samples: list[float] = []
+    # Caps each interface / drive rate sample and remembers which went over
+    # (see _RateCaps); summarised into the record's `rate_capped` note.
+    caps = _RateCaps()
     # Disk I/O, one dict per sample iteration: {disk_name: (read_mbps, write_mbps)}.
     # Keyed per iteration (not per disk) so a device that appears or vanishes
     # mid-window cannot shift another device's samples out of alignment.
     disk_iter_samples: list[dict[str, tuple[float, float]]] = []
     # Per-core clocks, pooled over the burst (see aggregate_cpu_freq).
     freq_samples: list[float] = []
-    processes_enabled: bool = APP.state.history_processes_enabled
+    processes_enabled: bool = APP.state.history_processes_enabled and not live
     process_count: int = APP.state.history_process_count
     ping_enabled: bool = APP.state.ping_enabled
     ping_samples: dict[str, list[float]] = (
@@ -1016,21 +1080,26 @@ async def collect_history_sample(glances_url: str) -> dict[str, Any]:
                 net_resp = await client.get(f"{glances_url}/api/4/network", timeout=5.0)
                 if net_resp.status_code == 200:
                     net_data: Any = net_resp.json()
-                    # Filter out loopback - check interface_name field (Glances uses this)
-                    total_in = sum(
-                        iface.get("bytes_recv_rate_per_sec", 0) or 0
-                        for iface in net_data
-                        if not (iface.get("interface_name") or "").startswith("lo")
-                    )
-                    total_out = sum(
-                        iface.get("bytes_sent_rate_per_sec", 0) or 0
-                        for iface in net_data
-                        if not (iface.get("interface_name") or "").startswith("lo")
-                    )
-                    net_in_samples.append(
-                        total_in / 1e6
-                    )  # Convert to MB/s (match live view)
-                    net_out_samples.append(total_out / 1e6)
+                    # MB/s (match live view), summed over every interface but
+                    # loopback. Each interface is capped on its own: a counter
+                    # glitch is per interface, while the sum legitimately
+                    # exceeds one link's rate (bridges, veths and tunnels count
+                    # the same traffic again), so the total is never capped.
+                    total_in = total_out = 0.0
+                    for iface in net_data:
+                        name = iface.get("interface_name") or ""
+                        if name.startswith("lo"):
+                            continue
+                        total_in += caps.sample(
+                            iface.get("bytes_recv_rate_per_sec"),
+                            MAX_NETWORK_MBPS, ("network.in_mbps", name),
+                        )
+                        total_out += caps.sample(
+                            iface.get("bytes_sent_rate_per_sec"),
+                            MAX_NETWORK_MBPS, ("network.out_mbps", name),
+                        )
+                    net_in_samples.append(total_in)
+                    net_out_samples.append(total_out)
                 else:
                     logger.warning("Network API returned status %d", net_resp.status_code)
 
@@ -1044,13 +1113,17 @@ async def collect_history_sample(glances_url: str) -> dict[str, Any]:
                     for disk in disk_data:
                         disk_name: Any = disk.get("disk_name")
                         if disk_name:
-                            read_mbps = (
-                                disk.get("read_bytes_rate_per_sec", 0) or 0
-                            ) / 1e6
-                            write_mbps = (
-                                disk.get("write_bytes_rate_per_sec", 0) or 0
-                            ) / 1e6
-                            this_iter[disk_name] = (read_mbps, write_mbps)
+                            # Capped per device, like the network interfaces.
+                            this_iter[disk_name] = (
+                                caps.sample(
+                                    disk.get("read_bytes_rate_per_sec"),
+                                    MAX_DISK_IO_MBPS, ("disk_io.read_mbps", disk_name),
+                                ),
+                                caps.sample(
+                                    disk.get("write_bytes_rate_per_sec"),
+                                    MAX_DISK_IO_MBPS, ("disk_io.write_mbps", disk_name),
+                                ),
+                            )
                     disk_iter_samples.append(this_iter)
                 else:
                     logger.warning(
@@ -1068,11 +1141,16 @@ async def collect_history_sample(glances_url: str) -> dict[str, Any]:
                 for target in PING_TARGETS:
                     ping_attempts[target] += 1
                 try:
+                    # Live (/text) pings get a short leash: the request waits on
+                    # this, and a dead target would otherwise hold it 2-8 s.
                     ping_results = await asyncio.wait_for(
                         asyncio.gather(
-                            *(asyncio.to_thread(_run_ping, t) for t in PING_TARGETS)
+                            *(
+                                asyncio.to_thread(_run_ping, t, 1 if live else 2)
+                                for t in PING_TARGETS
+                            )
                         ),
-                        timeout=8,
+                        timeout=2.5 if live else 8,
                     )
                     for target, latency in zip(PING_TARGETS, ping_results):
                         if latency is not None:
@@ -1152,7 +1230,8 @@ async def collect_history_sample(glances_url: str) -> dict[str, Any]:
     # Fetch IP info (point-in-time)
     ip_data: dict[str, Any] = {}
     try:
-        ip_data = await asyncio.to_thread(_get_ip_info)
+        if not live:
+            ip_data = await asyncio.to_thread(_get_ip_info)
     except Exception as e:
         logger.warning("History: failed to fetch IP info: %s", e)
 
@@ -1231,6 +1310,8 @@ async def collect_history_sample(glances_url: str) -> dict[str, Any]:
     # fs data (Glances could not read the mounts) every row is counted, as before.
     seen_disks: set[str] = {d for it in disk_iter_samples for d in it}
     counted: set[str] = {d for d in seen_disks if d in disk_to_mount} or seen_disks
+    # Each device is capped already; the total is their plain sum (a busy pool
+    # legitimately exceeds one drive's ceiling).
     disk_read_samples = [sum(v[0] for d, v in it.items() if d in counted) for it in disk_iter_samples]
     disk_write_samples = [sum(v[1] for d, v in it.items() if d in counted) for it in disk_iter_samples]
     if disk_read_samples or disk_write_samples:
@@ -1252,6 +1333,23 @@ async def collect_history_sample(glances_url: str) -> dict[str, Any]:
             )
         if drives_io:
             record["disk_io"]["drives"] = drives_io
+
+    # The caps this record was collected under, per interface / per drive. Its
+    # presence tells clamp_record_rates the totals are already sane sums (older
+    # records only have totals, so reading clamps those instead).
+    record["rate_caps"] = {"network_mbps": MAX_NETWORK_MBPS, "disk_io_mbps": MAX_DISK_IO_MBPS}
+    capped = caps.note(disk_to_mount)
+    if capped:
+        record["rate_capped"] = capped
+        if not live:
+            logger.warning(
+                "Rate cap hit: %s",
+                "; ".join(
+                    f"{c['metric']} {c.get('interface') or c.get('drive') or c.get('device')} "
+                    f"{c['samples']}/{c['of']} samples, raw max {c['raw_max']:g} MB/s (cap {c['cap']:g})"
+                    for c in capped
+                ),
+            )
 
     # Drive usage (filesystem, point-in-time)
     if fs_data:
@@ -1446,9 +1544,44 @@ async def history_recorder() -> None:
         await asyncio.sleep(APP.state.history_record_interval)
 
 
+async def wait_for_glances_warm(glances_url: str, timeout: float = 20.0) -> bool:
+    """Wait until Glances' CPU readings are real.
+
+    A fresh Glances returns garbage for its first two refresh cycles (~4 s):
+    cycle 1 has a plausible total but per-core values measured over milliseconds
+    (median ~87%), cycle 2 has total 0.0 and every core at 100%. A sample taken
+    then records cpu.min 0.0 and a cores median of ~45% on an idle box. Each
+    plugin warms up on its own first requests, so poll cpu and percpu together
+    until the cpu total has changed twice (two refreshes have passed) and is > 0.
+    Returns False on timeout (the caller samples anyway).
+    """
+    deadline = time.monotonic() + timeout
+    last: float | None = None
+    changes = 0
+    async with httpx.AsyncClient() as client:
+        while time.monotonic() < deadline:
+            try:
+                resp = await client.get(f"{glances_url}/api/4/cpu", timeout=5.0)
+                total = _num(resp.json().get("total")) if resp.status_code == 200 else None
+                # Per-core warms up separately, on its own first requests.
+                await client.get(f"{glances_url}/api/4/percpu", timeout=5.0)
+            except Exception:
+                total = None
+            if total is not None:
+                if last is not None and total != last:
+                    changes += 1
+                last = total
+                if changes >= 2 and total > 0:
+                    return True
+            await asyncio.sleep(0.5)
+    return False
+
+
 async def record_initial_sample(glances_url: str) -> None:
     """Record initial history sample on startup (runs in background)."""
     try:
+        if not await wait_for_glances_warm(glances_url):
+            logger.warning("Glances CPU readings still cold after 20 s; recording anyway")
         logger.info("Recording initial history sample")
         initial_sample = await collect_history_sample(glances_url)
         await asyncio.to_thread(append_history_record, initial_sample)
@@ -1552,6 +1685,32 @@ async def lifespan(app: FastAPI):
 APP: FastAPI = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
+class _GZipUnlessRange:
+    """GZipMiddleware, except for requests with a Range header: starlette would
+    gzip a 206 body while Content-Range still counts uncompressed bytes, so a
+    resumed download (curl -C - of /api/history/raw) would splice gzip into the
+    file."""
+
+    def __init__(self, app: Any, **kwargs: Any) -> None:
+        self.app = app
+        self.gzip = GZipMiddleware(app, **kwargs)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "http" and any(k == b"range" for k, _ in scope["headers"]):
+            await self.app(scope, receive, send)
+        else:
+            await self.gzip(scope, receive, send)
+
+
+# History JSON shrinks 5-10x gzipped; a 30-day window is ~6 MB raw. Only clients
+# that send Accept-Encoding: gzip get it (browsers, httpx), so tui.py's urllib
+# keeps reading /text uncompressed. Proxied Glances bodies arrive decoded with
+# content-encoding stripped (HOP_BY_HOP_HEADERS), so recompressing them is safe.
+# Level 1: compression runs on the event loop, and on JSON it gets most of
+# level 6's ratio for a fraction of the time.
+APP.add_middleware(_GZipUnlessRange, minimum_size=1000, compresslevel=1)
+
+
 def setup_logging() -> None:
     """Configure logging to write to logs/ directory."""
     LOGS_DIR.mkdir(exist_ok=True)
@@ -1599,11 +1758,105 @@ async def log_connections(request: Request, call_next):
     return await call_next(request)
 
 
+def _clamp_rate(value: float, cap: float) -> float:
+    """A rate in MB/s bounded to [0, cap]."""
+    return min(max(value, 0.0), cap)
+
+
+class _RateCaps:
+    """Caps one record's rate samples per interface / per drive and remembers
+    what went over, for the record's ``rate_capped`` note.
+
+    A series is (metric, interface or disk name). ``sample`` takes Glances'
+    bytes/s and returns MB/s. A sample over the cap counts as the cap; it is
+    never dropped, since that would hide real traffic if the cap is set too low.
+    A missing (None), non-finite or non-numeric rate is not a measurement: it
+    is returned as 0 for the sums and not counted, so it can neither crash the
+    record nor become a cap-height spike.
+    """
+
+    def __init__(self) -> None:
+        self.seen: dict[tuple[str, str], int] = {}
+        self.hits: dict[tuple[str, str], list[float]] = {}
+
+    def sample(self, bytes_per_sec: Any, cap: float, series: tuple[str, str]) -> float:
+        n = _num(bytes_per_sec)
+        if n is None:
+            return 0.0
+        n /= 1e6
+        self.seen[series] = self.seen.get(series, 0) + 1
+        if n > cap:
+            self.hits.setdefault(series, []).append(n)
+        return _clamp_rate(n, cap)
+
+    def note(self, disk_to_mount: dict[str, str]) -> list[dict[str, Any]]:
+        """``[{metric, interface | device [+ drive], samples, of, raw_max, cap}]``,
+        one entry per series that went over its cap. ``samples`` of ``of`` counts
+        that interface's or device's own samples in the burst; ``drive`` is the
+        mount point when the device is mounted (as in disk_io.drives)."""
+        note: list[dict[str, Any]] = []
+        for (metric, name), raw in sorted(self.hits.items()):
+            entry: dict[str, Any] = {"metric": metric}
+            if metric.startswith("network."):
+                entry["interface"] = name
+                cap = MAX_NETWORK_MBPS
+            else:
+                entry["device"] = name
+                if name in disk_to_mount:
+                    entry["drive"] = disk_to_mount[name]
+                cap = MAX_DISK_IO_MBPS
+            entry.update(
+                samples=len(raw),
+                of=self.seen.get((metric, name), len(raw)),
+                raw_max=_round(max(raw), 2),
+                cap=cap,
+            )
+            note.append(entry)
+        return note
+
+
+def _clamp_stats(stats: Any, cap: float) -> None:
+    """Clamp the avg/min/max of one compute_stats block in place; None (an
+    empty window) and anything that is not a number are left alone."""
+    if not isinstance(stats, dict):
+        return
+    for key, value in stats.items():
+        n = _num(value)
+        if n is not None:
+            stats[key] = _clamp_rate(n, cap)
+
+
+def clamp_record_rates(record: dict[str, Any]) -> None:
+    """Clamp a served record's rates to the configured limits, in place, if it
+    predates the caps: network.in_mbps/out_mbps, disk_io.read_mbps/write_mbps
+    and every disk_io.drives[] entry. A record with ``rate_caps`` was capped per
+    interface / per drive when taken and is served as recorded. The file is
+    never rewritten.
+    """
+    if "rate_caps" in record:
+        return
+    net = record.get("network")
+    if isinstance(net, dict):
+        for key in ("in_mbps", "out_mbps"):
+            _clamp_stats(net.get(key), MAX_NETWORK_MBPS)
+    dio = record.get("disk_io")
+    if isinstance(dio, dict):
+        for key in ("read_mbps", "write_mbps"):
+            _clamp_stats(dio.get(key), MAX_DISK_IO_MBPS)
+        drives = dio.get("drives")
+        if isinstance(drives, list):
+            for drive in drives:
+                if isinstance(drive, dict):
+                    for key in ("read_mbps", "write_mbps"):
+                        _clamp_stats(drive.get(key), MAX_DISK_IO_MBPS)
+
+
 def _read_history(
     hours: float,
     initial_read_size: int = HISTORY_INITIAL_TAIL_READ,
     max_bytes: int = HISTORY_MAX_TAIL_READ,
-) -> tuple[list[dict[str, Any]], int, bool] | str:
+    since: float | None = None,
+) -> tuple[list[dict[str, Any]], int, bool, float] | str:
     """Read history records from the tail of the JSONL file (sync, called from thread pool).
 
     Records are appended chronologically, so instead of scanning the whole file
@@ -1613,16 +1866,28 @@ def _read_history(
     oldest record in that window (e.g. "1 year" on a partial file) would otherwise
     read the whole — potentially huge — file, so we stop at the cap and report it.
 
-    Returns (records, skipped_line_count, truncated) on success, or an error
-    string on failure. ``truncated`` is True when the byte cap was hit before the
-    range was covered (the oldest returned data is newer than the requested
-    cutoff). Skipped lines are non-empty lines that don't parse as a dict with a
-    valid timestamp — corruption worth surfacing, not silently dropping.
-    """
-    if not HISTORY_FILE.exists():
-        return [], 0, False
+    ``since`` (epoch seconds) is the incremental path: only records strictly newer
+    than it are returned, and the window is covered as soon as it reaches a record
+    at or before ``since`` — a client topping up a recent view parses one small
+    window instead of the whole range. ``truncated`` then means the byte cap was
+    hit before reaching ``since``: there is a gap between the client's newest
+    record and the oldest one returned, and the client should refetch in full.
+    The filter is by timestamp, so a client that wants records appended out of
+    timestamp order (a clock step, two recorders finishing in reverse) passes a
+    ``since`` somewhat before its newest record and drops the duplicates.
 
+    Returns (records, skipped_line_count, truncated, cutoff) on success, or an
+    error string on failure. ``cutoff`` is the window start as epoch seconds (the
+    client trims its cached records against it). ``truncated`` is True when the
+    byte cap was hit before the range was covered (the oldest returned data is
+    newer than the requested cutoff). Skipped lines are non-empty lines that
+    don't parse as a dict with a valid timestamp — corruption worth surfacing,
+    not silently dropping. Served rates are clamped (clamp_record_rates).
+    """
     cutoff = datetime.now(timezone.utc).timestamp() - (hours * 3600)
+
+    if not HISTORY_FILE.exists():
+        return [], 0, False, cutoff
 
     try:
         with open(HISTORY_FILE, "rb") as f:
@@ -1637,6 +1902,9 @@ def _read_history(
                     # Drop the (likely partial) line the window starts in
                     nl = data.find(b"\n")
                     data = data[nl + 1 :] if nl != -1 else b""
+                # An unterminated last line is a record still being appended,
+                # not corruption: leave it for the next read.
+                data = data[: data.rfind(b"\n") + 1]
 
                 records: list[dict[str, Any]] = []
                 first_ts: float | None = None
@@ -1661,10 +1929,14 @@ def _read_history(
                         continue
                     if first_ts is None:
                         first_ts = ts
-                    if ts >= cutoff:
+                    if ts >= cutoff and (since is None or ts > since):
                         records.append(record)
 
-                covered = offset == 0 or (first_ts is not None and first_ts < cutoff)
+                covered = (
+                    offset == 0
+                    or (first_ts is not None and first_ts < cutoff)
+                    or (since is not None and first_ts is not None and first_ts <= since)
+                )
                 # offset > 0 with a maxed window means we can't grow further.
                 hit_cap = offset > 0 and capped >= max_bytes
                 if covered or hit_cap:
@@ -1681,7 +1953,9 @@ def _read_history(
                             hours,
                             len(records),
                         )
-                    return records, skipped, truncated
+                    for record in records:
+                        clamp_record_rates(record)
+                    return records, skipped, truncated, cutoff
                 read_size *= 2
     except Exception as e:
         logger.error("Failed to read history file: %s", e)
@@ -1724,15 +1998,44 @@ def _recording_health() -> dict[str, Any]:
     }
 
 
+def _parse_since(since: str | None) -> float | None | Response:
+    """The ``since`` query parameter (any ISO 8601 timestamp; the browser sends
+    the previous response's ``now`` minus a few minutes) as epoch seconds; None
+    when absent; a 400 Response when it does not parse."""
+    if since is None or since == "":
+        return None
+    # An unencoded "+00:00" pasted into a URL arrives as " 00:00"; put the plus
+    # back on the offset only (a space between date and time is valid ISO).
+    text = re.sub(r"(:\d\d(?:\.\d+)?) (\d\d:\d\d)$", r"\1+\2", since.strip())
+    text = text.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return Response(
+            content=json.dumps({"error": "since must be an ISO 8601 timestamp"}),
+            status_code=400,
+            media_type="application/json",
+        )
+    # Records are UTC; a timestamp without an offset is read as UTC too, not as
+    # the server's local time.
+    return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
+
+
 @APP.get("/api/history")
-async def get_history(hours: float = 24) -> Response:
+async def get_history(hours: float = 24, since: str | None = None) -> Response:
     """Return historical data for the specified time range.
 
     Args:
         hours: Number of hours of history to return (default 24, max 8760).
+        since: Only records strictly newer than this timestamp are returned
+            (the client merges them and trims against ``cutoff``). Responses
+            carry ``now`` (the server's clock) for the client's next since.
     """
     hours = max(0.1, min(hours, 8760))
-    result = await asyncio.to_thread(_read_history, hours)
+    since_ts = _parse_since(since)
+    if isinstance(since_ts, Response):
+        return since_ts
+    result = await asyncio.to_thread(_read_history, hours, since=since_ts)
 
     if isinstance(result, str):
         return Response(
@@ -1741,7 +2044,7 @@ async def get_history(hours: float = 24) -> Response:
             media_type="application/json",
         )
 
-    records, skipped, truncated = result
+    records, skipped, truncated, cutoff = result
     # Records embed an `ip` block (LAN/public/Tailscale). Nothing in the UI reads it
     # from history — the IP-Info card uses live /api/ip-info — so don't serve a
     # network-topology history to unauthenticated LAN clients. The password-gated
@@ -1759,6 +2062,8 @@ async def get_history(hours: float = 24) -> Response:
                 "count": len(records),
                 "skipped_lines": skipped,
                 "truncated": truncated,
+                "cutoff": cutoff,
+                "now": cutoff + hours * 3600,
                 "recording": _recording_health(),
             }
         ),
@@ -1767,12 +2072,15 @@ async def get_history(hours: float = 24) -> Response:
 
 
 @APP.get("/api/history/field/{name}")
-async def get_history_field(name: str, hours: float = 24) -> Response:
+async def get_history_field(
+    name: str, hours: float = 24, since: str | None = None
+) -> Response:
     """One heavy record field over the range: ``[{timestamp, <name>}, ...]``.
 
     Only the names in HISTORY_SIDE_FIELDS (the ones /api/history leaves out) are
     served; a record without the field keeps its timestamp so the chart's x-axis
-    matches /api/history and the missing field draws as a gap.
+    matches /api/history and the missing field draws as a gap. ``since`` works
+    as in /api/history.
     """
     if name not in HISTORY_SIDE_FIELDS:
         return Response(
@@ -1781,14 +2089,17 @@ async def get_history_field(name: str, hours: float = 24) -> Response:
             media_type="application/json",
         )
     hours = max(0.1, min(hours, 8760))
-    result = await asyncio.to_thread(_read_history, hours)
+    since_ts = _parse_since(since)
+    if isinstance(since_ts, Response):
+        return since_ts
+    result = await asyncio.to_thread(_read_history, hours, since=since_ts)
     if isinstance(result, str):
         return Response(
             content=json.dumps({"error": "Failed to read history", "detail": result}),
             status_code=500,
             media_type="application/json",
         )
-    records, skipped, truncated = result
+    records, skipped, truncated, cutoff = result
     slim = [
         {"timestamp": rec.get("timestamp"), **({name: rec[name]} if name in rec else {})}
         for rec in records
@@ -1801,6 +2112,8 @@ async def get_history_field(name: str, hours: float = 24) -> Response:
                 "count": len(slim),
                 "skipped_lines": skipped,
                 "truncated": truncated,
+                "cutoff": cutoff,
+                "now": cutoff + hours * 3600,
             }
         ),
         media_type="application/json",
@@ -3054,6 +3367,945 @@ async def proxy_api(path: str, request: Request) -> Response:
                 status_code=502,
                 media_type="application/json",
             )
+
+
+# ── Console text view (/text) ────────────────────────────────────────────────
+# A curl-able rendering of the history file: the latest record as a snapshot
+# and/or a downsampled table of recent records. "ascii" is plain 7-bit text;
+# "unicode" adds block bars and sparklines.
+
+TEXT_BAR_WIDTH: Final[int] = 20
+# Default report width. The server can't see the client's terminal, so callers
+# pass ?width=$COLUMNS; at TEXT_TWO_COLUMN_WIDTH or wider the default view puts
+# the snapshot and the history side by side.
+TEXT_WIDTH: Final[int] = 80
+TEXT_MIN_WIDTH: Final[int] = 60
+TEXT_TWO_COLUMN_WIDTH: Final[int] = 160
+_SPARK_CHARS: Final[str] = "▁▂▃▄▅▆▇█"
+_SPARK_ASCII: Final[str] = "_-#"
+# The frontend's metric colours (static/style.css variables, as mapped in
+# static/config.js), drawn with 24-bit ANSI escapes when colour is on.
+TEXT_COLORS: Final[dict[str, str]] = {
+    "cpu": "#3b82f6",  # --color-accent
+    "cpu_cores": "#14b8a6",  # --color-cpu-cores
+    "memory": "#059669",  # darker than the dashboard's --color-success, for contrast with ok
+    "swap": "#a855f7",  # --color-swap
+    "gpu": "#8b5cf6",  # --color-gpu
+    "drive": "#84cc16",  # --color-read (drive usage card)
+    "load": "#f59e0b",  # --color-warning (1-minute load)
+    "net_in": "#06b6d4",  # --color-download
+    "net_out": "#f97316",  # --color-upload
+    "read": "#84cc16",  # --color-read
+    "write": "#ef4444",  # --color-write
+    "temp": "#f59e0b",  # --color-warning
+    "ping": "#f59e0b",  # --color-ping-0
+    "error": "#ef4444",  # --color-error
+    "warning": "#f59e0b",  # --color-warning (the orange-card threshold)
+    "ok": "#10b981",  # --color-success
+    "temp_mid": "#eab308",  # --color-temp-mid
+    "gpu_mem": "#ec4899",  # --color-gpu-mem
+    "load_5m": "#eab308",  # --color-load-5m
+    "load_15m": "#ca8a04",  # --color-load-15m
+    "ping_0": "#f59e0b",  # --color-ping-0
+    "ping_1": "#8b5cf6",  # --color-ping-1
+    "ping_2": "#06b6d4",  # --color-ping-2
+    "title": "#f0f0f0",  # --text-primary
+    "muted": "#808080",
+    "stat_min": "#6b7280",  # min / mean / max columns, darker for the smaller
+    "stat_mean": "#a3a3a3",
+}
+
+
+def _ansi_256(r: int, g: int, b: int) -> int:
+    """Nearest xterm-256 colour: the grey ramp for near-greys, else the 6x6x6 cube."""
+    if max(r, g, b) - min(r, g, b) < 16:
+        return 232 + min(23, round((r + g + b) / 3 / 255 * 23))
+    return 16 + 36 * round(r / 255 * 5) + 6 * round(g / 255 * 5) + round(b / 255 * 5)
+
+
+_ANSI_16: Final[list[tuple[int, int, int]]] = [
+    (0, 0, 0), (205, 49, 49), (13, 188, 121), (229, 229, 16),
+    (36, 114, 200), (188, 63, 188), (17, 168, 205), (229, 229, 229),
+]
+
+
+def _ansi_16(r: int, g: int, b: int) -> int:
+    """Nearest of the 8 base colours (30-37), bright (90-97) when it's light."""
+    i = min(range(8), key=lambda k: sum((a - c) ** 2 for a, c in zip((r, g, b), _ANSI_16[k])))
+    return (90 if max(r, g, b) > 191 else 30) + i
+
+
+def _paint(text: str, key: str, on: bool | str) -> str:
+    """Colour `text` with TEXT_COLORS[key]. `on` is the colour depth: False for
+    none, True or "24" for 24-bit, "256" or "16" for older terminals."""
+    if not on or not text:
+        return text
+    h = TEXT_COLORS[key].lstrip("#")
+    r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+    bold = "1;" if key == "title" else ""
+    if on == "256":
+        return f"\033[{bold}38;5;{_ansi_256(r, g, b)}m{text}\033[0m"
+    if on == "16":
+        return f"\033[{bold}{_ansi_16(r, g, b)}m{text}\033[0m"
+    return f"\033[{bold}38;2;{r};{g};{b}m{text}\033[0m"
+
+
+def _fmt(value: Any, spec: str = ".1f", none: str = "-") -> str:
+    v = _num(value)
+    return none if v is None else format(v, spec)
+
+
+def _bar(
+    percent: Any, unicode: bool, key: str = "cpu", color: bool | str = False,
+    width: int = TEXT_BAR_WIDTH,
+) -> str:
+    p = _num(percent)
+    filled = 0 if p is None else round(max(0.0, min(p, 100.0)) / 100 * width)
+    if unicode:
+        return _paint("█" * filled, key, color) + _paint("░" * (width - filled), "muted", color)
+    return "[" + _paint("#" * filled, key, color) + " " * (width - filled) + "]"
+
+
+def _range_bar(
+    lo: Any, mid: Any, hi: Any, unicode: bool, key: str, color: bool | str,
+    width: int = TEXT_BAR_WIDTH,
+) -> str:
+    """A 0-100 track with min..max filled and the median marked."""
+    vals = [v for v in (_num(lo), _num(mid), _num(hi)) if v is not None]
+    if len(vals) < 3:
+        return _bar(None, unicode, key, color, width)
+    a, m, b = (round(max(0.0, min(v, 100.0)) / 100 * (width - 1)) for v in vals)
+    track, span, mark = ("░", "▬", "◆") if unicode else (" ", "-", "|")
+    cells = []
+    for i in range(width):
+        if i == m:
+            cells.append(_paint(mark, key, color))
+        elif a <= i <= b:
+            cells.append(_paint(span, key, color))
+        else:
+            cells.append(_paint(track, "muted", color))
+    body = "".join(cells)
+    return body if unicode else f"[{body}]"
+
+
+def _sparkline(
+    values: list[float | None],
+    chars: str = _SPARK_CHARS,
+    lo: float | None = None,
+    hi: float | None = None,
+) -> str:
+    """One character per value on the scale lo..hi (default: the data's own
+    min..max); values outside it are clamped."""
+    nums = [v for v in values if v is not None]
+    if not nums:
+        return ""
+    lo = min(nums) if lo is None else lo
+    hi = max(nums) if hi is None else hi
+    span = (hi - lo) or 1.0
+    top = len(chars) - 1
+    return "".join(
+        " " if v is None else chars[round(max(0.0, min(1.0, (v - lo) / span)) * top)]
+        for v in values
+    )
+
+
+class _HistRow(NamedTuple):
+    """One history metric: its sparkline row, table column and stats."""
+
+    slot: str  # the _render_latest line it sits beside in two-column mode
+    name: str
+    values: list[float | None]  # per record (the record's average)
+    spec: str  # number format
+    key: str  # TEXT_COLORS key
+    threshold: Any  # orange-card threshold, or None
+    scale: str  # "pct" 0-100, "zero" 0..peak, "load" 0..max(cores, peak), "temp"
+    lows: list[float | None] | None = None  # per-record burst minimum, when kept
+    peaks: list[float | None] | None = None  # per-record burst maximum, when kept
+
+    def bounds(self) -> tuple[float, float]:
+        """The sparkline scale: fixed for percentages, from 0 for rates, so a
+        72-74% memory wobble doesn't fill the whole height."""
+        # Scale to the averages actually drawn, not burst peaks: one 60 MB/s
+        # spike would otherwise flatten every other column.
+        top = max([v for v in self.values if v is not None], default=0.0)
+        if self.scale == "pct":
+            return 0.0, 100.0
+        if self.scale == "load":
+            return 0.0, max(float(os.cpu_count() or 1), top)
+        if self.scale == "temp":
+            thr = _num(self.threshold) or 60.0
+            return 20.0, max(thr + 10, top)
+        return 0.0, max(top, 1.0)
+
+
+def _time_buckets(
+    times: list[float | None],
+    values: list[float | None],
+    start: float,
+    end: float,
+    width: int,
+    hold: float,
+) -> list[float | None]:
+    """Values on a real time axis: `width` equal slices of [start, end], each the
+    mean of the records inside it. An empty slice repeats the last earlier record
+    when that record is at most `hold` seconds old (records are sparser than
+    columns), and stays blank across real gaps (box off, recorder down)."""
+    span = (end - start) / width or 1.0
+    sums = [0.0] * width
+    counts = [0] * width
+    for t, v in zip(times, values):
+        if t is None or v is None or not start <= t <= end:
+            continue
+        b = min(width - 1, int((t - start) / span))
+        sums[b] += v
+        counts[b] += 1
+    out: list[float | None] = []
+    last_v: float | None = None
+    last_t = -math.inf
+    for b in range(width):
+        if counts[b]:
+            last_v = sums[b] / counts[b]
+            last_t = start + (b + 1) * span
+            out.append(last_v)
+        elif last_v is not None and start + b * span - last_t <= hold:
+            out.append(last_v)
+        else:
+            out.append(None)
+    return out
+
+
+def _temps_of(record: dict[str, Any]) -> list[float]:
+    return [v for v in (_num(t) for t in (record.get("temps") or {}).values()) if v is not None]
+
+
+def _record_time(record: dict[str, Any]) -> datetime | None:
+    try:
+        ts = str(record.get("timestamp", "")).replace("Z", "+00:00")
+        return datetime.fromisoformat(ts).astimezone()
+    except ValueError:
+        return None
+
+
+def _age(then: datetime | None, now: datetime) -> str:
+    if then is None:
+        return "?"
+    sec = max(0, int((now - then).total_seconds()))
+    if sec < 120:
+        return f"{sec}s ago"
+    if sec < 7200:
+        return f"{sec // 60}m ago"
+    return f"{sec / 3600:.1f}h ago"
+
+
+def _get(record: dict[str, Any], *path: str) -> Any:
+    cur: Any = record
+    for key in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+
+def _gpu_field(record: dict[str, Any], i: int, field: str) -> Any:
+    gpus = record.get("gpus") or []
+    return gpus[i].get(field) if i < len(gpus) and isinstance(gpus[i], dict) else None
+
+
+def _section(name: str, unicode: bool, color: bool | str, extra: str = "", width: int = TEXT_WIDTH) -> str:
+    dash = "─" if unicode else "-"
+    head = f"{dash * 2} {_paint(name, 'title', color)} "
+    tail = f" {extra}" if extra else ""
+    pad = max(2, width - len(name) - 4 - len(_strip_ansi(tail)))
+    return head + _paint(dash * pad, "muted", color) + tail
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\033\[[0-9;]*m", "", text)
+
+
+def _level(value: Any, threshold: Any, key: str) -> str:
+    """The value's own colour, or the warning colour at/over the card threshold."""
+    v, t = _num(value), _num(threshold)
+    return "warning" if v is not None and t is not None and v >= t else key
+
+
+def _temp_key(value: Any, threshold: Any) -> str:
+    v, t = _num(value), _num(threshold) or 60.0
+    if v is None:
+        return "muted"
+    return "ok" if v < t - 10 else "temp_mid" if v < t else "error"
+
+
+def _render_latest(
+    record: dict[str, Any],
+    unicode: bool,
+    now: datetime,
+    color: bool | str = False,
+    thresholds: dict[str, Any] | None = None,
+    width: int = TEXT_WIDTH,
+) -> list[tuple[str, str]]:
+    """Snapshot lines as (slot, line). The slot names the history sparkline that
+    belongs beside the line in two-column mode ("" for none)."""
+    th = thresholds or {}
+    lines: list[tuple[str, str]] = []
+
+    def add(line: str, slot: str = "") -> None:
+        lines.append((slot, line))
+
+    def sec(name: str, extra: str = "") -> str:
+        return _section(name, unicode, color, extra, width)
+
+    then = _record_time(record)
+    when = then.strftime("%Y-%m-%d %H:%M:%S %Z") if then else "?"
+    deg = "°C" if unicode else " C"
+    add(sec("Snapshot", f"{when} " + _paint(f"({_age(then, now)})", "muted", color)), "@header")
+
+    def row(label: str, percent: Any, detail: str, key: str, thr: Any = None, slot: str = "") -> None:
+        pct = _paint(f"{_fmt(percent):>5}%", _level(percent, thr, key), color)
+        add(
+            _paint(f"{label:<10}", key, color)
+            + f" {_bar(percent, unicode, key, color)} {pct}  {detail}",
+            slot,
+        )
+
+    def gb(m: dict[str, Any], used: str = "used_gb", total: str = "total_gb") -> str:
+        return _paint(f"{_fmt(m.get(used))} / {_fmt(m.get(total))} GB", "muted", color)
+
+    cpu = record.get("cpu") or {}
+    burst = _num(record.get("duration_sec")) or 0
+    row("CPU", cpu.get("avg"), _paint(f"max {_fmt(cpu.get('max'))}%", "muted", color) if burst else "",
+        "cpu", th.get("cpu_percent"), "cpu")
+    spread = record.get("cpu_cores") or {}
+    if spread:
+        lo, med, hi = (spread.get(k) for k in ("min", "median", "max"))
+        add(
+            _paint(f"{'  cores':<10}", "cpu_cores", color)
+            + f" {_range_bar(lo, med, hi, unicode, 'cpu_cores', color)} "
+            + _paint(f"{_fmt(med):>5}%", "cpu_cores", color)
+            + _paint(f"  median, range {_fmt(lo)}-{_fmt(hi)}%", "muted", color),
+            "cpu_cores",
+        )
+
+    load = record.get("load") or {}
+    cores = os.cpu_count() or 1
+    load1 = _num(load.get("min1"))
+    load_pct = None if load1 is None else 100 * load1 / cores
+    row(
+        "Load",
+        load_pct,
+        "  ".join(
+            _paint(f"{label} {_fmt(load.get(k), '.2f')}", key, color)
+            for label, k, key in (("1m", "min1", "load"), ("5m", "min5", "load_5m"), ("15m", "min15", "load_15m"))
+        )
+        + _paint(f"  / {cores} cores", "muted", color),
+        "load",
+        slot="load",
+    )
+    for key, label in (("memory", "Memory"), ("swap", "Swap")):
+        m = record.get(key) or {}
+        row(label, m.get("percent"), gb(m), key, th.get(f"{key}_percent"), key)
+
+    temps = record.get("temps") or {}
+    gpus = record.get("gpus") or []
+    if gpus:
+        add(sec("GPUs"))
+    for i, gpu in enumerate(gpus):
+        idx = gpu.get("index")
+        t = temps.get(f"GPU {idx}")
+        temp = "" if t is None else _paint(f"{_fmt(t, '.0f')}{deg}", _temp_key(t, th.get("temp_celsius")), color)
+        row(f"GPU {idx}", gpu.get("util_percent"), temp, "gpu", th.get("gpu_util_percent"), f"gpu{i}")
+        row("  memory", gpu.get("mem_percent"), gb(gpu, "mem_used_gb", "mem_total_gb"),
+            "gpu_mem", th.get("gpu_memory_percent"), f"gmem{i}")
+
+    add(sec("I/O"))
+    up, down = ("↑", "↓") if unicode else ("^", "v")
+    net_thr, io_thr = th.get("network_mbps"), th.get("disk_io_mbps")
+    io = [
+        ("Network", down, "in", _get(record, "network", "in_mbps", "avg"), "net_in", net_thr),
+        ("Network", up, "out", _get(record, "network", "out_mbps", "avg"), "net_out", net_thr),
+        ("Disk I/O", up, "read", _get(record, "disk_io", "read_mbps", "avg"), "read", io_thr),
+        ("Disk I/O", down, "write", _get(record, "disk_io", "write_mbps", "avg"), "write", io_thr),
+    ]
+
+    def io_cell(arrow: str, name: str, v: Any, k: str, thr: Any) -> str:
+        return _paint(f"{arrow} {name:<5}", k, color) + _paint(f"{_fmt(v, '.2f'):>8}", _level(v, thr, k), color)
+
+    for pair in (io[:2], io[2:]):
+        add(
+            _paint(f"{pair[0][0]:<10}", pair[0][4], color) + " "
+            + "    ".join(io_cell(*c[1:]) for c in pair) + _paint("  MB/s", "muted", color),
+            pair[0][4],
+        )
+
+    pings = [(t, p) for t, p in (record.get("ping") or {}).items() if isinstance(p, dict)]
+    cells = []
+    for i, (target, p) in enumerate(pings):
+        key = f"ping_{i % 3}"
+        avg, loss = _num(p.get("avg")), _num(p.get("loss")) or 0.0
+        # Target's colour on the marker, the address muted, the measurement in
+        # the target's colour (orange over the threshold), so they read apart.
+        dot = _paint("●" if unicode else "*", key, color) + " " + _paint(target, "muted", color) + " "
+        if avg is None:
+            cells.append(dot + _paint("DOWN", "error", color))
+            continue
+        cell = dot + _paint(f"{avg:.1f} ms", _level(avg, th.get("ping_ms"), key), color)
+        if loss > 0:
+            cell += _paint(f" {loss * 100:.0f}% loss", "warning", color)
+        cells.append(cell)
+    if cells:
+        add(_paint(f"{'Ping':<10}", "ping", color) + " " + "   ".join(cells),
+            f"ping:{pings[0][0]}")
+
+    readings = _temps_of(record)
+    if readings:
+        add(sec(f"Temperatures ({deg.strip()})", f"{len(readings)} sensors"))
+        thr = th.get("temp_celsius")
+        add(
+            "   ".join(
+                _paint(f"{label} ", "muted", color) + _paint(f"{value:>3.0f}", _temp_key(value, thr), color)
+                for label, value in (
+                    ("min", min(readings)),
+                    ("median", statistics.median(readings)),
+                    ("mean", statistics.fmean(readings)),
+                    ("max", max(readings)),
+                )
+            ),
+            "maxt",
+        )
+
+    drives = record.get("drives") or []
+    if drives:
+        add(sec("Drives"))
+    for d in drives:
+        mount = str(d.get("mount", "?"))
+        row(mount if len(mount) <= 10 else "…" + mount[-9:] if unicode else ".." + mount[-8:],
+            d.get("percent"), gb(d), "drive", th.get("disk_percent"))
+    return lines
+
+
+TEXT_STATS_WIDTH: Final[int] = 23  # "    min    mean     max"
+TEXT_AUTO_HOURS: Final[tuple[float, float]] = (1.0, 3.0)
+
+
+def _text_layout(width: int, view: str, unicode: bool) -> tuple[int, bool, int]:
+    """(width, two-column?, column width) for a requested report width."""
+    width = max(TEXT_MIN_WIDTH, width)
+    two_col = view == "both" and unicode and width >= TEXT_TWO_COLUMN_WIDTH
+    return width, two_col, (width - 3) // 2 if two_col else width
+
+
+def _spark_field_width(col_w: int) -> int:
+    return max(10, col_w - 8 - 2 - TEXT_STATS_WIDTH)
+
+
+def auto_history_hours(width: int, view: str, unicode: bool, record_interval: float) -> float:
+    """Default window: as many records as the sparklines have columns, so each
+    column is about one record, kept between 1 and 3 hours."""
+    _, _, col_w = _text_layout(width, view, unicode)
+    span = _spark_field_width(col_w) * max(1.0, record_interval) / 3600
+    lo, hi = TEXT_AUTO_HOURS
+    return round(min(hi, max(lo, span)), 2)
+
+
+def _render_history(
+    records: list[dict[str, Any]], unicode: bool, hours: float, rows: int,
+    color: bool | str = False,
+    thresholds: dict[str, Any] | None = None,
+    table: bool = False,
+    width: int = TEXT_WIDTH,
+    now: datetime | None = None,
+    sparks: bool = True,
+) -> tuple[str, list[tuple[str, str]], list[str], list[str]]:
+    """(section header, sparkline rows as (slot, line), footer, table lines).
+
+    Rows follow the snapshot's order; slots match _render_latest's so two-column
+    mode can pair each row with its snapshot line. The footer is the time axis
+    and legend. sparks=False leaves out the sparklines and axis (a requested
+    table that wouldn't fit otherwise takes their place).
+    """
+    th = thresholds or {}
+    labels = f"{'min':>7} {'mean':>7} {'max':>7}"
+    header = _section(
+        f"History, last {hours:g}h ({len(records)} records)", unicode, color,
+        _paint(labels, "muted", color), width,
+    )
+    if not records:
+        return header, [], [_paint("No history records yet.", "muted", color)], []
+    n_gpus = max((len(r.get("gpus") or []) for r in records), default=0)
+
+    def series(fn) -> list[float | None]:
+        return [_num(fn(r)) for r in records]
+
+    def avg_min_max(*path: str) -> dict[str, list[float | None]]:
+        return {
+            "values": series(lambda r: _get(r, *path, "avg")),
+            "lows": series(lambda r: _get(r, *path, "min")),
+            "peaks": series(lambda r: _get(r, *path, "max")),
+        }
+
+    columns: list[_HistRow] = [
+        _HistRow("cpu", "CPU%", spec=".1f", key="cpu", threshold=th.get("cpu_percent"),
+                 scale="pct", **avg_min_max("cpu")),
+        _HistRow("cpu_cores", "Cores", series(lambda r: _get(r, "cpu_cores", "median")), ".1f",
+                 "cpu_cores", None, "pct"),
+        _HistRow("load", "Load1", series(lambda r: _get(r, "load", "min1")), ".2f", "load", None, "load"),
+        _HistRow("memory", "Mem%", series(lambda r: _get(r, "memory", "percent")), ".1f", "memory",
+                 th.get("memory_percent"), "pct"),
+        _HistRow("swap", "Swap%", series(lambda r: _get(r, "swap", "percent")), ".1f", "swap",
+                 th.get("swap_percent"), "pct"),
+    ]
+    for i in range(n_gpus):
+        columns.append(
+            _HistRow(f"gpu{i}", f"GPU{i}%", series(lambda r, i=i: _gpu_field(r, i, "util_percent")),
+                     ".0f", "gpu", th.get("gpu_util_percent"), "pct")
+        )
+        columns.append(
+            _HistRow(f"gmem{i}", f"GMem{i}", series(lambda r, i=i: _gpu_field(r, i, "mem_percent")),
+                     ".0f", "gpu_mem", th.get("gpu_memory_percent"), "pct")
+        )
+    for slot, name, path, key, thr in (
+        ("net_in", "NetIn", ("network", "in_mbps"), "net_in", th.get("network_mbps")),
+        ("net_out", "NetOut", ("network", "out_mbps"), "net_out", th.get("network_mbps")),
+        ("read", "DiskR", ("disk_io", "read_mbps"), "read", th.get("disk_io_mbps")),
+        ("write", "DiskW", ("disk_io", "write_mbps"), "write", th.get("disk_io_mbps")),
+    ):
+        columns.append(_HistRow(slot, name, spec=".2f", key=key, threshold=thr, scale="zero",
+                                **avg_min_max(*path)))
+    # The hottest sensor in each record.
+    columns.append(
+        _HistRow("maxt", "MaxT", [max(t) if t else None for t in map(_temps_of, records)], ".0f",
+                 "temp", th.get("temp_celsius"), "temp")
+    )
+
+    # Sparkline field fills the width so the stats line up under the header labels.
+    field_w = _spark_field_width(width)
+    spark_w = field_w
+    # Real time axis: the window ends now and spans `hours`.
+    end_dt = now or datetime.now(timezone.utc).astimezone()
+    end = end_dt.timestamp()
+    start = end - hours * 3600
+    rec_times = [t.timestamp() if t else None for t in map(_record_time, records)]
+    # Hold a value across empty columns for up to 1.5 record intervals.
+    interval = getattr(APP.state, "history_record_interval", DEFAULT_HISTORY_RECORD_INTERVAL)
+    hold = 1.5 * max(float(interval), (end - start) / spark_w)
+    chars = _SPARK_CHARS if unicode else _SPARK_ASCII
+    spark_rows: list[tuple[str, str]] = []
+    for row in columns:
+        slot, name, vals, spec, key, thr = row[:6]
+        nums = [v for v in vals if v is not None]
+        # min / max come from the bursts' own extremes when records keep them,
+        # so a short spike shows in "max" even though the average hides it.
+        lows = [v for v in (row.lows or []) if v is not None] or nums
+        peaks = [v for v in (row.peaks or []) if v is not None] or nums
+
+        def cell(v: float, shade: str) -> str:
+            return _paint(f"{format(v, spec):>7}", _level(v, thr, shade), color)
+
+        stats = (
+            " ".join(
+                cell(v, shade)
+                for v, shade in (
+                    (min(lows), "stat_min"),
+                    (sum(nums) / len(nums), "stat_mean"),
+                    (max(peaks), "title"),
+                )
+            )
+            if nums
+            else _paint(f"{'no data':>{TEXT_STATS_WIDTH}}", "muted", color)
+        )
+        spark = _paint(
+            f"{_sparkline(_time_buckets(rec_times, vals, start, end, spark_w, hold), chars, *row.bounds()):<{field_w}}",
+            key, color,
+        )
+        spark_rows.append((slot, f"{_paint(f'{name:<7}', key, color)} {spark}  {stats}"))
+
+    # Time axis under the sparklines: window start, middle and end (now).
+    fmt = "%m-%d %H:%M" if hours > 20 else "%H:%M"
+
+    def label(ts: float) -> str:
+        return datetime.fromtimestamp(ts, end_dt.tzinfo).strftime(fmt)
+
+    if spark_w >= 3:
+        rule = ("└" + "─" * (spark_w - 2) + "┘") if unicode else ("+" + "-" * (spark_w - 2) + "+")
+    else:
+        rule = ("─" if unicode else "-") * spark_w
+    first, last = label(start), label(end)
+    ticks = first + last.rjust(max(0, spark_w - len(first)))
+    mid = label((start + end) / 2)
+    if spark_w >= len(first) + len(mid) + len(last) + 4:
+        at = spark_w // 2 - len(mid) // 2
+        ticks = ticks[:at] + mid + ticks[at + len(mid):]
+        # A tick on the rule over the middle label's centre.
+        centre = at + len(mid) // 2
+        rule = rule[:centre] + ("┬" if unicode else "+") + rule[centre + 1:]
+    deg = "°C" if unicode else "C"
+    legend = _paint(f"Blank = no records. Net/Disk MB/s, MaxT = hottest sensor {deg}.", "muted", color)
+    foot = [" " * 8 + _paint(rule, "muted", color), " " * 8 + _paint(ticks, "muted", color), legend]
+    if not sparks:
+        spark_rows, foot = [], [legend]
+    if not table:
+        return header, spark_rows, foot, []
+
+    # Evenly sample at most `rows` records, always including the newest.
+    count = len(records)
+    picks = sorted({round(k * (count - 1) / max(1, rows - 1)) for k in range(min(rows, count))})
+    sep = " │ " if unicode else " | "
+    table_w = 14 + len(sep) + 7 * len(columns) - 1
+    tail = [""] if sparks else []
+    tail.append(
+        f"{'Time':<14}" + sep + " ".join(_paint(f"{c.name[:6]:>6}", c.key, color) for c in columns)
+    )
+    tail.append(("─" if unicode else "-") * table_w)
+    for idx in picks:
+        t = _record_time(records[idx])
+        stamp = t.strftime("%m-%d %H:%M:%S") if t else "?"
+        cells = " ".join(
+            _paint(f"{_fmt(c.values[idx], c.spec):>6}", "warning", color)
+            if _level(c.values[idx], c.threshold, "") == "warning"
+            else f"{_fmt(c.values[idx], c.spec):>6}"
+            for c in columns
+        )
+        tail.append(_paint(f"{stamp:<14}", "muted", color) + _paint(sep, "muted", color) + cells)
+    return header, spark_rows, foot, tail
+
+
+def render_text(
+    records: list[dict[str, Any]],
+    *,
+    style: str = "unicode",
+    view: str = "both",
+    hours: float = 1,
+    rows: int = 24,
+    title: str = "",
+    color: bool | str = False,
+    thresholds: dict[str, Any] | None = None,
+    table: bool = False,
+    live: dict[str, Any] | None = None,
+    width: int = TEXT_WIDTH,
+    now: datetime | None = None,
+    sparks: bool = True,
+) -> str:
+    """Render history records as a console report (pure; unit-tested).
+
+    The snapshot is `live` (a fresh sample) when given, else the newest record.
+    """
+    unicode = style == "unicode"
+    now = now or datetime.now(timezone.utc).astimezone()
+    heading = title or socket.gethostname()
+    host = socket.gethostname()
+    sub = "" if heading == host else (f"· {host}" if unicode else f"- {host}")
+    inner = f" {heading} " + _paint(sub, "muted", color) + " "
+    width, two_col, col_w = _text_layout(width, view, unicode)
+    span = width - 2
+    hint = "options and API: /help "
+    fill = max(1, span - len(_strip_ansi(inner)) - len(hint))
+    if unicode:
+        out = [
+            _paint("╭" + "─" * span + "╮", "cpu", color),
+            _paint("│", "cpu", color) + _paint(inner[: len(heading) + 2], "title", color)
+            + inner[len(heading) + 2 :] + " " * fill + _paint(hint, "muted", color)
+            + _paint("│", "cpu", color),
+            _paint("╰" + "─" * span + "╯", "cpu", color),
+        ]
+    else:
+        title_line = inner.strip()
+        out = ["=" * width, title_line + hint.rstrip().rjust(width - len(_strip_ansi(title_line))), "=" * width]
+    left: list[tuple[str, str]] = []
+    if view in ("latest", "both"):
+        if live or records:
+            left = _render_latest(live or records[-1], unicode, now, color, thresholds, col_w)
+        else:
+            left = [("", "No data yet.")]
+    hist: tuple[str, list[tuple[str, str]], list[str], list[str]] | None = None
+    if view in ("history", "both"):
+        hist = _render_history(records, unicode, hours, rows, color, thresholds, table, col_w, now, sparks)
+
+    if two_col and hist:
+        # Snapshot on the left, history on the right. Each history row goes
+        # beside the snapshot line with its slot when that line is still ahead,
+        # else on the next free line; the axis and legend follow.
+        header, spark_rows, foot, table_lines = hist
+        index = {slot: i for i, (slot, _) in enumerate(left) if slot}
+        right = [header] + [""] * (len(left) - 1)
+        pos = 1
+        for slot, line in spark_rows + [("", t) for t in foot]:
+            at = index.get(slot, -1)
+            at = at if at >= pos else pos
+            while at < len(right) and right[at]:
+                at += 1
+            if at >= len(right):
+                right += [""] * (at - len(right) + 1)
+            right[at] = line
+            pos = at + 1
+        extra = right[len(left):]
+        rows_left = [line for _, line in left] + [""] * len(extra)
+        for a, b in zip(rows_left, right):
+            out.append(a + " " * max(0, col_w - len(_strip_ansi(a))) + "   " + b)
+        out += table_lines  # the optional table, full width below
+    else:
+        out += [line for _, line in left]
+        if left and hist:
+            out.append("")
+        if hist:
+            header, spark_rows, foot, table_lines = hist
+            out += [header] + [line for _, line in spark_rows] + foot + table_lines
+    return "\n".join(out) + "\n"
+
+
+TEXT_USAGE: Final[str] = (
+    "usage: /text?view=latest|history|both&style=unicode|ascii|simple&color=auto|on|off"
+    "&hours=N&width=80&height=N&live=0|1&table=0|1&rows=24  (see /help)\n"
+)
+
+HELP_TEXT: Final[str] = """\
+Horatio: system monitor for this machine. Plain-text help, for people and agents.
+
+QUICK START
+  curl "http://<host>:8080/text?width=$COLUMNS"   # colour report: live snapshot + history
+  curl http://<host>:8080/text?style=simple      # plain ASCII, no colour (best for agents/logs)
+  curl -fsS http://<host>:8080/tui.py | python3 -   # live, auto-updating view
+  python3 tui.py                                 # the same, from a horatio checkout on the box
+
+LIVE VIEW (tui.py)
+  Standard library only (Python 3.8+, Linux/macOS). Detects terminal size,
+  colour depth (NO_COLOR, FORCE_COLOR, COLORTERM, TERM) and UTF-8, and redraws
+  every 2 s (--interval). Keys, listed at the bottom: q quit, r refresh,
+  v cycle view, t table, +/- history window. --color on|256|16|off and --style override the
+  detection; --once prints a single frame. Piping from curl runs whatever the
+  server sends: fine on your own network. Otherwise download, read, then run:
+    curl -fsS -o tui.py http://<host>:8080/tui.py && python3 tui.py
+  From a horatio checkout: python3 tui.py on the box itself (finds the local
+  server), or python3 tui.py http://<host>:8080 (or set HORATIO_URL).
+
+/text  console report built from the history file
+  view   both (default) | latest | history
+         latest  = a live snapshot, sampled when you request it
+         history = per-metric sparklines (incl. max temperature) over the window
+  style  unicode (default: bars, sparklines, box drawing)
+         | ascii (7-bit characters)
+         | simple (ascii with no colour)
+  color  auto (default: on for unicode, off for ascii/simple) | on | 256 | 16 | off
+         on is 24-bit ANSI; 256/16 for older terminals; turn it off when parsing
+  hours  history window (0.1 to 8760). Default: 1 to 3 hours, picked so the
+         sparklines have about one record per column (wider terminals and
+         slower recording intervals get the longer window)
+  width  terminal width in columns, default 80 (60 to 400). The server can't see
+         your terminal, so pass it:  curl "http://<host>:8080/text?width=$COLUMNS"
+         At 160 or wider, the unicode report shows snapshot and history side by side.
+  height trim to N lines: a requested table shrinks to fit, and if it still
+         doesn't fit it replaces the sparklines; anything still over is cut,
+         with a note saying how much
+  live   0 to use the newest history record instead of sampling now
+  table  1 to add a table of evenly sampled records (default off)
+  rows   max table rows, default 24 (1 to 500)
+  Bad parameters return 400 with a usage line.
+
+  Reading the report:
+  - The snapshot is sampled live (one instant reading; rates are Glances'
+    latest values). History records are written every history.record_interval
+    seconds (600 by default), and each one averages several samples.
+  - Temperatures: min / median / mean / max over every sensor (CPU, drives,
+    GPUs, ...). The MaxT history row is the hottest sensor in each record.
+  - Percentages are 0-100. Network and disk I/O are MB/s (megabytes). Each
+    network interface and each drive is capped at config.json's
+    limits.network_mbps / limits.disk_io_mbps (defaults 1250 and 15000, read at
+    startup); the totals are their sums and are not capped. A record that hit a
+    cap lists it under rate_capped. Temperatures are Celsius. Ping is round-trip
+    ms; DOWN means every probe was lost.
+  - Load: the bar is the 1-minute load divided by the CPU core count.
+  - Sparklines are on a real time axis, window start (left) to now (right);
+    a blank stretch means no records then (box off, recorder down). Each sparkline
+    has a fixed scale: percentages 0-100, rates and disk from 0 to the peak, load
+    from 0 to the core count (or the peak), MaxT from 20 C. Beside it: min, mean
+    and max; for CPU, network and disk, min/max are the extremes within each
+    record's sampling burst, so short spikes show even when averaged away.
+  - "-" means no data (a metric that is missing from that record).
+  - Values at or over the thresholds in /config.json are drawn orange.
+
+JSON API (machine-readable; prefer these for exact values)
+  GET /api/history?hours=24      records (no temps/processes/ip): cpu, memory, swap,
+                                 gpus, drives, network, disk_io, load, ping, cpu_freq;
+                                 &since=<timestamp, URL-encoded> returns only
+                                 records newer than it. Every response has cutoff
+                                 (window start) and now (epoch s). Records may carry
+                                 rate_capped: [{metric, interface | device, drive,
+                                 samples, of, raw_max, cap}] and rate_caps
+  GET /api/history/field/temps   [{timestamp, temps}] for the same range (?hours=, &since=)
+  GET /api/history/field/processes   per-process rows, when process logging is on
+  GET /api/history/settings      recording interval and sampling settings
+  GET /api/processlist           live process list (arguments stripped)
+  GET /api/gpu-info              live NVIDIA GPU details
+  GET /api/gpu-processes         live processes holding GPU memory
+  GET /api/cpu-info              CPU model and core counts
+  GET /api/ping                  ping the configured targets now
+  GET /api/sensors               fans/temps/power snapshot (root collector, when installed)
+  GET /api/storage-health        drive SMART/RAID/ECC snapshot (root collector)
+  GET /api/4/<plugin>            live Glances metrics, raw (rates not capped): cpu,
+                                 mem, memswap, load, network, diskio, fs, sensors, gpu
+  GET /config.json               the config file as written: title, ping targets,
+                                 thresholds, limits if set
+
+Dashboard: http://<host>:8080/   This page: /help
+"""
+
+
+@APP.get("/text")
+async def text_view(
+    view: str = "both",
+    style: str = "unicode",
+    color: str = "auto",
+    hours: float | None = None,
+    rows: int = 24,
+    table: bool = False,
+    width: int = TEXT_WIDTH,
+    height: int | None = None,
+    live: bool = True,
+) -> Response:
+    """Plain-text report for terminals: `curl http://<host>:8080/text`.
+
+    style=simple is ascii without colour. Colour defaults on (24-bit) for
+    unicode and off otherwise; color=on|256|16|off overrides. height=N trims the
+    report to N lines (the TUI passes its terminal size). live=0 uses the newest
+    record instead of a fresh sample. Documented at /help.
+    """
+    if (
+        view not in ("latest", "history", "both")
+        or style not in ("ascii", "unicode", "simple")
+        or color not in ("auto", "on", "256", "16", "off")
+    ):
+        return Response(content=TEXT_USAGE, status_code=400, media_type="text/plain")
+    if hours is None:
+        hours = auto_history_hours(
+            width, view, style == "unicode",
+            getattr(APP.state, "history_record_interval", DEFAULT_HISTORY_RECORD_INTERVAL),
+        )
+    hours = max(0.1, min(hours, 8760))
+    rows = max(1, min(rows, 500))
+    requested_rows = rows
+    result = await asyncio.to_thread(_read_history_cached, hours)
+    if isinstance(result, str):
+        return Response(
+            content=f"Failed to read history: {result}\n",
+            status_code=500,
+            media_type="text/plain",
+        )
+    records, _skipped, _truncated, _cutoff = result
+    sample: dict[str, Any] | None = None
+    if live and view in ("latest", "both"):
+        try:
+            sample = await _live_sample()
+        except Exception as e:
+            logger.warning("/text: live sample failed, using the newest record: %s", e)
+    if style == "simple":
+        style, color = "ascii", "off"
+    depth: bool | str = {"on": "24", "256": "256", "16": "16", "off": False}.get(
+        color, "24" if style == "unicode" else False
+    )
+
+    def render(with_table: bool, sparks: bool = True) -> str:
+        return render_text(
+            records,
+            style=style,
+            view=view,
+            hours=hours,
+            rows=rows,
+            title=str(_CONFIG.get("title") or ""),
+            color=depth,
+            thresholds=_CONFIG.get("thresholds") or {},
+            table=with_table,
+            live=sample,
+            width=max(TEXT_MIN_WIDTH, min(width, 400)),
+            sparks=sparks,
+        )
+
+    body = render(table)
+    if height is not None:
+        height = max(5, height)
+        if table and body.count("\n") > height:
+            # Asked for the table: shrink it to the rows that fit (at least 3)
+            # before cutting. It shows min(rows, records) rows, so shrink that.
+            shown = min(rows, len(records))
+            rows = max(3, shown - (body.count("\n") - height))
+            body = render(True)
+            if body.count("\n") > height:
+                # Still too tall: the table replaces the sparklines, then fills
+                # whatever room that frees.
+                body = render(True, sparks=False)
+                over = body.count("\n") - height  # negative = spare lines
+                rows = max(3, min(requested_rows, min(rows, len(records)) - over))
+                body = render(True, sparks=False)
+        body = _fit_height(body, height, depth)
+    return Response(content=body, media_type="text/plain; charset=utf-8")
+
+
+def _fit_height(body: str, height: int, color: bool | str) -> str:
+    """Trim a report to `height` lines, noting how many were cut."""
+    lines = body.rstrip("\n").split("\n")
+    if len(lines) <= height:
+        return body
+    cut = len(lines) - (height - 1)
+    return "\n".join(lines[: height - 1] + [_paint(f"... {cut} more lines (taller terminal, or another view)", "muted", color)]) + "\n"
+
+
+# Short-lived caches so several terminals polling /text every second cost one
+# live sample per second and one history parse per new record.
+_LIVE_TTL: Final[float] = 1.0
+_live_cache: dict[str, Any] = {"at": 0.0, "record": None}
+_live_lock = asyncio.Lock()
+_history_cache: dict[str, Any] = {"key": None, "result": None}
+
+
+async def _live_sample() -> dict[str, Any]:
+    async with _live_lock:
+        if _live_cache["record"] is None or time.monotonic() - _live_cache["at"] > _LIVE_TTL:
+            _live_cache["record"] = await collect_history_sample(APP.state.glances_url, live=True)
+            _live_cache["at"] = time.monotonic()
+        return _live_cache["record"]
+
+
+def _read_history_cached(
+    hours: float,
+) -> tuple[list[dict[str, Any]], int, bool, float] | str:
+    """_read_history, reused until the file changes or a minute passes (the
+    window start moves). Callers must not mutate the returned records."""
+    try:
+        st = HISTORY_FILE.stat()
+        key = (hours, st.st_mtime_ns, st.st_size, int(time.time() // 60))
+    except OSError:
+        key = None
+    if key is not None and _history_cache["key"] == key:
+        return _history_cache["result"]
+    result = _read_history(hours)
+    if key is not None and not isinstance(result, str):
+        _history_cache.update(key=key, result=result)
+    return result
+
+
+@APP.get("/tui.py")
+async def tui_script(request: Request) -> Response:
+    """The live terminal client, so it runs without a checkout:
+    curl -fsS http://<host>:8080/tui.py | python3 -
+    The copy served has SERVED_URL set to the address it was fetched from, so
+    it connects back here with no argument."""
+    source = (Path(__file__).parent / "tui.py").read_text()
+    base = _base_url(request)
+    source = source.replace('SERVED_URL = ""', f"SERVED_URL = {base!r}", 1)
+    # The usage comments too, so someone who just curls it sees commands that work.
+    source = source.replace("http://<host>:8080", base)
+    return Response(content=source, media_type="text/x-python; charset=utf-8")
+
+
+def _base_url(request: Request) -> str:
+    """This server as the client reached it (its Host header), e.g. http://box:8080."""
+    return str(request.base_url).rstrip("/")
+
+
+@APP.get("/help")
+async def help_page(request: Request) -> Response:
+    """Plain-text guide to /text and the JSON API, with this server's real
+    address in the examples so they can be pasted as-is."""
+    body = HELP_TEXT.replace("http://<host>:8080", _base_url(request))
+    return Response(content=body, media_type="text/plain; charset=utf-8")
 
 
 @APP.get("/")
