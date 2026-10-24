@@ -112,6 +112,11 @@ runs as an unprivileged user under `ProtectSystem=strict` and never runs `sudo`,
 `ipmitool`: the collector runs as root on its own timers and the web process only reads the
 JSON it writes. The IP card and each history record ask `api.ipify.org` for the public address.
 
+Process labels retain recognized script paths or Python module names, but omit inline code
+and unrecognized interpreter options. This protects live data and new history records;
+upgrading does not scrub previously stored process names, which remain visible through the
+process-history API when those records are in range.
+
 again, don't put this on anything besides a trusted LAN!
 
 ## API
@@ -163,7 +168,8 @@ horatio/
 
 ## Development
 
-Node.js is required for the browser history tests run by `test.py`.
+Node.js 18+ is required for the browser tests run by `test.py`, including
+the request timeout tests against a temporary localhost HTTP server.
 
 ```bash
 cp config.example.json config.json   # once
@@ -193,8 +199,15 @@ saved record whose rotation failed returns a warning; its original history is
 retained. It does not implement `since=` (Refresh reloads the whole window there)
 or the rate caps on history.
 
-Run the OpenWrt history tests with `lua5.1 openwrt/test_history.lua` from the
-checkout root, using Lua 5.1 with Nixio installed. The tests use temporary files,
-forked contenders, and injected I/O failures; they do not touch recorded history.
+Run the OpenWrt Lua tests from the checkout root:
+
+```sh
+lua5.1 openwrt/test_history.lua   # requires Nixio
+lua5.1 openwrt/test_handler.lua
+python3 openwrt/test_install.py  # also run by test.py; no router needed
+```
+
+The tests use temporary files, forked contenders, and injected I/O failures;
+they do not touch recorded history or the host's service configuration.
 
 Chart.js (MIT) is fetched at install time; Glances (LGPL) is a Python dependency.

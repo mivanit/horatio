@@ -60,11 +60,30 @@ elif command -v opkg >/dev/null 2>&1; then
 fi
 
 # --- Chart.js ---
+# Keep version/hash in sync with the Linux installer. Verify the existing asset
+# too: a failed older installer may have left an empty or partial download.
+CHARTJS_VERSION="4.5.1"
+CHARTJS_SHA256="48444a82d4edcb5bec0f1965faacdde18d9c17db3063d042abada2f705c9f54a"
 CHARTJS="$DASHBOARD_DIR/static/chart.umd.min.js"
-if [ ! -f "$CHARTJS" ]; then
-    info "Downloading Chart.js..."
-    wget -qO "$CHARTJS" "https://cdn.jsdelivr.net/npm/chart.js/dist/chart.umd.min.js" 2>/dev/null \
-        || warn "Failed to download Chart.js. Download manually to $CHARTJS"
+if printf '%s  %s\n' "$CHARTJS_SHA256" "$CHARTJS" | sha256sum -c - >/dev/null 2>&1; then
+    info "Chart.js $CHARTJS_VERSION already present."
+else
+    info "Downloading Chart.js $CHARTJS_VERSION..."
+    CHARTJS_TMP="$(mktemp "$DASHBOARD_DIR/static/.chart.XXXXXX")"
+    trap 'rm -f "$CHARTJS_TMP"' EXIT
+    trap 'exit 1' HUP INT TERM
+    wget -qO "$CHARTJS_TMP" \
+        "https://cdn.jsdelivr.net/npm/chart.js@${CHARTJS_VERSION}/dist/chart.umd.min.js" || {
+        error "Failed to download Chart.js; the existing asset was not replaced."
+        exit 1
+    }
+    printf '%s  %s\n' "$CHARTJS_SHA256" "$CHARTJS_TMP" | sha256sum -c - >/dev/null 2>&1 || {
+        error "Chart.js checksum mismatch; refusing to install an incomplete or unexpected file."
+        exit 1
+    }
+    chmod 644 "$CHARTJS_TMP"
+    mv "$CHARTJS_TMP" "$CHARTJS"
+    trap - EXIT HUP INT TERM
 fi
 
 # --- Detect LAN IP ---
@@ -79,6 +98,13 @@ if [ -z "$LAN_IP" ]; then
     exit 1
 fi
 info "Binding to $LAN_IP:$PORT"
+
+# Config must exist before uhttpd loads the Lua handler at startup. Preserve
+# the machine's existing config on updates, as the Linux installer does.
+if [ ! -f "$DASHBOARD_DIR/config.json" ]; then
+    cp "$DASHBOARD_DIR/config.example.json" "$DASHBOARD_DIR/config.json"
+    info "Created config.json from config.example.json: edit it (title, ping targets, thresholds)."
+fi
 
 # --- Configure uhttpd ---
 info "Configuring uhttpd dashboard instance..."
@@ -109,12 +135,6 @@ crontab -l 2>/dev/null | grep -v "dashboard-history" | crontab - 2>/dev/null || 
 info "Adding history cron job (03:00 and 15:00)..."
 (crontab -l 2>/dev/null; echo "$CRON_CMD") | crontab -
 /etc/init.d/cron restart 2>/dev/null || true
-
-# --- Per-machine config: created from the example once, never overwritten (same as install.sh on Linux) ---
-if [ ! -f "$DASHBOARD_DIR/config.json" ]; then
-    cp "$DASHBOARD_DIR/config.example.json" "$DASHBOARD_DIR/config.json"
-    info "Created config.json from config.example.json: edit it (title, ping targets, thresholds)."
-fi
 
 # --- Verify ---
 sleep 1

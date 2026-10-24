@@ -515,6 +515,59 @@ for _, failure in ipairs({"missing", "failing"}) do
         failure .. " gzip releases the lock so a later rotation succeeds")
 end
 
+-- 18. A full/unwritable tmpfs must not erase a previous timestamp or let every
+-- poll record. Manual appends that already succeeded remain acknowledged, with
+-- a warning about the failed timestamp update rather than a false append error.
+for _, failure in ipairs({"open", "full-device", "close", "rename"}) do
+    for _, method in ipairs({"maybe_record", "record_now"}) do
+        local h, m, path, dir = fixture("stamp-" .. failure .. "-" .. method)
+        local stamp = dir .. "/dashboard-last-record"
+        local previous = tostring(os.time() - 3600) .. "\n"
+        write(stamp, previous)
+        local open, rename, sample = io.open, os.rename, m.sample
+        local sampled, injected = 0, false
+        m.sample = function() sampled = sampled + 1; return sample() end
+        io.open = function(name, mode)
+            if name == stamp .. ".tmp" and mode == "w" then
+                injected = true
+                if failure == "open" then return nil, "injected stamp open failure" end
+                if failure == "full-device" then return open("/dev/full", "w") end
+                local f, err = open(name, mode)
+                if f and failure == "close" then
+                    return wrap_file(f, {close = function()
+                        f:close()
+                        return nil, "injected stamp close failure"
+                    end})
+                end
+                return f, err
+            end
+            return open(name, mode)
+        end
+        os.rename = function(src, dest)
+            if failure == "rename" and dest == stamp then
+                injected = true
+                return nil, "injected stamp rename failure"
+            end
+            return rename(src, dest)
+        end
+        local ok, result = pcall(h[method])
+        h.maybe_record() -- another ordinary poll must not add a record either
+        io.open, os.rename = open, rename
+        local expected = method == "record_now" and 1 or 0
+        local acknowledged = method ~= "record_now" or (result.status == "ok"
+            and result.record ~= nil and result.warning == "History timestamp update failed")
+        local temp = io.open(stamp .. ".tmp", "r")
+        local no_temp = temp == nil
+        if temp then temp:close() end
+        check(ok and injected and acknowledged and sampled == expected and count_records(path) == expected
+            and contents(stamp) == previous and no_temp,
+            method .. " preserves the previous timestamp on " .. failure .. " failure")
+        local recovered = in_child(function() assert(h.record_now().status == "ok") end)
+        check(recovered and count_records(path) == expected + 1 and contents(stamp) ~= previous,
+            method .. " releases the lock and can recover from timestamp " .. failure .. " failure")
+    end
+end
+
 os.execute("rm -rf " .. quote(base))
 print(string.format("\n%d passed, %d failed\n", passes, fails))
 os.exit(fails == 0 and 0 or 1)

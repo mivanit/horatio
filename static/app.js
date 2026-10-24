@@ -1702,8 +1702,12 @@ async function fetchDataOnce() {
         updateCardWarning('gpu', maxGpuUtil, thresholds.gpu_util_percent);
         updateCardWarning('gpu-mem', maxGpuMem, thresholds.gpu_memory_percent);
       } else {
-        document.getElementById('gpu-value').textContent = 'N/A';
-        document.getElementById('gpu-mem-value').textContent = 'N/A';
+        for (const id of ['gpu-value', 'gpu-mem-value']) {
+          const el = document.getElementById(id);
+          el.textContent = 'N/A';
+          // textContent removes the spans; rebuild them when GPUs return.
+          el.dataset.gpuCount = '0';
+        }
         updateCardNoData('gpu', true);
         updateCardNoData('gpu-mem', true);
         updateCardWarning('gpu', 0, 0);
@@ -1957,8 +1961,9 @@ async function fetchDataOnce() {
     // Drive temperatures from the 15-min SMART snapshot, keyed by device. SAS
     // drives report a trip point; the others get spinning-rust defaults (50 / 60).
     // Its own block: fans and power must not depend on this slower snapshot.
-    const shTemps = getCache('storageHealth');
-    if (shTemps?.status === 'ok') {
+    // Match the server's one-hour snapshot limit even if HTTP refetches fail.
+    const shTemps = getFreshSnapshot('storageHealth', 3600000);
+    if (shTemps) {
       (shTemps.drives ?? []).forEach(d => d.temperature_c != null && temps.push({
         label: d.device, value: d.temperature_c,
         warning: d.drive_trip_c != null ? d.drive_trip_c - 5 : 50, critical: d.drive_trip_c ?? 60
@@ -2116,16 +2121,13 @@ async function fetchDataOnce() {
       });
       // This slot was actually measured (see history.pingGap).
       pushHistory(history.pingGap, false);
-      // Recompute the loss band. A drop = full outage; per-target "started"
-      // avoids painting the initial empty window as an outage, and pingGap
-      // excludes slots we never sampled (disconnect/pause) so a pause doesn't
-      // render as a fake outage.
+      // Measured failures remain outages even when no success is left in the
+      // window. pingGap excludes initial padding and disconnect/pause slots.
       const pingBand = charts.ping.data.datasets[0];
       if (pingBand && pingBand.label === 'loss' && history.pings.length) {
         const bandColors = cfgTargets.map((t, i) => getCssColor('--color-ping-' + i) || GPU_COLORS[i % GPU_COLORS.length]);
-        const started = cfgTargets.map((t, k) => history.pings[k].findIndex(v => v != null));
         const slotLoss = (i) => cfgTargets.map((t, k) =>
-          (started[k] >= 0 && i >= started[k] && history.pings[k][i] == null && !history.pingGap[i]) ? 1 : 0);
+          (history.pings[k][i] == null && !history.pingGap[i]) ? 1 : 0);
         pingBand.data = history.pings[0].map((_, i) => slotLoss(i).some(l => l > 0) ? 1 : null);
         pingBand.backgroundColor = history.pings[0].map((_, i) => {
           const ls = slotLoss(i);

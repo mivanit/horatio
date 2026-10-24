@@ -83,9 +83,14 @@ local function parse_query(qs)
 end
 
 -- Send JSON response
+local status_text = {
+    [200] = "OK", [404] = "Not Found", [405] = "Method Not Allowed",
+    [500] = "Internal Server Error", [501] = "Not Implemented"
+}
 local function send_json(data, status)
     status = status or 200
-    uhttpd.send("Status: " .. status .. "\r\n")
+    -- uhttpd ignores a CGI Status header without the space/reason phrase.
+    uhttpd.send("Status: " .. status .. " " .. (status_text[status] or "Unknown") .. "\r\n")
     uhttpd.send("Content-Type: application/json\r\n")
     uhttpd.send("Cache-Control: no-cache\r\n")
     uhttpd.send("\r\n")

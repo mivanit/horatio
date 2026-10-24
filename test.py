@@ -1785,6 +1785,15 @@ def test_text_view_unit() -> None:
     check("█" in uni and "History" not in uni, "unicode latest-only has bars, no history")
     hist = server.render_text(recs, style="ascii", view="history", rows=2, table=True)
     check("Snapshot" not in hist and hist.count(" | ") == 3, "history-only, rows capped", repr(hist.count(" | ")))
+    newest_stamp = server._record_time(recs[-1]).strftime("%m-%d %H:%M:%S")
+    one = server.render_text(recs, style="ascii", view="history", rows=1, table=True)
+    one_rows = [line for line in one.splitlines() if " | " in line][1:]
+    check(len(one_rows) == 1 and one_rows[0].startswith(newest_stamp),
+          "a one-row history table shows the newest record")
+    roomy = server.render_text(recs, style="ascii", view="history", rows=24, table=True)
+    roomy_rows = [line for line in roomy.splitlines() if " | " in line][1:]
+    check(len(roomy_rows) == len(recs) and roomy_rows[-1].startswith(newest_stamp),
+          "a history table with spare rows includes every record")
     check("No history records" in server.render_text([]), "empty history")
     colored = server.render_text(recs, style="unicode", color=True)
     check("\033[38;2;59;130;246m" in colored, "colour mode uses the frontend CPU blue")
@@ -1803,6 +1812,28 @@ def test_text_view_unit() -> None:
           and server.auto_history_hours(80, "both", True, 60) == 1.0
           and 1.0 < server.auto_history_hours(80, "both", True, 120) < 3.0,
           "auto history window stays in 1-3 h and scales with the record interval")
+    # Use the host's local timezone just as the real /text route does. The
+    # timezone attached by astimezone() has only the offset at that instant.
+    old_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "America/New_York"
+        time.tzset()
+        for utc_end, expected_start in [
+            (datetime(2026, 3, 8, 16, tzinfo=timezone.utc), "23:00"),
+            (datetime(2026, 11, 1, 17, tzinfo=timezone.utc), "01:00"),
+        ]:
+            _, _, foot, _ = server._render_history(
+                recs, False, 12, 24, False, now=utc_end.astimezone(),
+            )
+            ticks = foot[1].strip()
+            check(ticks.startswith(expected_start) and ticks.endswith("12:00"),
+                  f"history time axis crosses DST correctly ({utc_end:%Y-%m-%d})", ticks)
+    finally:
+        if old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old_tz
+        time.tzset()
 
 
 def test_tui_unit() -> None:
@@ -1833,6 +1864,28 @@ def test_tui_unit() -> None:
     check(fit.count("\n") == 10 and "41 more lines" in fit, "height fit trims and says how much", repr(fit[-40:]))
 
 
+def test_regression_suites() -> None:
+    """Focused suites with their own subprocess/DOM/installer fixtures."""
+    print(f"\n{BOLD}Failure and recovery regression suites{RESET}\n")
+    for label, command in [
+        ("process argument privacy", [sys.executable, "-m", "unittest", "test_process_info"]),
+        ("browser timeouts, recovery, freshness and ping loss", ["node", "test_frontend.js"]),
+        ("OpenWrt installer recovery", [sys.executable, "openwrt/test_install.py"]),
+    ]:
+        if command[0] == "node" and not shutil.which("node") and os.environ.get("HORATIO_SKIP_NODE") == "1":
+            print("  SKIP  browser recovery tests (HORATIO_SKIP_NODE=1, node not installed)")
+            continue
+        try:
+            result = subprocess.run(
+                command, cwd=Path(__file__).parent, capture_output=True,
+                text=True, timeout=60,
+            )
+            detail = (result.stdout + result.stderr).strip()[-2000:] if result.returncode else ""
+            check(result.returncode == 0, label, detail)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            fail(label, str(exc))
+
+
 def main() -> int:
     global passes, fails
     test_read_history_unit()
@@ -1847,6 +1900,7 @@ def main() -> int:
     test_mail_and_health_unit()
     test_text_view_unit()
     test_tui_unit()
+    test_regression_suites()
     port = free_port()
     glances_port = free_port()
     base = f"http://127.0.0.1:{port}"

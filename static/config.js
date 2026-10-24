@@ -537,18 +537,19 @@ async function safeFetch(url, fallback, timeout = 5000) {
   const timeoutId = setTimeout(() => controller.abort(), timeout);
   try {
     const r = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeoutId);
     if (!r.ok) {
       return { data: fallback, ok: false, errorType: 'http', status: r.status };
     }
     const data = typeof fallback === 'string' ? await r.text() : await r.json();
     return { data, ok: true };
   } catch (err) {
-    clearTimeout(timeoutId);
     if (err.name === 'AbortError') {
       return { data: fallback, ok: false, errorType: 'timeout' };
     }
     return { data: fallback, ok: false, errorType: 'network', errorMessage: err.message };
+  } finally {
+    // Fetch resolves at the headers; keep the deadline through body consumption.
+    clearTimeout(timeoutId);
   }
 }
 
@@ -592,6 +593,14 @@ function getCache(key) {
 function getFreshCache(key, maxAgeMs) {
   const c = dataCache[key];
   return c?.lastUpdate && Date.now() - c.lastUpdate <= maxAgeMs ? c.data : null;
+}
+
+// Collector snapshots age before they reach the browser as well as afterward.
+function getFreshSnapshot(key, maxAgeMs) {
+  const snapshot = getFreshCache(key, maxAgeMs);
+  if (snapshot?.status !== 'ok' || !Number.isFinite(snapshot.age_sec)) return null;
+  const elapsedMs = Date.now() - dataCache[key].lastUpdate;
+  return snapshot.age_sec * 1000 + elapsedMs <= maxAgeMs ? snapshot : null;
 }
 
 // The CPU core temperatures (e.g. 36 on a two-socket box: Glances labels socket 0's

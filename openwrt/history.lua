@@ -330,11 +330,21 @@ local function read_last_record_time()
 end
 
 local function write_last_record_time(now)
-    local f = io.open(LAST_RECORD_FILE, "w")
-    if f then
-        f:write(now .. "\n")
-        f:close()
+    -- The writer lock covers this replacement. A full tmpfs must neither erase
+    -- the previous valid stamp nor silently disable the recording interval.
+    local tmp = LAST_RECORD_FILE .. ".tmp"
+    local f, err = io.open(tmp, "w")
+    if not f then return false, err end
+    local written, write_err = f:write(now .. "\n")
+    local flushed, flush_err = f:flush()
+    local closed, close_err = f:close()
+    if not written or not flushed or not closed then
+        os.remove(tmp)
+        return false, write_err or flush_err or close_err
     end
+    local renamed, rename_err = os.rename(tmp, LAST_RECORD_FILE)
+    if not renamed then os.remove(tmp) end
+    return renamed, rename_err
 end
 
 local function due(now, interval)
@@ -352,15 +362,26 @@ local function record(interval, stamp_before)
         if elapsed >= 0 and elapsed < interval then
             return {status = "skipped", reason = "rate_limited", retry_after = interval - elapsed}
         end
-        if stamp_before then write_last_record_time(now) end
+        if stamp_before then
+            local stamped, stamp_err = write_last_record_time(now)
+            if not stamped then
+                return {error = "Recording failed", detail = "Cannot save recording time: " .. tostring(stamp_err)}
+            end
+        end
         local snapshot = build_record()
         local written, write_err = append_record(snapshot)
         if not written then return {error = "Recording failed", detail = write_err} end
-        if not stamp_before then write_last_record_time(now) end
+        local stamped, stamp_err = true, nil
+        if not stamp_before then stamped, stamp_err = write_last_record_time(now) end
         local result = {status = "ok", record = snapshot}
         if write_err then
             result.warning, result.detail = "History rotation failed", tostring(write_err)
             io.stderr:write("[dashboard] history rotation FAILED: " .. result.detail .. "\n")
+        end
+        if not stamped then
+            result.warning = (result.warning and result.warning .. "; " or "") .. "History timestamp update failed"
+            result.detail = (result.detail and result.detail .. "; " or "") .. tostring(stamp_err)
+            io.stderr:write("[dashboard] history timestamp update FAILED: " .. tostring(stamp_err) .. "\n")
         end
         return result
     end)

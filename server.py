@@ -334,6 +334,63 @@ async def _verify_password_throttled(request: Request, password: str) -> Respons
     return None
 
 
+def _sanitize_process_argv(argv: list[str]) -> dict[str, str]:
+    """Expose an executable and a known script/module position, never option
+    operands or inline code. Unknown interpreter flags keep the executable
+    alone: guessing the first non-flag can publish a password or a -c/-e body.
+    """
+    exe = argv[0]
+    exe_name = Path(exe).name
+    executable = {"name": exe_name, "path": exe}
+    args = argv[1:]
+
+    def script(path: str) -> dict[str, str]:
+        return executable if path == "-" else {"name": Path(path).name, "path": f"{exe} {path}"}
+
+    if re.fullmatch(r"(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?t?", exe_name.lower()):
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "--":
+                return script(args[i + 1]) if i + 1 < len(args) else executable
+            if arg == "-m":
+                module = args[i + 1] if i + 1 < len(args) else ""
+                if module and all(part.isidentifier() for part in module.split(".")):
+                    return {"name": module, "path": f"{exe} -m {module}"}
+                return executable
+            if not arg.startswith("-"):
+                return script(arg)
+            if arg in {"-b", "-bb", "-B", "-d", "-E", "-i", "-I", "-O", "-OO",
+                       "-P", "-q", "-R", "-s", "-S", "-u", "-v", "-vv", "-x"}:
+                i += 1
+            elif arg in {"-W", "-X", "--check-hash-based-pycs"}:
+                i += 2  # their operands are not scripts (and can contain secrets)
+            elif arg.startswith(("-W", "-X")) and len(arg) > 2:
+                i += 1
+            else:
+                return executable  # includes -c, stdin, and unknown options
+        return executable
+
+    interpreter = re.fullmatch(r"(node|nodejs|ruby|perl|php)(?:\.?\d+(?:\.\d+)*)?", exe_name.lower())
+    if interpreter:
+        kind = interpreter.group(1)
+        harmless_flags = {
+            "node": {"--no-warnings", "--trace-warnings", "--enable-source-maps"},
+            "nodejs": {"--no-warnings", "--trace-warnings", "--enable-source-maps"},
+            "ruby": {"-w", "-W0", "-W1", "-W2", "--disable-gems"},
+            "perl": {"-w", "-W", "-T", "-t"},
+            "php": {"-n", "-q"},
+        }[kind]
+        for i, arg in enumerate(args):
+            if arg == "--" or (kind == "php" and arg == "-f"):
+                return script(args[i + 1]) if i + 1 < len(args) else executable
+            if not arg.startswith("-"):
+                return script(arg)
+            if arg not in harmless_flags:
+                return executable  # includes eval/print code and option operands
+    return executable
+
+
 def get_sanitized_process_info(
     pid: int, fallback_name: str = "unknown", fallback_path: str = ""
 ) -> dict[str, str]:
@@ -353,7 +410,9 @@ def get_sanitized_process_info(
 
     try:
         cmdline_raw = Path(f"/proc/{pid}/cmdline").read_text()
-        cmdline: list[str] = [c for c in cmdline_raw.split("\0") if c]
+        # Keep empty operands: dropping the value in `-W '' -c code` shifts
+        # -c into the warning option and makes its code look like a script.
+        cmdline: list[str] = cmdline_raw.removesuffix("\0").split("\0") if cmdline_raw else []
 
         # Fallback: if only 1 element with spaces, it's space-separated (e.g., Firefox snap)
         if len(cmdline) == 1 and " " in cmdline[0]:
@@ -363,32 +422,7 @@ def get_sanitized_process_info(
             logger.debug("PID %d: cmdline empty", pid)
             return {"name": fallback_name, "path": fallback_path}
 
-        exe = cmdline[0]
-        exe_name = Path(exe).name
-        args: list[str] = cmdline[1:]
-
-        # Python with -m module
-        if "python" in exe_name.lower():
-            for i, arg in enumerate(args):
-                if arg == "-m" and i + 1 < len(args):
-                    module = args[i + 1]
-                    return {"name": module, "path": f"{exe} -m {module}"}
-            # Python with script file (first non-flag argument)
-            for arg in args:
-                if not arg.startswith("-"):
-                    return {"name": Path(arg).name, "path": f"{exe} {arg}"}
-
-        # Other interpreters (node, ruby, etc.) with script
-        interpreters: set[str] = {"node", "ruby", "perl", "php"}
-        if exe_name in interpreters or any(
-            exe_name.startswith(f"{i}.") for i in interpreters
-        ):
-            for arg in args:
-                if not arg.startswith("-"):
-                    return {"name": Path(arg).name, "path": f"{exe} {arg}"}
-
-        # Regular executable - just show the executable
-        return {"name": exe_name, "path": exe}
+        return _sanitize_process_argv(cmdline)
 
     except (OSError, PermissionError, FileNotFoundError, IndexError, ValueError) as e:
         # ValueError covers UnicodeDecodeError: an argv with non-UTF-8 bytes is
@@ -3966,7 +4000,9 @@ def _render_history(
     fmt = "%m-%d %H:%M" if hours > 20 else "%H:%M"
 
     def label(ts: float) -> str:
-        return datetime.fromtimestamp(ts, end_dt.tzinfo).strftime(fmt)
+        # Resolve local time at each tick: end_dt's fixed offset may be on the
+        # other side of a DST transition, unlike the record timestamps below.
+        return datetime.fromtimestamp(ts).strftime(fmt)
 
     if spark_w >= 3:
         rule = ("└" + "─" * (spark_w - 2) + "┘") if unicode else ("+" + "-" * (spark_w - 2) + "+")
@@ -3991,7 +4027,8 @@ def _render_history(
 
     # Evenly sample at most `rows` records, always including the newest.
     count = len(records)
-    picks = sorted({round(k * (count - 1) / max(1, rows - 1)) for k in range(min(rows, count))})
+    shown = min(rows, count)
+    picks = [count - 1] if shown == 1 else [round(k * (count - 1) / (shown - 1)) for k in range(shown)]
     sep = " │ " if unicode else " | "
     table_w = 14 + len(sep) + 7 * len(columns) - 1
     tail = [""] if sparks else []

@@ -12,10 +12,9 @@ const history = {
   diskDriveReads: [],   // Array of arrays, one per drive (initialized when detected)
   diskDriveWrites: [],  // Array of arrays, one per drive (initialized when detected)
   pings: [],            // Array of arrays, one per ping target (initialized from config)
-  // Per-slot marker: true where the slot was gap-filled during a disconnect/pause
-  // rather than measured. Lets the ping loss band tell "we weren't looking" apart
-  // from "the target was down" — otherwise a pause paints a fake outage.
-  pingGap: Array(historyLength).fill(false),
+  // True for unmeasured slots: initial/resized padding and disconnect/pause
+  // gaps. A measured failure can then stay null without losing its outage band.
+  pingGap: Array(historyLength).fill(true),
   // Cross-core CPU spread: min/median/max across cores at each poll
   cpuCoresMin: Array(historyLength).fill(null),
   cpuCoresMedian: Array(historyLength).fill(null),
@@ -37,8 +36,8 @@ function resizeHistory(newLength) {
 
   const resizeArray = (arr) => {
     if (newLength > oldLength) {
-      const nullsToAdd = Array(newLength - arr.length).fill(null);
-      arr.unshift(...nullsToAdd);
+      const padding = Array(newLength - arr.length).fill(arr === history.pingGap ? true : null);
+      arr.unshift(...padding);
     } else {
       while (arr.length > newLength) arr.shift();
     }
