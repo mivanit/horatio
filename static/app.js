@@ -2548,7 +2548,8 @@ historyLengthBtn.addEventListener('click', () => {
   document.body.appendChild(tipEl);
 
   document.addEventListener('mouseenter', (e) => {
-    const target = e.target.closest('[data-tip]');
+    // Capture-phase enter/leave also fire on document, which has no closest().
+    const target = e.target instanceof Element ? e.target.closest('[data-tip]') : null;
     if (!target || !target.dataset.tip) return;
     tipEl.textContent = target.dataset.tip;
     tipEl.style.display = 'block';
@@ -2558,7 +2559,7 @@ historyLengthBtn.addEventListener('click', () => {
   }, true);
 
   document.addEventListener('mouseleave', (e) => {
-    if (e.target.closest('[data-tip]')) tipEl.style.display = 'none';
+    if (e.target instanceof Element && e.target.closest('[data-tip]')) tipEl.style.display = 'none';
   }, true);
 })();
 

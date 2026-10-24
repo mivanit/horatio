@@ -118,7 +118,7 @@ again, don't put this on anything besides a trusted LAN!
 | Endpoint                     | Description                                 |
 | ---------------------------- | ------------------------------------------- |
 | `GET /`                      | Dashboard UI                                |
-| `/api/4/*` (any method)      | Proxied to the Glances REST API (except the blocked process views above) |
+| `/api/4/<plugin>`            | Proxied to the Glances REST API for the plugins the UI reads (cpu, percpu, mem, memswap, gpu, network, diskio, sensors, load, uptime, system, fs); anything else is 404 |
 | `GET /api/4/fs`              | Glances filesystems, deduplicated by device (bind mounts collapse) |
 | `GET /api/processlist`       | Process list with arguments stripped (the one the UI uses) |
 | `GET /api/list-endpoints`    | Which file-backed endpoints exist on this box (mail, storage-health, sensors) |

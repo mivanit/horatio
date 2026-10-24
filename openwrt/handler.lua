@@ -119,6 +119,16 @@ routes["/history"] = function(env)
     send_json(history.get(hours))
 end
 
+-- One record field over the range, [{timestamp, <name>}], like the Python
+-- backend's /api/history/field/<name>: the frontend loads temps only from here.
+routes["/history/field/temps"] = function(env)
+    local params = parse_query(env.QUERY_STRING)
+    local r = history.get(tonumber(params.hours) or 24)
+    local slim = {}
+    for i, rec in ipairs(r.records) do slim[i] = {timestamp = rec.timestamp, temps = rec.temps} end
+    send_json({field = "temps", records = slim, count = #slim, skipped_lines = r.skipped_lines})
+end
+
 routes["/history/settings"] = function(env)
     if env.REQUEST_METHOD == "POST" then
         send_json({

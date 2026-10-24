@@ -4,7 +4,8 @@
 -- minimal parser sufficient for the flat fixture records used here.
 --
 -- Usage: lua5.1 test_history.lua
---   (or, where no standalone lua exists: luatex --luaonly test_history.lua)
+--   (or, where no standalone lua exists: texlua test_history.lua)
+-- Also run it under a DST zone, e.g. TZ=America/New_York in summer (test 9).
 
 local passes, fails = 0, 0
 
@@ -53,7 +54,8 @@ local script_dir = (arg and arg[0] or ""):match("(.*)[/\\][^/\\]*$") or "."
 package.path = script_dir .. "/?.lua;" .. package.path
 local history = require("history")
 
-local base = "/tmp/dashboard-history-test-" .. os.time()
+local base = os.tmpname()  -- unique per run (os.time() collided between quick runs)
+os.remove(base)
 history.init({}, nil, base)  -- sets HISTORY_FILE = base .. "/logs/history.jsonl"
 local HIST = base .. "/logs/history.jsonl"
 
@@ -136,6 +138,90 @@ r = history.get(24)
 check(r.count == 1 and r.skipped_lines == 0
     and r.records[1].pad and #r.records[1].pad == 1200000,
     "record larger than window parsed after growth", "count=" .. r.count)
+
+-- 9. A 1 h window holds the records from the last hour. Run under a DST zone
+--    (TZ=America/New_York in summer) to exercise it: os.time read the record
+--    fields with DST while the offset was computed without, an hour early.
+do
+    local parts = {}
+    for _, m in ipairs({70, 40, 30, 20, 10}) do parts[#parts + 1] = line(m / 60) end
+    write_file(table.concat(parts))
+end
+r = history.get(1)
+check(r.count == 4, "1 h window holds the last hour's records (TZ=" .. tostring(os.getenv("TZ")) .. ")",
+    "count=" .. r.count)
+
+-- Stub metrics and a stringify for the recording tests (build_record + append).
+local STUB = [[
+package.preload["luci.jsonc"] = function()
+    return {stringify = function(t) return '{"timestamp": "' .. t.timestamp .. '", "v": 1}' end,
+            parse = function() return nil end}
+end
+local metrics = {
+    sample = function() return {cpu = {total = 1, cores = {}}, network = {}} end,
+    mem = function() return {} end, memswap = function() return {} end,
+    fs = function() return {} end, sensors = function() return {} end,
+    load = function() return {min1 = 0, min5 = 0, min15 = 0} end,
+    ping = function() return {} end,
+}
+]]
+
+-- 10. The recording claim (uhttpd runs each request in its own process and a
+--     poll sends ~9 at once; an atomic mkdir lets one of them record).
+--     Deterministic: a held lock, a stale lock, and a repeat in one interval.
+do
+    local stub_metrics = load(STUB .. "return metrics")()
+    package.loaded["luci.jsonc"].stringify = function(t)
+        return '{"timestamp": "' .. t.timestamp .. '", "v": 1}'
+    end
+    history.init({}, stub_metrics, base, base)
+    local lock = base .. "/dashboard-record.lock"
+    local function lines()
+        local n, h = 0, io.open(HIST, "r")
+        if h then for _ in h:lines() do n = n + 1 end h:close() end
+        return n
+    end
+    os.remove(HIST)
+    os.remove(base .. "/dashboard-last-record")
+    os.execute("mkdir " .. lock)
+    history.maybe_record()
+    check(lines() == 0, "another request holding the claim lock -> no record", "lines=" .. lines())
+    os.execute("touch -d '-3 minutes' " .. lock)
+    history.maybe_record()   -- clears the stale lock, records nothing itself
+    history.maybe_record()
+    check(lines() == 1, "a lock left by a killed process is cleared after a minute", "lines=" .. lines())
+    history.maybe_record()
+    check(lines() == 1, "a second request in the same interval does not record", "lines=" .. lines())
+    local f = io.open(lock)
+    check(f == nil, "the claim lock is released")
+    if f then f:close() end
+end
+
+-- 11. Past max_file_bytes the file is cut to its newest half, whole lines.
+do
+    local stub_metrics = load(STUB .. "return metrics")()
+    -- This process already loaded the parse-only shim: give it a stringify.
+    package.loaded["luci.jsonc"].stringify = function(t)
+        return '{"timestamp": "' .. t.timestamp .. '", "v": 1}'
+    end
+    history.init({}, stub_metrics, base, base)
+    os.remove(base .. "/dashboard-last-record")
+    local parts = {}
+    for i = 1, 60 do parts[#parts + 1] = line(10 - i / 10, 40) end
+    write_file(table.concat(parts))  -- ~6 KB
+    history.max_file_bytes = 3000
+    local res = history.record_now()
+    local h = assert(io.open(HIST, "r"))
+    local content = h:read("*a")
+    h:close()
+    local first = content:match("^[^\n]*")
+    local last = content:match("([^\n]*)\n$")
+    check(res.status == "ok" and #content <= 1500 + #last + 1
+        and first:match('^{"timestamp"') and first:match("}$")
+        and last == '{"timestamp": "' .. res.record.timestamp .. '", "v": 1}',
+        "past max_file_bytes: cut to the newest half, whole lines, new record kept",
+        "bytes=" .. #content)
+end
 
 os.execute("rm -rf '" .. base .. "'")
 

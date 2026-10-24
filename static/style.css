@@ -8,7 +8,7 @@
   /* Table layout variables */
   --table-max-height: 200px;
   --table-max-height-large: 400px;
-  --table-min-width: 1160px;  /* fixed columns + a sliver for path: add a new column's width here */
+  --table-min-width: 1150px;  /* fixed columns + a sliver for path; fits a 1366px screen without scrolling */
 
   /* Grid layout (column count is set inline as --grid-columns by app.js) */
   --grid-gap: 20px;

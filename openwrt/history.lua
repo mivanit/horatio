@@ -13,13 +13,21 @@ local metrics = nil
 
 local HISTORY_FILE = "/tmp/dashboard-history.jsonl"
 local LAST_RECORD_FILE = "/tmp/dashboard-last-record"  -- epoch of the last append
+local CLAIM_LOCK = "/tmp/dashboard-record.lock"        -- mkdir lock: one recorder per interval
 local RECORD_INTERVAL = 600   -- max one piggyback record per this many seconds
 local MIN_MANUAL_INTERVAL = 60
 local INITIAL_TAIL_READ = 1048576  -- 1 MiB tail window, doubled until it covers the range
+-- The file lives on flash (the overlay): past this it is cut to its newest half.
+M.max_file_bytes = 4 * 1048576
 
-function M.init(cfg, metrics_module, dashboard_dir)
+-- state_dir: where the tmpfs state files go (tests point it elsewhere).
+function M.init(cfg, metrics_module, dashboard_dir, state_dir)
     config = cfg or {}
     metrics = metrics_module
+    if state_dir then
+        LAST_RECORD_FILE = state_dir .. "/dashboard-last-record"
+        CLAIM_LOCK = state_dir .. "/dashboard-record.lock"
+    end
     local hist_cfg = config.history or {}
     RECORD_INTERVAL = hist_cfg.record_interval or 600
     if dashboard_dir then
@@ -164,8 +172,30 @@ local function append_record(record)
         return false, err
     end
     f:write(json_line .. "\n")
+    local size = f:seek("end")
     f:close()
+    if size and size > M.max_file_bytes then M.trim() end
     return true
+end
+
+-- Cut the file to its newest half (whole lines), via a temp file and rename.
+function M.trim()
+    local f = io.open(HISTORY_FILE, "rb")
+    if not f then return end
+    local size = f:seek("end")
+    local keep = math.floor(M.max_file_bytes / 2)
+    if size <= keep then f:close() return end
+    f:seek("set", size - keep)
+    local data = f:read("*a") or ""
+    f:close()
+    local nl = data:find("\n", 1, true)
+    data = nl and data:sub(nl + 1) or ""
+    local tmp = HISTORY_FILE .. ".tmp"
+    local out = io.open(tmp, "wb")
+    if not out then return end
+    out:write(data)
+    out:close()
+    os.rename(tmp, HISTORY_FILE)
 end
 
 local function read_last_record_time()
@@ -185,20 +215,51 @@ local function write_last_record_time(now)
     end
 end
 
+local function due(now, interval)
+    local elapsed = now - read_last_record_time()
+    return not (elapsed >= 0 and elapsed < interval)
+end
+
+-- os.execute's result: 0 on Lua 5.1, true on 5.2+.
+local function sh(cmd)
+    local r = os.execute(cmd)
+    return r == true or r == 0
+end
+
+-- Claim this interval's record before sampling. uhttpd runs each request in its
+-- own process and a poll sends ~9 at once: without a claim every one of them
+-- found the record due and appended its own. mkdir is atomic, so exactly one
+-- process wins and stamps the interval; the lock is held only for that check.
+-- A lock left by a killed process is removed once it is a minute old.
+local function claim(interval)
+    if not sh("mkdir " .. CLAIM_LOCK .. " 2>/dev/null") then
+        sh("find " .. CLAIM_LOCK .. " -maxdepth 0 -mmin +1 -exec rmdir {} \\; 2>/dev/null")
+        return false
+    end
+    -- The clock is read inside the lock: a process that read it before the
+    -- previous winner stamped the next second would see elapsed = -1, which
+    -- due() takes for a clock gone backwards, and record again.
+    local now = os.time()
+    local won = due(now, interval)
+    if won then write_last_record_time(now) end
+    sh("rmdir " .. CLAIM_LOCK)
+    return won
+end
+
 -- Called on every API request (handler.lua); records if RECORD_INTERVAL has
 -- elapsed since the last append. The request that trips this pays ~1 s of
--- sampling plus the pings before it is answered.
+-- sampling plus the pings before it is answered. A failed record is not
+-- retried until the next interval.
 function M.maybe_record()
     if not metrics then return end
     local now = os.time()
-    local elapsed = now - read_last_record_time()
-    if elapsed >= 0 and elapsed < RECORD_INTERVAL then return end
+    if not due(now, RECORD_INTERVAL) or not claim(RECORD_INTERVAL) then return end
     local ok, record = pcall(build_record)
     if not ok then
         io.stderr:write("[dashboard] history recording FAILED: " .. tostring(record) .. "\n")
         return
     end
-    if append_record(record) then write_last_record_time(now) end
+    append_record(record)
 end
 
 -- POST /api/history/record (cron and manual). Rate-limited via the same
@@ -264,9 +325,12 @@ function M.get(hours)
                     local y, mo, d, h, mi, s = record.timestamp:match(
                         "(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)")
                     if y then
-                        -- os.time interprets as local time, add offset to get UTC epoch
+                        -- os.time reads the fields as local time; add the offset for
+                        -- the UTC epoch. isdst=false like tz_offset's os.date("!*t"):
+                        -- without it a DST zone parsed every record an hour early.
                         ts = os.time({year=tonumber(y), month=tonumber(mo),
-                            day=tonumber(d), hour=tonumber(h), min=tonumber(mi), sec=tonumber(s)})
+                            day=tonumber(d), hour=tonumber(h), min=tonumber(mi), sec=tonumber(s),
+                            isdst=false})
                             + offset
                     end
                 end
