@@ -197,7 +197,8 @@ do
     if f then f:close() end
 end
 
--- 11. Past max_file_bytes the file is cut to its newest half, whole lines.
+-- 11. Past max_file_bytes the older part is gzipped beside the file and the
+-- file keeps its newest half, whole lines; nothing is lost.
 do
     local stub_metrics = load(STUB .. "return metrics")()
     -- This process already loaded the parse-only shim: give it a stringify.
@@ -208,7 +209,8 @@ do
     os.remove(base .. "/dashboard-last-record")
     local parts = {}
     for i = 1, 60 do parts[#parts + 1] = line(10 - i / 10, 40) end
-    write_file(table.concat(parts))  -- ~6 KB
+    local original = table.concat(parts)  -- ~6 KB
+    write_file(original)
     history.max_file_bytes = 3000
     local res = history.record_now()
     local h = assert(io.open(HIST, "r"))
@@ -216,11 +218,22 @@ do
     h:close()
     local first = content:match("^[^\n]*")
     local last = content:match("([^\n]*)\n$")
+    local gz = io.popen("ls '" .. base .. "'/logs/history-*.jsonl.gz")
+    local archive = gz:read("*l")
+    gz:close()
+    local old = ""
+    if archive then
+        local p = io.popen("gzip -dc '" .. archive .. "'")
+        old = p:read("*a")
+        p:close()
+    end
     check(res.status == "ok" and #content <= 1500 + #last + 1
         and first:match('^{"timestamp"') and first:match("}$")
         and last == '{"timestamp": "' .. res.record.timestamp .. '", "v": 1}',
-        "past max_file_bytes: cut to the newest half, whole lines, new record kept",
+        "past max_file_bytes: the file keeps its newest half, whole lines, new record kept",
         "bytes=" .. #content)
+    check(archive ~= nil and old ~= "" and old .. content == original .. last .. "\n",
+        "the older part is in history-*.jsonl.gz, nothing lost", tostring(archive))
 end
 
 os.execute("rm -rf '" .. base .. "'")

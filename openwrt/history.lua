@@ -17,8 +17,9 @@ local CLAIM_LOCK = "/tmp/dashboard-record.lock"        -- mkdir lock: one record
 local RECORD_INTERVAL = 600   -- max one piggyback record per this many seconds
 local MIN_MANUAL_INTERVAL = 60
 local INITIAL_TAIL_READ = 1048576  -- 1 MiB tail window, doubled until it covers the range
--- The file lives on flash (the overlay): past this it is cut to its newest half.
-M.max_file_bytes = 4 * 1048576
+-- Past this (config history.max_file_mb) the older part of the file is gzipped
+-- to history-<UTC time>.jsonl.gz beside it and the file keeps its newest half.
+M.max_file_bytes = 256 * 1048576
 
 -- state_dir: where the tmpfs state files go (tests point it elsewhere).
 function M.init(cfg, metrics_module, dashboard_dir, state_dir)
@@ -30,6 +31,7 @@ function M.init(cfg, metrics_module, dashboard_dir, state_dir)
     end
     local hist_cfg = config.history or {}
     RECORD_INTERVAL = hist_cfg.record_interval or 600
+    M.max_file_bytes = (hist_cfg.max_file_mb or 256) * 1048576
     if dashboard_dir then
         local logs_dir = dashboard_dir .. "/logs"
         os.execute("mkdir -p " .. logs_dir)
@@ -154,6 +156,12 @@ local function build_record()
     return record
 end
 
+-- os.execute's result: 0 on Lua 5.1, true on 5.2+.
+local function sh(cmd)
+    local r = os.execute(cmd)
+    return r == true or r == 0
+end
+
 -- Append a record to the JSONL file.
 -- Returns ok, err so callers can report a failed write instead of claiming
 -- success: a read-only or full filesystem must not surface as {status = "ok"}.
@@ -174,28 +182,54 @@ local function append_record(record)
     f:write(json_line .. "\n")
     local size = f:seek("end")
     f:close()
-    if size and size > M.max_file_bytes then M.trim() end
+    if size and size > M.max_file_bytes then M.rotate() end
     return true
 end
 
--- Cut the file to its newest half (whole lines), via a temp file and rename.
-function M.trim()
+-- Copy n bytes (to EOF when nil) from src to out in 64 KiB chunks; false if a
+-- write failed (full flash).
+local function copy(src, out, n)
+    while n == nil or n > 0 do
+        local chunk = src:read(n and math.min(n, 65536) or 65536)
+        if not chunk or chunk == "" then return true end
+        if not out:write(chunk) then return false end
+        if n then n = n - #chunk end
+    end
+    return true
+end
+
+-- Gzip everything but the newest max_file_bytes / 2 (whole lines) to an archive
+-- beside the file, then keep only that newest part. The old part is streamed
+-- straight into gzip, so no uncompressed copy hits the flash. If the archive
+-- doesn't verify or the rewrite fails, the file is left as it is.
+function M.rotate()
     local f = io.open(HISTORY_FILE, "rb")
     if not f then return end
     local size = f:seek("end")
-    local keep = math.floor(M.max_file_bytes / 2)
-    if size <= keep then f:close() return end
-    f:seek("set", size - keep)
-    local data = f:read("*a") or ""
-    f:close()
-    local nl = data:find("\n", 1, true)
-    data = nl and data:sub(nl + 1) or ""
+    f:seek("set", size - math.floor(M.max_file_bytes / 2))
+    f:read("*l")
+    local split = f:seek()
+    if split <= 0 or split >= size then f:close() return end
+
+    local archive = HISTORY_FILE:gsub("%.jsonl$", "") .. os.date("!-%Y%m%dT%H%M%SZ.jsonl.gz")
+    local gz = io.popen("gzip > '" .. archive .. "'", "w")
+    if not gz then f:close() return end
+    f:seek("set", 0)
+    copy(f, gz, split)
+    gz:close()
+    if not sh("gzip -t '" .. archive .. "' 2>/dev/null") then
+        io.stderr:write("[dashboard] history rotate FAILED: " .. archive .. " did not verify\n")
+        os.remove(archive)
+        f:close()
+        return
+    end
+
     local tmp = HISTORY_FILE .. ".tmp"
     local out = io.open(tmp, "wb")
-    if not out then return end
-    out:write(data)
-    out:close()
-    os.rename(tmp, HISTORY_FILE)
+    if not out then f:close() return end
+    local ok = copy(f, out) and out:close()
+    f:close()
+    if ok then os.rename(tmp, HISTORY_FILE) else os.remove(tmp) end
 end
 
 local function read_last_record_time()
@@ -218,12 +252,6 @@ end
 local function due(now, interval)
     local elapsed = now - read_last_record_time()
     return not (elapsed >= 0 and elapsed < interval)
-end
-
--- os.execute's result: 0 on Lua 5.1, true on 5.2+.
-local function sh(cmd)
-    local r = os.execute(cmd)
-    return r == true or r == 0
 end
 
 -- Claim this interval's record before sampling. uhttpd runs each request in its
