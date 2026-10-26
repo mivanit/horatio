@@ -1665,7 +1665,8 @@ async function fetchDataOnce() {
           ).join(' / ') + ' GB';
         }
 
-        // Push data and animate each GPU
+        // Update GPU labels immediately: an older animation must not restore a
+        // numeric label after a newer poll marks that reading unavailable.
         const gpuInfoData = getCache('gpuInfo') || [];
         const gpuMemTotals = [];
         let maxGpuMemGiB = 0;
@@ -1676,13 +1677,9 @@ async function fetchDataOnce() {
           const proc = Number.isFinite(g.proc) ? g.proc : null;
           const memPercent = Number.isFinite(g.mem) ? g.mem : null;
           pushHistory(history.gpus[i], proc);
-          const usageEl = document.getElementById(`gpu-usage-${i}`);
+          document.getElementById(`gpu-usage-${i}`).textContent = proc != null ? proc.toFixed(0) : '--';
           if (proc != null) {
-            animateValue(usageEl, proc, '', 0);
             maxGpuUtil = Math.max(maxGpuUtil ?? proc, proc);
-          } else {
-            usageEl.textContent = '--';
-            delete usageEl.dataset.value;
           }
           // Compute memory GiB from Glances mem% and cached nvidia-smi total
           const gpuInfoEntry = gpuInfoData.find(gi => gi.index === i);
@@ -1694,14 +1691,10 @@ async function fetchDataOnce() {
           }
           const usedGiB = memPercent != null && totalGiB != null ? memPercent / 100 * totalGiB : null;
           pushHistory(history.gpuMems[i], usedGiB);
-          const usedEl = document.getElementById(`gpu-mem-used-${i}`);
+          document.getElementById(`gpu-mem-used-${i}`).textContent = usedGiB != null ? usedGiB.toFixed(1) : '--';
           document.getElementById(`gpu-mem-total-${i}`).textContent = totalGiB != null ? totalGiB.toFixed(1) : '--';
           if (usedGiB != null) {
-            animateValue(usedEl, usedGiB, '', 1);
             maxGpuMem = Math.max(maxGpuMem ?? memPercent, memPercent);
-          } else {
-            usedEl.textContent = '--';
-            delete usedEl.dataset.value;
           }
         });
         // Update GPU memory chart Y-axis max and store totals for tooltip
@@ -2167,6 +2160,13 @@ async function fetchDataOnce() {
   hideError();
 }
 
+// Startup may finish after Pause or Reconnect. Keep one timer per polling loop.
+function startPolling() {
+  if (!isConnected) return;
+  if (pollingInterval === null) pollingInterval = setInterval(fetchData, pollInterval);
+  if (slowPollingInterval === null) slowPollingInterval = setInterval(fetchSlowData, SLOW_POLL_INTERVAL);
+}
+
 // Toggle connection (pause/resume polling)
 function toggleConnection() {
   const btn = document.getElementById('toggle-btn');
@@ -2221,8 +2221,7 @@ function toggleConnection() {
     fetchStaticData();
     fetchSlowData();
     fetchData();
-    pollingInterval = setInterval(fetchData, pollInterval);
-    slowPollingInterval = setInterval(fetchSlowData, SLOW_POLL_INTERVAL);
+    startPolling();
     btn.textContent = 'Disconnect';
     btn.classList.remove('disconnected');
     statusText.textContent = 'Connected';
@@ -2297,13 +2296,12 @@ loadConfig().then(async () => {
   await fetchEndpointList();
   hideUnavailableCards();
   initProcessTableListeners();  // Set up event delegation once
-  fetchStaticData();
-  fetchSlowData();
-  fetchData();
-}).finally(() => {
-  pollingInterval = setInterval(fetchData, pollInterval);
-  slowPollingInterval = setInterval(fetchSlowData, SLOW_POLL_INTERVAL);
-});
+  if (isConnected) {
+    fetchStaticData();
+    fetchSlowData();
+    fetchData();
+  }
+}).finally(startPolling);
 
 // Set up toggle button
 document.getElementById('toggle-btn').addEventListener('click', toggleConnection);

@@ -154,6 +154,15 @@ function testGpuUnavailableReadings() {
   const context = liveContext(['gpu-value', 'gpu-mem-value']);
   context.charts = { gpu: makeChart(), gpuMem: makeChart() };
   context.updateGpuLegend = () => {};
+  let now = 1950, frames = [];
+  context.performance.now = () => now;
+  context.requestAnimationFrame = callback => frames.push(callback);
+  const frame = at => {
+    now = at;
+    const pending = frames;
+    frames = [];
+    pending.forEach(callback => callback(now));
+  };
   const warnings = {};
   context.updateCardWarning = (id, value, threshold) => { warnings[id] = context.statuses[id] && value > threshold; };
   context.dataCache.gpuInfo = { data: [{ index: 0, memory_total: 24576 }, { index: 1, memory_total: 81920 }] };
@@ -162,6 +171,8 @@ function testGpuUnavailableReadings() {
   const label = id => context.elements.get(id).textContent;
   tick([{ proc: 95, mem: 90 }]);
   assert(warnings.gpu && warnings['gpu-mem']);
+  frame(1966);
+  now = 2020;  // A fast poll follows a slow one, before its old animation ends.
   // The installed Glances NVIDIA producer keeps the row, with null fields,
   // when the corresponding NVML calls raise NVMLError.
   tick([{ gpu_id: 'nvidia0', proc: null, mem: null, temperature: 55 }]);
@@ -173,6 +184,9 @@ function testGpuUnavailableReadings() {
   assert.equal(context.statuses.gpu, false);
   assert.equal(context.statuses['gpu-mem'], false);
   assert(!warnings.gpu && !warnings['gpu-mem']);
+  frame(2350);
+  assert.equal(label('gpu-usage-0'), '--', 'old frames cannot restore unavailable utilization');
+  assert.equal(label('gpu-mem-used-0'), '--', 'old frames cannot restore unavailable memory');
   tick([{ proc: 0, mem: 0 }]);
   assert.equal(label('gpu-usage-0'), '0', 'zero utilization is a valid reading');
   assert.equal(label('gpu-mem-used-0'), '0.0', 'zero used memory is a valid reading');
@@ -334,6 +348,67 @@ async function testPausedStatus() {
   }
 }
 
+async function testStartupPolling() {
+  for (const action of ['normal', 'pause', 'pause-resume']) {
+    const dom = makeDOM(['status', 'status-text', 'spinner', 'status-tooltip', 'toggle-btn']);
+    dom.elements.get('status').querySelector = selector => dom.elements.get(selector.slice(1));
+    let finishDiscovery;
+    const discovery = new Promise(resolve => { finishDiscovery = resolve; });
+    const timers = new Map(), calls = { fast: 0, slow: 0, static: 0, setup: 0 };
+    let nextTimer = 1;
+    const context = vm.createContext({
+      ...dom, isConnected: true, pollingInterval: null, slowPollingInterval: null, disconnectTime: null,
+      pollInterval: 2000, SLOW_POLL_INTERVAL: 30000, historyLength: 3,
+      COLORS: { success: 'green', errorLight: 'red', partial: 'orange' }, cardStatus: { cpu: { ok: true } },
+      dataCache: Object.fromEntries(['drives', 'processes', 'networkProcesses', 'diskProcesses']
+        .map(key => [key, { data: [], lastUpdate: 1 }])),
+      charts: Object.fromEntries(['cpu', 'cpuCoresSpread', 'mem', 'swap', 'net', 'disk', 'gpu', 'gpuMem', 'ping', 'diskDrives']
+        .map(key => [key, makeChart()])),
+      loadConfig: async () => {}, applyConfigToDom() {}, fetchEndpointList: () => discovery,
+      hideUnavailableCards() { context.updateConnectionStatus(); },
+      initProcessTableListeners() { calls.setup++; }, fillHistoryGaps() {},
+      fetchStaticData() { calls.static++; }, fetchSlowData() { calls.slow++; },
+      async fetchDataOnce() { calls.fast++; context.updateConnectionStatus(); },
+      setInterval(callback, delay) { const id = nextTimer++; timers.set(id, { callback, delay }); return id; },
+      clearInterval(id) { timers.delete(id); },
+    });
+    evaluate(context,
+      between(config, 'function updateConnectionStatus', '// Something is actually bad') +
+      between(app, 'let fetchInFlight', '// One card') +
+      between(app, 'function startPolling', '// Apply config to DOM'));
+    evaluate(context, 'globalThis.startup = ' + between(app, 'loadConfig().then', '// Set up toggle button'));
+    await Promise.resolve();  // Config loaded; endpoint discovery is still pending.
+    if (action !== 'normal') context.toggleConnection();
+    if (action === 'pause-resume') {
+      context.toggleConnection();
+      assert.equal(timers.size, 2);
+    }
+    finishDiscovery();
+    await context.startup;
+    assert.equal(calls.setup, 1, 'discovery/listener setup completes even while paused');
+    if (action === 'pause') {
+      assert.equal(timers.size, 0, 'startup cannot restart paused timers');
+      assert.deepEqual([calls.fast, calls.slow, calls.static], [0, 0, 0], 'startup does not fetch while paused');
+      assert.equal(dom.elements.get('status-text').textContent, 'Paused');
+      context.toggleConnection();
+    }
+    assert.equal(timers.size, 2, 'startup and reconnect share one pair of timers');
+    assert.deepEqual([...timers.values()].map(timer => timer.delay).sort((a, b) => a - b), [2000, 30000]);
+    await new Promise(setImmediate);  // Finish the immediate reconnect poll before a timer tick.
+    const before = { ...calls };
+    await Promise.all([...timers.values()].map(timer => timer.callback()));
+    assert.equal(calls.fast, before.fast + 1);
+    assert.equal(calls.slow, before.slow + 1);
+    context.toggleConnection();
+    assert.equal(timers.size, 0, 'Pause clears every timer, including after an early reconnect');
+    assert.equal(dom.elements.get('status-text').textContent, 'Paused');
+    context.toggleConnection();
+    assert.equal(timers.size, 2, 'normal reconnect restores one pair');
+    context.toggleConnection();
+    assert.equal(timers.size, 0);
+  }
+}
+
 function testPingLoss() {
   const context = liveContext(['ping-value-0']);
   context.dashboardConfig = { ping_targets: [{ address: 'example.test' }] };
@@ -378,7 +453,7 @@ function testPingLoss() {
 
 (async () => {
   for (const test of [testFetchBodyTimeout, testGpuRecovery, testGpuUnavailableReadings,
-    testDriveTemperatureFreshness, testSensorFreshness, testPausedStatus, testPingLoss]) {
+    testDriveTemperatureFreshness, testSensorFreshness, testPausedStatus, testStartupPolling, testPingLoss]) {
     await test();
     console.log(`PASS ${test.name}`);
   }
