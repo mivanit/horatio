@@ -43,7 +43,7 @@ it survives re-installs. Keys:
 | `sel_fault_patterns` | case-insensitive substrings of BMC event descriptions that count as a hardware fault (`SEL: N hardware events in 7d`). Routine chatter is excluded by not being listed |
 | `grown_defect_baseline` | `{serial: count}` for SAS drives; alarm when a drive exceeds its own number. An unlisted serial is watched from 0, so a replacement drive alarms as soon as it has defects: add it then |
 | `fan_rpm_alarm_above` | alarm when any fan exceeds this RPM; `null` = off |
-| `gpu_temp_alarm_margin_c` | alarm when a GPU's core or memory temperature is within this many °C of the driver's max operating temperature for it; absent = 3, `null` = off (the slowdown, ECC and retired-page GPU alarms stay on) |
+| `gpu_temp_alarm_margin_c` | alarm when a GPU's core or memory temperature is within this many °C of the driver's max operating temperature for it (including the relative GPU T.Limit reading on newer cards); absent = 3, `null` = off (the slowdown, ECC and retired-page GPU alarms stay on) |
 | `backup_timer` | systemd timer whose last trigger is checked (alarm after 30 h); `null` = none |
 
 A missing file uses built-in defaults (the shipped fault phrases, an empty defect baseline, no
@@ -76,6 +76,7 @@ the 60 s file is missing or older than 5 minutes. Nothing is mailed for an alarm
 | `mdN: mismatch_cnt=N` | blocks differed between mirrors at the last `check` (not raised while a check/resync/repair runs: the count climbs during one); on RAID1 a small count can be benign. `echo repair > /sys/block/mdN/md/sync_action`, then a `check`; if it returns, look at the members' SMART |
 | `fans: N over C RPM (boost back on, manual override, or box hot)` | only with `fan_rpm_alarm_above` set: a BMC fan setting reverted (power-cycle?), the fans are held at a manual speed above the ceiling, or the box is hot |
 | `GPU N: memory X C >= max operating Y C - M` / `GPU N: core X C >= …` | within `gpu_temp_alarm_margin_c` of the driver's limit (`nvidia-smi -q -d TEMPERATURE`). The memory has no throttle of its own: cut the load or raise the fans. The core throttles itself at its max operating temp |
+| `GPU N: T.Limit X C <= max operating Y C + M` | the driver's relative GPU thermal margin is within `gpu_temp_alarm_margin_c` of its max operating threshold. T.Limit counts downward as the GPU heats up; it is not an absolute core or memory temperature |
 | `GPU N: thermal slowdown active (sw\|hw)` | the driver (sw, at max operating temp) or the board (hw, at slowdown temp) is cutting clocks for heat: `nvidia-smi -q -d TEMPERATURE,PERFORMANCE`. Power-cap throttling is normal and never alarms. `gpus[].sw_thermal_s` / `hw_thermal_s` count the seconds since driver load |
 | `GPU N: K uncorrected ECC errors since driver load` / `GPU N: retired pages pending` | `nvidia-smi -q -d ECC,PAGE_RETIREMENT`; pending pages retire at the next driver reload (reboot). Repeats mean the card is failing |
 | `<sensor>: status <not ok>` | `sudo ipmitool sdr type fan` / `type temperature`: the BMC's own threshold crossed |
@@ -89,6 +90,11 @@ the 60 s file is missing or older than 5 minutes. Nothing is mailed for an alarm
 | `stale` (dashboard) | `systemctl status horatio-collect.timer`; `sudo systemctl start horatio-collect.service` |
 
 ## Testing without hardware
+
+Run `python3 collector/test_sensors.py` from the repository root for GPU capture and alarm
+fixtures. These run the script's actual GPU shell block with a fake `nvidia-smi`, then its
+actual Python parser, without root or hardware. Older drivers that reject thermal-counter
+query fields are retried without those counters; the other GPU readings and alarms remain available.
 
 The python of each script runs standalone against a directory of hand-written capture files,
 with `HEALTH_SYSBLOCK` pointed at a fake sysfs tree. Every file the bash stage would have written

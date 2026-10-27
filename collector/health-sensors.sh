@@ -85,8 +85,20 @@ rapl > "$tmp/rapl2.txt" 2>> "$tmp/rapl.err" || echo "exit $?" >> "$tmp/rapl.err"
 # nvidia-smi installed but the driver not loaded fails both captures: a
 # `collector:` alarm, on purpose. No nvidia-smi at all: no rows, no alarm.
 if command -v nvidia-smi > /dev/null; then
-    timeout 30 nvidia-smi --query-gpu=index,pci.bus_id,name,temperature.gpu,temperature.memory,clocks_event_reasons.sw_thermal_slowdown,clocks_event_reasons.hw_thermal_slowdown,clocks_event_reasons.hw_slowdown,clocks_event_reasons_counters.sw_thermal_slowdown,clocks_event_reasons_counters.hw_thermal_slowdown,ecc.errors.uncorrected.volatile.total,retired_pages.pending,power.draw,power.limit \
-        --format=csv,noheader,nounits > "$tmp/gpu.txt" 2> "$tmp/gpu.err" || echo "exit $?" >> "$tmp/gpu.err"
+    gpu_query=index,pci.bus_id,name,temperature.gpu,temperature.memory,clocks_event_reasons.sw_thermal_slowdown,clocks_event_reasons.hw_thermal_slowdown,clocks_event_reasons.hw_slowdown,clocks_event_reasons_counters.sw_thermal_slowdown,clocks_event_reasons_counters.hw_thermal_slowdown,ecc.errors.uncorrected.volatile.total,retired_pages.pending,power.draw,power.limit
+    timeout 30 nvidia-smi --query-gpu="$gpu_query" --format=csv,noheader,nounits > "$tmp/gpu.txt" 2> "$tmp/gpu.err" || {
+        rc=$?
+        # Older drivers reject these optional counters instead of returning N/A.
+        # Retry only that query error; ordinary driver failures remain alarms.
+        if grep -Eq 'Field "clocks_event_reasons_counters\.(sw|hw)_thermal_slowdown" is not a valid field to query' "$tmp/gpu.txt" "$tmp/gpu.err"; then
+            gpu_query=${gpu_query//clocks_event_reasons_counters.sw_thermal_slowdown,/}
+            gpu_query=${gpu_query//clocks_event_reasons_counters.hw_thermal_slowdown,/}
+            : > "$tmp/gpu-no-counters"
+            timeout 30 nvidia-smi --query-gpu="$gpu_query" --format=csv,noheader,nounits > "$tmp/gpu.txt" 2> "$tmp/gpu.err" || echo "exit $?" >> "$tmp/gpu.err"
+        else
+            echo "exit $rc" >> "$tmp/gpu.err"
+        fi
+    }
     timeout 30 nvidia-smi -q -d TEMPERATURE > "$tmp/gpu-temp.txt" 2> "$tmp/gpu-temp.err" || echo "exit $?" >> "$tmp/gpu-temp.err"
 else
     for f in gpu gpu-temp; do : > "$tmp/$f.txt"; : > "$tmp/$f.err"; done
@@ -199,9 +211,13 @@ def gpu_limits(text):
     # column 0 ("GPU 00000000:82:00.0"), then indented "Key : value" lines such as
     #   "        GPU Max Operating Temp            : 83 C"
     #   "        Memory Max Operating Temp         : N/A"
-    # -> {bus_id: {shutdown, slowdown, max_op, mem_max_op}}, a value None when N/A.
+    # Absolute limits stay separate from T.Limit's relative readings, which
+    # count down toward the threshold as the GPU heats up. N/A becomes None.
     keys = {"GPU Shutdown Temp": "shutdown", "GPU Slowdown Temp": "slowdown",
-            "GPU Max Operating Temp": "max_op", "Memory Max Operating Temp": "mem_max_op"}
+            "GPU Max Operating Temp": "max_op", "Memory Max Operating Temp": "mem_max_op",
+            "GPU T.Limit Temp": "current_tlimit", "GPU Current T.Limit Temp": "current_tlimit",
+            "GPU Max Operating T.Limit Temp": "max_op_tlimit",
+            "GPU Max Operating T.Limit Temp Specification": "max_op_tlimit"}
     limits, cur = {}, None
     for line in text.splitlines():
         if line.startswith("GPU "):
@@ -218,11 +234,14 @@ def deg(x):
 limits = gpu_limits(read("gpu-temp.txt"))
 # Absent = 3; null = no temperature rules (the slowdown, ECC and page rules still run).
 margin = config.get("gpu_temp_alarm_margin_c", 3)
+no_counters = os.path.exists(os.path.join(tmp, "gpu-no-counters"))
 state["gpus"] = []
 for line in read("gpu.txt").splitlines():
     if not line.strip():
         continue
     parts = [p.strip() for p in line.split(",")]
+    if no_counters:
+        parts[8:8] = ["N/A", "N/A"]
     if len(parts) != len(GPU_FIELDS) or num(parts[0]) is None:
         alarms.append(f"collector: gpu: unparsed line: {line.strip()!r}")
         continue
@@ -251,6 +270,9 @@ for line in read("gpu.txt").splitlines():
         for what, temp, top in (("memory", row["mem_c"], lim["mem_max_op"]), ("core", row["core_c"], lim["max_op"])):
             if temp is not None and top is not None and temp >= top - margin:
                 alarms.append(f"GPU {n}: {what} {deg(temp)} C >= max operating {deg(top)} C - {deg(margin)}")
+        current, top = lim.get("current_tlimit"), lim.get("max_op_tlimit")
+        if current is not None and top is not None and current <= top + margin:
+            alarms.append(f"GPU {n}: T.Limit {deg(current)} C <= max operating {deg(top)} C + {deg(margin)}")
     if throttle:
         alarms.append(f"GPU {n}: thermal slowdown active ({', '.join(r.split('_')[0] for r in throttle)})")
     if row["ecc_uncorrected"]:

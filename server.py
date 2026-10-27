@@ -534,19 +534,28 @@ def get_gpu_stats() -> list[dict[str, Any]]:
     Tesla P40) while the driver's own CLI reads them fine. Per-field
     None-preserving; empty list on failure (nvidia-smi missing/timeout/error).
     """
+    basic_fields = "index,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,temperature.memory"
+    counters = (
+        "clocks_event_reasons_counters.sw_thermal_slowdown",
+        "clocks_event_reasons_counters.hw_thermal_slowdown",
+    )
+    command = ["nvidia-smi", "--query-gpu=" + basic_fields + "," + ",".join(counters),
+               "--format=csv,noheader,nounits"]
     try:
         result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=index,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,"
-                "temperature.memory,clocks_event_reasons_counters.sw_thermal_slowdown,"
-                "clocks_event_reasons_counters.hw_thermal_slowdown",
-                "--format=csv,noheader,nounits",
-            ],
+            command,
             capture_output=True,
             text=True,
             timeout=5,
         )
+        # Pre-575 nvidia-smi rejects the entire query for these newer counters.
+        # Retry only that diagnostic; keep valid memory/temperature/power data.
+        diagnostic = result.stdout + result.stderr
+        if result.returncode != 0 and any(
+            f'Field "{field}" is not a valid field to query' in diagnostic for field in counters
+        ):
+            command = ["nvidia-smi", "--query-gpu=" + basic_fields, "--format=csv,noheader,nounits"]
+            result = subprocess.run(command, capture_output=True, text=True, timeout=5)
         if result.returncode != 0:
             logger.warning("nvidia-smi failed: %s", result.stderr.strip())
             return []

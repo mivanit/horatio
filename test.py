@@ -1375,6 +1375,58 @@ def test_gpu_info_partial_unit() -> None:
           "GPU info: partial readings serialize as valid JSON")
 
 
+def test_gpu_stats_compatibility_unit() -> None:
+    """An unsupported optional counter must not discard basic GPU readings."""
+    from unittest.mock import patch
+    import server
+
+    print(f"\n{BOLD}GPU query compatibility unit tests{RESET}\n")
+    basic = "0, 0, 4096, 24576, 53, 123, 86"
+    modern = subprocess.CompletedProcess([], 0, basic + ", 2500000, 1000000\n", "")
+    with patch.object(server.subprocess, "run", return_value=modern) as run:
+        gpus = server.get_gpu_stats()
+    check(run.call_count == 1 and len(gpus) == 1
+          and gpus[0]["throttle_sw_thermal_us"] == 2500000
+          and gpus[0]["throttle_hw_thermal_us"] == 1000000,
+          "GPU stats: modern drivers retain counters with one query")
+
+    # Different CLI versions can put the invalid-field diagnostic on either stream.
+    for counter, stream in (("sw", "stderr"), ("hw", "stdout")):
+        error = f'Field "clocks_event_reasons_counters.{counter}_thermal_slowdown" is not a valid field to query.\n'
+        rejected = subprocess.CompletedProcess([], 2, error if stream == "stdout" else "",
+                                              error if stream == "stderr" else "")
+        fallback = subprocess.CompletedProcess([], 0, basic + "\n", "")
+        with patch.object(server.subprocess, "run", side_effect=[rejected, fallback]) as run:
+            gpus = server.get_gpu_stats()
+        check(run.call_count == 2 and len(gpus) == 1
+              and gpus[0]["util_percent"] == 0 and gpus[0]["memory_used_mb"] == 4096
+              and gpus[0]["memory_total_mb"] == 24576 and gpus[0]["temperature"] == 53
+              and gpus[0]["temperature_memory"] == 86 and gpus[0]["power_draw"] == 123
+              and gpus[0]["throttle_sw_thermal_us"] is None
+              and gpus[0]["throttle_hw_thermal_us"] is None
+              and "clocks_event_reasons_counters" not in run.call_args.args[0][1]
+              and "temperature.memory" in run.call_args.args[0][1],
+              f"GPU stats: unsupported {counter} counter on {stream} preserves basic readings")
+
+    for label, failure in (
+        ("driver error", subprocess.CompletedProcess([], 9, "", "driver not loaded")),
+        ("unrelated invalid field", subprocess.CompletedProcess([], 2, "", 'Field "other" is not a valid field to query.')),
+    ):
+        with patch.object(server.subprocess, "run", return_value=failure) as run:
+            gpus = server.get_gpu_stats()
+        check(gpus == [] and run.call_count == 1, f"GPU stats: {label} does not retry")
+    with patch.object(server.subprocess, "run", side_effect=subprocess.TimeoutExpired("nvidia-smi", 5)) as run:
+        gpus = server.get_gpu_stats()
+    check(gpus == [] and run.call_count == 1, "GPU stats: timeout does not retry")
+
+    failure = subprocess.CompletedProcess([], 9, "", "fallback driver failure")
+    with patch.object(server.subprocess, "run", side_effect=[rejected, failure]) as run, \
+            patch.object(server.logger, "warning") as warning:
+        gpus = server.get_gpu_stats()
+    check(gpus == [] and run.call_count == 2 and warning.call_args.args[-1] == failure.stderr,
+          "GPU stats: failed fallback is reported without further retries")
+
+
 def test_null_metrics_unit() -> None:
     """Unit tests for null-safe metric handling (no server/Glances/GPU needed).
 
@@ -2095,6 +2147,7 @@ def test_regression_suites() -> None:
         ("browser timeouts, recovery, freshness and ping loss", ["node", "test_frontend.js"]),
         ("OpenWrt installer recovery", [sys.executable, "openwrt/test_install.py"]),
         ("nginx installer recovery", [sys.executable, "nginx/test_install.py"]),
+        ("GPU sensor compatibility and thermal alarms", [sys.executable, "collector/test_sensors.py"]),
     ]:
         if command[0] == "node" and not shutil.which("node") and os.environ.get("HORATIO_SKIP_NODE") == "1":
             print("  SKIP  browser recovery tests (HORATIO_SKIP_NODE=1, node not installed)")
@@ -2120,6 +2173,7 @@ def main() -> int:
     test_auth_throttle_unit()
     test_subprocess_decoding_unit()
     test_gpu_info_partial_unit()
+    test_gpu_stats_compatibility_unit()
     test_null_metrics_unit()
     test_process_history_unit()
     test_gpu_processes_unit()

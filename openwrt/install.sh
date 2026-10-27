@@ -18,15 +18,39 @@ info()  { printf "[+] %s\n" "$1"; }
 warn()  { printf "[!] %s\n" "$1"; }
 error() { printf "[-] %s\n" "$1"; }
 
+# Replace only our tagged job. OpenWrt keeps user tables in /etc/crontabs;
+# distinguish an absent table from a failed read before writing anything.
+update_history_cron() (
+    cron_file="/etc/crontabs/$(id -un)"
+    cron_previous=""
+    if [ -e "$cron_file" ] || [ -L "$cron_file" ]; then
+        cron_previous=$(crontab -c /etc/crontabs -l) || exit 1
+    fi
+    cron_tmp=$(mktemp) || exit 1
+    trap 'rm -f "$cron_tmp"' EXIT
+    trap 'exit 1' HUP INT TERM
+    printf '%s\n' "$cron_previous" | sed '/ # dashboard-history[[:space:]]*$/d' > "$cron_tmp" || exit 1
+    [ -z "$1" ] || printf '%s\n' "$1" >> "$cron_tmp" || exit 1
+    crontab -c /etc/crontabs "$cron_tmp" || exit 1
+    # BusyBox crontab can return success even when creating its new file fails.
+    cron_current=$(crontab -c /etc/crontabs -l) || exit 1
+    [ "$cron_current" = "$(cat "$cron_tmp")" ] || {
+        error "Cron table was not updated."
+        exit 1
+    }
+)
+
 # --- Uninstall ---
 if [ "$1" = "--uninstall" ]; then
     info "Removing dashboard configuration..."
-    # Remove cron job
-    crontab -l 2>/dev/null | grep -v "dashboard-history" | crontab - 2>/dev/null || true
-    # Remove uhttpd config
-    uci delete "uhttpd.$UCI_SECTION" 2>/dev/null || true
-    uci commit uhttpd 2>/dev/null || true
-    /etc/init.d/uhttpd restart 2>/dev/null || true
+    # A missing dashboard section is fine; package, save and restart errors are not.
+    uci show uhttpd >/dev/null
+    if uci -q get "uhttpd.$UCI_SECTION" >/dev/null; then
+        uci delete "uhttpd.$UCI_SECTION"
+    fi
+    uci commit uhttpd
+    /etc/init.d/uhttpd restart
+    update_history_cron ""
     info "Dashboard removed."
     exit 0
 fi
@@ -132,11 +156,9 @@ info "Restarting uhttpd..."
 # Records also piggyback on API requests (history.lua maybe_record), so this
 # only matters when nobody has the dashboard open.
 CRON_CMD="0 3,15 * * * wget -qO /dev/null --post-data='' http://$LAN_IP:$PORT/api/history/record # dashboard-history"
-# Always remove old entry first (IP may have changed), then re-add
-crontab -l 2>/dev/null | grep -v "dashboard-history" | crontab - 2>/dev/null || true
 info "Adding history cron job (03:00 and 15:00)..."
-(crontab -l 2>/dev/null; echo "$CRON_CMD") | crontab -
-/etc/init.d/cron restart 2>/dev/null || true
+update_history_cron "$CRON_CMD"
+/etc/init.d/cron restart
 
 # --- Verify ---
 sleep 1
