@@ -1,0 +1,58 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [check-format, typing, test-linux]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.4"
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: matrix.target == 'test-linux'
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - run: make ${{ matrix.target }}
+
+  native-lua:
+    name: Native Lua history and API fixtures
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential libcrypt-dev curl git gzip tzdata
+      - name: Build pinned Lua and Nixio
+        run: sh scripts/setup-lua-tests.sh "$RUNNER_TEMP/horatio-native-lua"
+      - name: Test native Lua behavior on Linux
+        run: |
+          LUA_CPATH="$RUNNER_TEMP/horatio-native-lua/luci/libs/luci-lib-nixio/src/?.so;;" \
+            make test-openwrt LUA="$RUNNER_TEMP/horatio-native-lua/lua-5.1.5/src/lua"

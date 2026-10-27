@@ -188,9 +188,18 @@ temporary directory, creates a fresh config from `config.example.json`, and runs
 the suite there. It preserves the checkout's config, password, and history.
 Running `uv run python test.py` directly still records into the checkout's `logs/`.
 
-There is currently no application test/lint CI workflow; these are local checks.
-The Makefile reports existing formatting/type failures rather than suppressing
-them. Avoid running the mutating `format` target concurrently with other targets.
+[GitHub Actions](.github/workflows/check.yml) runs these Make targets on pushes,
+pull requests, and manual dispatches. Formatting, typing, Linux tests, and native
+Lua tests run independently, so a formatting/type failure does not prevent the
+tests from running. Failures are not suppressed; the existing formatting and
+typing diagnostics must be resolved before every job can pass. Avoid running the
+mutating `format` target concurrently with other targets.
+
+CI uses Ubuntu 24.04, Python 3.13, Node.js 22, `uv.lock`, and pinned action
+revisions. The native Lua job builds the dependencies below and runs the history
+tests under UTC and America/New_York. It does not boot OpenWrt or exercise real
+router services. The workflow starts when these files are pushed to GitHub;
+branch protection is configured separately in the repository settings.
 
 The collectors are tested against hand-written fixture directories; recipe in
 [`collector/README.md`](collector/README.md).
@@ -242,8 +251,8 @@ useful for the Lua tests, but does not replace a booted router for service tests
 <details>
 <summary>Build the native Lua test environment on Linux without installing host packages</summary>
 
-Requires a C toolchain, Make, Git, curl, and libcrypt development files. This
-recipe uses the [official Lua archive and checksum](https://www.lua.org/ftp/)
+Requires a C toolchain, Make, Git, curl, and libcrypt development files. The
+[setup script](scripts/setup-lua-tests.sh) uses the [official Lua archive and checksum](https://www.lua.org/ftp/)
 and a pinned [OpenWrt Nixio source revision](https://github.com/openwrt/luci/tree/75a306df84a020c57a631ef5b4c02ace56d93387/libs/luci-lib-nixio).
 Run from the Horatio checkout:
 
@@ -251,27 +260,8 @@ Run from the Horatio checkout:
 (
 set -eu
 native_dir=$(mktemp -d /tmp/horatio-native-lua-XXXXXX)
-curl -fL https://www.lua.org/ftp/lua-5.1.5.tar.gz -o "$native_dir/lua.tar.gz"
-printf '%s  %s\n' \
-  2640fc56a795f29d28ef15e13c34a47e223960b0240e8cb0a82d9b0738695333 \
-  "$native_dir/lua.tar.gz" | sha256sum -c -
-tar -xzf "$native_dir/lua.tar.gz" -C "$native_dir"
-make -C "$native_dir/lua-5.1.5/src" all \
-  MYCFLAGS='-fPIC -DLUA_USE_POSIX -DLUA_USE_DLOPEN' \
-  MYLIBS=-ldl MYLDFLAGS=-Wl,-E
-
-git init "$native_dir/luci"
-git -C "$native_dir/luci" remote add origin https://github.com/openwrt/luci.git
-git -C "$native_dir/luci" fetch --depth 1 --filter=blob:none origin \
-  75a306df84a020c57a631ef5b4c02ace56d93387
-git -C "$native_dir/luci" sparse-checkout set libs/luci-lib-nixio
-git -C "$native_dir/luci" checkout --detach FETCH_HEAD
-nixio_src="$native_dir/luci/libs/luci-lib-nixio/src"
-make -C "$nixio_src" compile FPIC=-fPIC \
-  LUA_CFLAGS="-I$native_dir/lua-5.1.5/src" \
-  NIXIO_LDFLAGS='-shared -lm -ldl -lcrypt'
-
-LUA_CPATH="$nixio_src/?.so;;" \
+sh scripts/setup-lua-tests.sh "$native_dir"
+LUA_CPATH="$native_dir/luci/libs/luci-lib-nixio/src/?.so;;" \
   make test-openwrt LUA="$native_dir/lua-5.1.5/src/lua"
 )
 ```
