@@ -674,6 +674,19 @@ do
         "serialization fails before any separator is appended to a torn tail")
 end
 
+-- 21. Installation paths may contain spaces and shell quotes. Initialization
+-- must create the intended directory and leave any existing history intact.
+do
+    local h, m, path, dir = fixture("router's checkout")
+    local result = h.record_now()
+    local original = contents(path)
+    check(result.status == "ok" and h.get(24).count == 1,
+        "a quoted installation path can create and read its first history record")
+    h.init({}, m, dir, dir)
+    check(result.status == "ok" and contents(path) == original,
+        "reinitializing a quoted installation path preserves existing history bytes")
+end
+
 os.execute("rm -rf " .. quote(base))
 print(string.format("\n%d passed, %d failed\n", passes, fails))
 os.exit(fails == 0 and 0 or 1)

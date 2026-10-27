@@ -22,6 +22,10 @@ local INITIAL_TAIL_READ = 1048576  -- 1 MiB tail window, doubled until it covers
 M.max_file_bytes = 256 * 1048576
 M.max_read_bytes = 4 * 1048576  -- bound per-request parsing and response memory on routers
 
+local function shell_quote(value)
+    return "'" .. value:gsub("'", "'\\''") .. "'"
+end
+
 -- state_dir: where the tmpfs state files go (tests point it elsewhere).
 function M.init(cfg, metrics_module, dashboard_dir, state_dir)
     config = cfg or {}
@@ -35,7 +39,7 @@ function M.init(cfg, metrics_module, dashboard_dir, state_dir)
     M.max_file_bytes = (hist_cfg.max_file_mb or 256) * 1048576
     if dashboard_dir then
         local logs_dir = dashboard_dir .. "/logs"
-        os.execute("mkdir -p " .. logs_dir)
+        os.execute("mkdir -p " .. shell_quote(logs_dir))
         HISTORY_FILE = logs_dir .. "/history.jsonl"
     end
 end
@@ -161,10 +165,6 @@ end
 local function sh(cmd)
     local r = os.execute(cmd)
     return r == true or r == 0
-end
-
-local function shell_quote(value)
-    return "'" .. value:gsub("'", "'\\''") .. "'"
 end
 
 -- Open after uhttpd forks the request. POSIX locks are process-owned and are

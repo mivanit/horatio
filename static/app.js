@@ -13,8 +13,9 @@ const DEFAULT_PING_TARGETS = [
 // Capture state factory (shared by network and disk capture)
 function createCaptureState({ name, timestampId, headerSelector, durationFn }) {
   const state = {
-    capturing: false, captureStart: null, captureInterval: null, lastCaptureTime: null,
+    capturing: false, error: false, captureStart: null, captureInterval: null, lastCaptureTime: null,
     start() {
+      state.clearError();
       state.capturing = true;
       state.captureStart = Date.now();
       function tick() {
@@ -37,10 +38,12 @@ function createCaptureState({ name, timestampId, headerSelector, durationFn }) {
       if (hdr) hdr.classList.remove('capturing');
     },
     setError() {
+      state.error = true;
       const hdr = document.querySelector(headerSelector);
       if (hdr) hdr.classList.add('error');
     },
     clearError() {
+      state.error = false;
       const hdr = document.querySelector(headerSelector);
       if (hdr) hdr.classList.remove('error');
     },
@@ -1178,7 +1181,7 @@ function renderUnifiedProcesses() {
     const netCapturingClass = networkCapture.capturing ? 'capturing' : '';
     const netButtonClass = networkCapture.capturing ? 'refresh-btn refresh-btn-small capturing' : 'refresh-btn refresh-btn-small';
     const networkControlsCell = `
-      <th colspan="${networkColIndices.length}" class="network-header-group ${netCapturingClass}">
+      <th colspan="${networkColIndices.length}" class="network-header-group ${netCapturingClass} ${networkCapture.error ? 'error' : ''}">
         <div class="network-header-controls">
           <button class="${netButtonClass}" id="network-refresh-btn" title="Capture network data">${networkCapture.capturing ? '' : '▷'}</button>
           <button class="dropdown-trigger dropdown-trigger-small" id="nethogs-duration-table" title="Network capture duration">${nethogsDuration}s</button>
@@ -1190,7 +1193,7 @@ function renderUnifiedProcesses() {
     const diskCapturingClass = diskCapture.capturing ? 'capturing' : '';
     const diskButtonClass = diskCapture.capturing ? 'refresh-btn refresh-btn-small capturing' : 'refresh-btn refresh-btn-small';
     const diskControlsCell = `
-      <th colspan="${diskColIndices.length}" class="disk-header-group ${diskCapturingClass}">
+      <th colspan="${diskColIndices.length}" class="disk-header-group ${diskCapturingClass} ${diskCapture.error ? 'error' : ''}">
         <div class="disk-header-controls">
           <button class="${diskButtonClass}" id="disk-refresh-btn" title="Sample disk I/O">${diskCapture.capturing ? '' : '▷'}</button>
           <button class="dropdown-trigger dropdown-trigger-small" id="disk-duration-table" title="Disk sample duration">${diskDuration}s</button>
@@ -2334,7 +2337,7 @@ pollSelectBtn.addEventListener('click', () => {
         pollingInterval = setInterval(fetchData, pollInterval);
       }
     },
-    custom: { type: 'number', min: 0.5, max: 30, placeholder: 'secs' },
+    custom: { type: 'number', min: MIN_POLL_INTERVAL / 1000, max: 30, placeholder: 'secs' },
   });
 });
 

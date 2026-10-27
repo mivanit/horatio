@@ -2912,6 +2912,7 @@ def _run_pidstat(duration: int, timeout: int) -> subprocess.CompletedProcess[str
         text=True,
         errors="replace",  # process names/paths are bytes, not necessarily UTF-8
         timeout=timeout,
+        env={**os.environ, "LC_ALL": "C"},  # stable Average: label and decimal points
     )
 
 
