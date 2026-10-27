@@ -103,6 +103,14 @@ command -v nginx >/dev/null 2>&1 || {
     echo "Error: nginx is unavailable; no service configuration was changed." >&2
     exit 1
 }
+if [ "$PLATFORM" = openwrt ]; then
+    for required in wget timeout; do
+        command -v "$required" >/dev/null 2>&1 || {
+            echo "Error: $required is required to verify nginx startup; no service configuration was changed." >&2
+            exit 1
+        }
+    done
+fi
 
 # --- Generate nginx conf ---
 echo "Generating nginx config for $DOMAIN..."
@@ -219,6 +227,55 @@ restore_entry() {
     fi
 }
 
+# procd's start/restart returns before the daemon has bound its listeners.
+# On rollback the old service may have arbitrary URLs, so require four seconds
+# of sustained running state (nginx retries failed binds for about 2.5 seconds).
+wait_openwrt_service() (
+    attempts=0
+    stable=0
+    while [ "$attempts" -lt 15 ]; do
+        sleep 1
+        if "/etc/init.d/$1" running >/dev/null 2>&1; then
+            stable=$((stable + 1))
+            [ "$stable" -lt 4 ] || exit 0
+        else
+            stable=0
+        fi
+        attempts=$((attempts + 1))
+    done
+    echo "Error: $1 did not stay running after startup." >&2
+    exit 1
+)
+
+stop_openwrt_nginx() (
+    /etc/init.d/nginx stop || exit 1
+    attempts=0
+    while [ "$attempts" -lt 15 ]; do
+        /etc/init.d/nginx running >/dev/null 2>&1 || exit 0
+        sleep 1
+        attempts=$((attempts + 1))
+    done
+    echo "Error: nginx did not stop." >&2
+    exit 1
+)
+
+wait_openwrt_index() (
+    attempts=0
+    while [ "$attempts" -lt 15 ]; do
+        # Use loopback and an explicit Host header: LAN DNS need not be ready,
+        # and an unrelated service on port 80 must not count as our nginx.
+        if /etc/init.d/nginx running >/dev/null 2>&1 \
+            && body=$(timeout -s KILL 3 wget -qO- -T 2 -Y off --header="Host: $DOMAIN" http://127.0.0.1/ 2>/dev/null) \
+            && [ "$body" = "$INDEX" ]; then
+            exit 0
+        fi
+        sleep 1
+        attempts=$((attempts + 1))
+    done
+    echo "Error: nginx did not serve the generated index after startup." >&2
+    exit 1
+)
+
 finish() {
     result=$?
     trap - 0 HUP INT TERM
@@ -226,7 +283,7 @@ finish() {
         restored=1
         # A failed first install must release port 80 before LuCI returns to it.
         if [ "$PLATFORM" = openwrt ] && [ "$NGINX_CHANGED" = 1 ]; then
-            /etc/init.d/nginx stop || restored=0
+            stop_openwrt_nginx || restored=0
         fi
         if [ "$CONFIG_CHANGED" = 1 ]; then
             restore_entry "$CONF_DEST" "$RECOVERY_DIR/config" || restored=0
@@ -239,7 +296,7 @@ finish() {
         fi
         if [ "$UHTTPD_CHANGED" = 1 ]; then
             if uci import uhttpd < "$RECOVERY_DIR/uhttpd" && uci commit uhttpd; then
-                /etc/init.d/uhttpd restart || restored=0
+                /etc/init.d/uhttpd restart && wait_openwrt_service uhttpd || restored=0
             else
                 restored=0
             fi
@@ -252,7 +309,7 @@ finish() {
                     systemctl stop nginx || restored=0
                 fi
             elif [ "$NGINX_WAS_RUNNING" = 1 ]; then
-                /etc/init.d/nginx start || restored=0
+                /etc/init.d/nginx start && wait_openwrt_service nginx || restored=0
             fi
         fi
         if [ "$restored" = 0 ]; then
@@ -287,7 +344,21 @@ fi
 
 echo "Testing nginx config..."
 if [ "$PLATFORM" = "openwrt" ]; then
-    nginx -t -c /etc/nginx/uci.conf
+    # Like OpenWrt's nginx_init, prepare RAM-backed config without starting the
+    # service. uci.conf can be a dangling symlink after a disabled-service boot.
+    case "$(uci -q get nginx.global.uci_enable 2>/dev/null || true)" in
+        1|on|true|yes|enabled) OPENWRT_NGINX_CONF=/etc/nginx/uci.conf ;;
+        *) OPENWRT_NGINX_CONF=/etc/nginx/nginx.conf ;;
+    esac
+    mkdir -p /var/log/nginx /var/lib/nginx
+    if command -v nginx-util >/dev/null 2>&1 && ! nginx-util init_lan; then
+        # The native init script also permits manual config after helper failure.
+        # UCI mode needs freshly generated configuration, never a stale fallback.
+        [ "$OPENWRT_NGINX_CONF" != /etc/nginx/uci.conf ] || exit 1
+        echo "Warning: nginx runtime preparation failed; validating manual configuration." >&2
+    fi
+    # Select manual mode explicitly even if a stale generated file still exists.
+    nginx -t -c "$OPENWRT_NGINX_CONF"
 else
     nginx -t
 fi
@@ -309,6 +380,7 @@ if [ "$PLATFORM" = openwrt ]; then
     uci -q delete uhttpd.main.listen_https 2>/dev/null || true
     uci commit uhttpd
     /etc/init.d/uhttpd restart
+    wait_openwrt_service uhttpd
 fi
 
 echo "Reloading nginx..."
@@ -316,7 +388,11 @@ NGINX_CHANGED=1
 if [ "$PLATFORM" = "ubuntu" ]; then
     systemctl reload-or-restart nginx
 else
-    /etc/init.d/nginx restart
+    # Wait for old workers to leave, so they cannot satisfy the HTTP probe by
+    # serving the newly replaced index while the replacement daemon fails.
+    stop_openwrt_nginx
+    /etc/init.d/nginx start
+    wait_openwrt_index
     /etc/init.d/nginx enable
 fi
 COMMITTED=1

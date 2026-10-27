@@ -25,9 +25,22 @@ let gpuCount = 0;  // Track number of GPUs
 let diskDriveCount = 0;  // Track number of disk drives
 let diskDriveNames = [];  // Track drive names
 
-function pushHistory(arr, value) {
+// Endpoints can miss polls independently. Keep each series' sample times with
+// its values, so changing the polling interval cannot redate retained samples.
+const historyTimes = new WeakMap();
+
+function pushHistory(arr, value, timestamp = Date.now()) {
+  let times = historyTimes.get(arr);
+  if (!times) {
+    times = Array(arr.length).fill(null);
+    historyTimes.set(arr, times);
+  }
   arr.push(value);
-  if (arr.length > historyLength) arr.shift();
+  times.push(timestamp);
+  if (arr.length > historyLength) {
+    arr.shift();
+    times.shift();
+  }
 }
 
 function resizeHistory(newLength) {
@@ -41,6 +54,8 @@ function resizeHistory(newLength) {
     } else {
       while (arr.length > newLength) arr.shift();
     }
+    const times = historyTimes.get(arr);
+    if (times) resizeArray(times);
   };
 
   resizeArray(history.cpu);
@@ -80,19 +95,17 @@ function updatePingLossBand() {
   });
 }
 
-// Generate time labels for x-axis (seconds ago)
-function generateTimeLabels() {
-  const labels = [];
-  for (let i = 0; i < historyLength; i++) {
-    const secsAgo = (historyLength - 1 - i) * (pollInterval / 1000);
-    labels.push(secsAgo);
-  }
-  return labels;
+// Generate time labels for x-axis (seconds ago). Padding has no sample time.
+function generateTimeLabels(samples) {
+  const now = Date.now();
+  const times = historyTimes.get(samples) || Array(historyLength).fill(null);
+  return times.map(time => time == null ? '' : Math.max(0, Math.round((now - time) / 1000)));
 }
 
 // Format time label (seconds ago -> human readable)
 function formatTimeLabel(secsAgo) {
-  if (secsAgo === 0) return 'now';
+  if (secsAgo === '') return '';
+  if (Number(secsAgo) === 0) return 'now';
   return secsAgo + 's';
 }
 
@@ -117,11 +130,11 @@ const CHART_X_AXIS = {
   ticks: {
     ...CHART_TICK,
     autoSkip: true,
+    maxTicksLimit: 5,
     maxRotation: 0,
     minRotation: 0,
     callback: function(value, index) {
       const secs = this.chart.data.labels[index];
-      if (secs % 30 !== 0) return null;
       return formatTimeLabel(secs);
     }
   },
@@ -163,6 +176,14 @@ function buildChart({ type = 'line', data, tooltip, xAxis, yAxis }) {
   return {
     type,
     data: data || { labels: type === 'bar' ? [] : generateTimeLabels(), datasets: [] },
+    plugins: type === 'bar' ? [] : [{
+      id: 'sampleTimes',
+      beforeUpdate(chart) {
+        // Ping's first dataset is the derived loss band, not a sample series.
+        const series = chart.data.datasets.find(dataset => historyTimes.has(dataset.data));
+        chart.data.labels = generateTimeLabels(series?.data);
+      }
+    }],
     options: {
       responsive: true, maintainAspectRatio: false,
       interaction: { intersect: false, mode: 'index' },

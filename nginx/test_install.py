@@ -26,6 +26,8 @@ previous = [json.loads(line) for line in log.read_text().splitlines()] if log.ex
 event = {"command": name, "args": args}
 if name == "uhttpd-service":
     event["config"] = json.loads((root / "uci.json").read_text())
+if name == "wget":
+    event["recovery_exists"] = bool(list((root / "etc/nginx").glob(".horatio-*")))
 with log.open("a") as f:
     f.write(json.dumps(event) + "\n")
 failure = os.environ.get("HORATIO_NGINX_FAIL", "")
@@ -34,9 +36,17 @@ if name in ("apk", "opkg"):
         target = root / "bin/nginx"
         if not target.exists(): target.symlink_to(root / "mock")
 elif name == "nginx":
+    if "-c" in args and not pathlib.Path(args[args.index("-c") + 1]).is_file():
+        print("nginx: configuration file missing", file=sys.stderr)
+        sys.exit(1)
     if failure == "validate":
         print("nginx: invalid port in upstream", file=sys.stderr)
         sys.exit(1)
+elif name == "nginx-util":
+    if failure == "generate":
+        sys.exit(1)
+    if os.environ.get("HORATIO_UCI_ENABLED", "true") == "true":
+        (root / "var/lib/nginx/uci.conf").write_text("# generated UCI config\n")
 elif name == "systemctl":
     if args[0] == "is-active":
         sys.exit(0 if os.environ.get("HORATIO_WAS_RUNNING", "1") == "1" else 3)
@@ -45,7 +55,9 @@ elif name == "systemctl":
             sys.exit(1)
 elif name == "uci":
     config = root / "uci.json"
-    if args[0] == "export":
+    if args == ["-q", "get", "nginx.global.uci_enable"]:
+        print(os.environ.get("HORATIO_UCI_ENABLED", "true"))
+    elif args[0] == "export":
         sys.stdout.write(config.read_text())
     elif args[0] == "import":
         config.write_text(sys.stdin.read())
@@ -57,11 +69,44 @@ elif name == "uci":
         data = json.loads(config.read_text()); data.pop(args[2], None)
         config.write_text(json.dumps(data))
 elif name in ("nginx-service", "uhttpd-service"):
+    state_file = root / (name + "-state.json")
+    state = json.loads(state_file.read_text()) if state_file.exists() else {
+        "phase": "initial", "running": name == "uhttpd-service" or os.environ.get("HORATIO_WAS_RUNNING", "1") == "1",
+        "checks": 0,
+    }
     if args == ["running"]:
-        sys.exit(0 if os.environ.get("HORATIO_WAS_RUNNING", "1") == "1" else 1)
-    if args == ["restart"] and failure == name:
-        if not any(e["command"] == name and e["args"] == args for e in previous):
+        state["checks"] += 1
+        state_file.write_text(json.dumps(state))
+        running = state["running"]
+        if state["phase"] == "stopping":
+            running = state["checks"] <= int(os.environ.get("HORATIO_STOP_DELAY", "0"))
+        if (state["phase"] == "candidate" and failure == name.replace("-service", "-async")) or (
+            state["phase"] == "rollback" and os.environ.get("HORATIO_FAIL_RESTORE") == name.removesuffix("-service")
+        ):
+            running = state["checks"] <= 2  # process exists while bind retries run, then exits
+        sys.exit(0 if running else 1)
+    if args == ["stop"]:
+        state = {"phase": "stopping", "running": False, "checks": 0}
+    elif args in (["start"], ["restart"]):
+        if name == "uhttpd-service":
+            candidate = json.loads((root / "uci.json").read_text())["uhttpd.main.listen_http"] == "127.0.0.1:8081"
+        else:
+            candidate = "proxy_pass" in (root / "etc/nginx/conf.d/example-internal.conf").read_text()
+        state = {"phase": "candidate" if candidate else "rollback", "running": True, "checks": 0}
+        if candidate and failure == name:
+            state["running"] = False
+            state_file.write_text(json.dumps(state))
             sys.exit(1)
+    state_file.write_text(json.dumps(state))
+elif name == "wget":
+    assert args == ["-qO-", "-T", "2", "-Y", "off", "--header=Host: example.internal", "http://127.0.0.1/"]
+    attempts = sum(e["command"] == "wget" for e in previous)
+    if failure == "nginx-async" or attempts < int(os.environ.get("HORATIO_READY_DELAY", "0")):
+        sys.exit(4)
+    if failure == "wrong-index":
+        print("another web service")
+    else:
+        sys.stdout.write((root / "www/example-internal/index.html").read_text())
 elif name == "mv":
     if failure == "restore" and pathlib.Path(args[-2]).name == "config.restore":
         print("injected restore failure", file=sys.stderr)
@@ -87,7 +132,7 @@ class InstallerTests(unittest.TestCase):
         # A closed PATH allows a real missing-nginx/apk-only OpenWrt scenario,
         # regardless of commands installed on the test host.
         for name in ("awk", "basename", "chmod", "cp", "dirname", "grep", "head",
-                     "mkdir", "mktemp", "mv", "rm", "sed", "tr"):
+                     "mkdir", "mktemp", "mv", "rm", "sed", "timeout", "tr"):
             command = shutil.which(name)
             self.assertIsNotNone(command, name)
             (self.bin / name).symlink_to(command)
@@ -97,6 +142,8 @@ class InstallerTests(unittest.TestCase):
         script = script.replace("/etc/nginx", str(self.nginx))
         script = script.replace("/etc/init.d", str(self.root / "init.d"))
         script = script.replace("/var/www", str(self.root / "var/www"))
+        script = script.replace("/var/log/nginx", str(self.root / "var/log/nginx"))
+        script = script.replace("/var/lib/nginx", str(self.root / "var/lib/nginx"))
         script = script.replace('INDEX_DIR="/www/', f'INDEX_DIR="{self.root}/www/')
         self.script = self.root / "install.sh"
         self.script.write_text(script)
@@ -115,10 +162,13 @@ class InstallerTests(unittest.TestCase):
             self.conf = self.nginx / "sites-enabled/example-internal"
             self.index = self.root / "var/www/example-internal/index.html"
         else:
-            (self.bin / "uci").symlink_to(self.mock)
-            (self.bin / "apk").symlink_to(self.mock)
+            for command in ("uci", "apk", "nginx-util", "wget", "sleep"):
+                (self.bin / command).symlink_to(self.mock)
             for service in ("nginx", "uhttpd"):
                 (self.root / "init.d" / service).symlink_to(self.mock)
+            self.runtime_conf = self.root / "var/lib/nginx/uci.conf"
+            (self.nginx / "uci.conf").symlink_to(self.runtime_conf)
+            (self.nginx / "nginx.conf").write_text("# manual main config\n")
             self.conf = self.nginx / "conf.d/example-internal.conf"
             self.index = self.root / "www/example-internal/index.html"
         if nginx:
@@ -192,7 +242,8 @@ class InstallerTests(unittest.TestCase):
         events = self.events()
         commands = [e["command"] for e in events]
         self.assertEqual(events[0], {"command": "apk", "args": ["add", "nginx"]})
-        self.assertLess(commands.index("nginx"), commands.index("uci"))
+        first_uci_write = next(i for i, e in enumerate(events) if e["command"] == "uci" and e["args"][0] == "set")
+        self.assertLess(commands.index("nginx"), first_uci_write)
         self.assertLess(commands.index("nginx"), commands.index("uhttpd-service"))
         self.assertEqual(json.loads((self.root / "uci.json").read_text())["uhttpd.main.listen_http"],
                          "127.0.0.1:8081")
@@ -205,6 +256,131 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse(self.default.is_symlink())
         self.assertIn("server_name dashboard.default;", self.default.read_text())
         self.assertEqual(self.default_target.read_text(), "# distribution default\n")
+
+    def test_openwrt_bootstraps_missing_runtime_config_before_validation(self):
+        self.prepare("openwrt")
+        self.assertTrue((self.nginx / "uci.conf").is_symlink())
+        self.assertFalse(self.runtime_conf.exists())
+        result = self.run_install(HORATIO_WAS_RUNNING="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.runtime_conf.is_file())
+        events = self.events()
+        generation = next(i for i, e in enumerate(events) if e["command"] == "nginx-util")
+        validation = next(i for i, e in enumerate(events) if e["command"] == "nginx")
+        self.assertLess(generation, validation)
+        self.assertEqual(events[validation]["args"], ["-t", "-c", str(self.nginx / "uci.conf")])
+        self.assertFalse(any(e["args"] == ["start"] for e in events[:validation]))
+
+    def test_openwrt_manual_mode_does_not_validate_stale_generated_config(self):
+        self.prepare("openwrt")
+        self.runtime_conf.parent.mkdir(parents=True)
+        self.runtime_conf.write_text("# stale runtime from previously enabled UCI\n")
+        result = self.run_install(HORATIO_UCI_ENABLED="false")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        validations = [e["args"] for e in self.events() if e["command"] == "nginx"]
+        self.assertEqual(validations, [["-t", "-c", str(self.nginx / "nginx.conf")]])
+
+    def test_openwrt_runtime_generation_failure_preserves_service_configuration(self):
+        self.prepare("openwrt")
+        result = self.run_install("generate")
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_restored()
+        self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
+        self.assertFalse(any(e["command"] == "uhttpd-service" for e in self.events()))
+
+    def test_openwrt_manual_config_still_validated_when_helper_fails(self):
+        self.prepare("openwrt")
+        result = self.run_install("generate", HORATIO_UCI_ENABLED="false")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("validating manual configuration", result.stderr)
+        self.assertIn(["-t", "-c", str(self.nginx / "nginx.conf")],
+                      [e["args"] for e in self.events() if e["command"] == "nginx"])
+
+    def test_openwrt_absent_uci_flag_selects_manual_config(self):
+        self.prepare("openwrt")
+        result = self.run_install(HORATIO_UCI_ENABLED="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([e["args"] for e in self.events() if e["command"] == "nginx"],
+                         [["-t", "-c", str(self.nginx / "nginx.conf")]])
+
+    def test_openwrt_waits_for_stop_and_http_readiness_before_committing(self):
+        self.prepare("openwrt")
+        result = self.run_install(HORATIO_STOP_DELAY="2", HORATIO_READY_DELAY="2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = self.events()
+        probes = [e for e in events if e["command"] == "wget"]
+        self.assertEqual(len(probes), 3)
+        self.assertTrue(all(e["recovery_exists"] for e in probes))
+        calls = [e["args"] for e in events if e["command"] == "nginx-service"]
+        stopping, starting = calls.index(["stop"]), calls.index(["start"])
+        self.assertEqual(calls[stopping + 1:starting], [["running"]] * 3)
+        last_probe = max(i for i, e in enumerate(events) if e["command"] == "wget")
+        enabled = next(i for i, e in enumerate(events) if e["args"] == ["enable"])
+        self.assertLess(last_probe, enabled)
+        self.assertEqual(list(self.nginx.glob(".horatio-*")), [])
+
+    def test_openwrt_async_nginx_failure_and_wrong_http_responder_both_roll_back(self):
+        for failure in ("nginx-async", "wrong-index"):
+            with self.subTest(failure=failure):
+                # Each subcase gets its own initial service state and event log.
+                case = InstallerTests()
+                case.setUp()
+                try:
+                    case.prepare("openwrt")
+                    result = case.run_install(failure, HORATIO_WAS_RUNNING="0")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("did not serve the generated index", result.stderr)
+                    case.assert_restored()
+                    self.assertEqual((case.root / "uci.json").read_text(), case.original_uci)
+                    self.assertFalse(any(e["args"] == ["enable"] for e in case.events()))
+                finally:
+                    case.doCleanups()
+
+    def test_openwrt_async_uhttpd_failure_rolls_back_before_nginx_changes(self):
+        self.prepare("openwrt")
+        result = self.run_install("uhttpd-async")
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_restored()
+        self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
+        self.assertEqual([e["args"] for e in self.events() if e["command"] == "nginx-service"],
+                         [["running"]])
+
+    def test_openwrt_async_restore_failure_keeps_recovery_files(self):
+        for service in ("nginx", "uhttpd"):
+            with self.subTest(service=service):
+                case = InstallerTests()
+                case.setUp()
+                try:
+                    case.prepare("openwrt")
+                    result = case.run_install("nginx-async", HORATIO_FAIL_RESTORE=service)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("recovery was incomplete", result.stderr)
+                    backups = list(case.nginx.glob(".horatio-*"))
+                    self.assertEqual(len(backups), 1)
+                    self.assertIn(str(backups[0]), result.stderr)
+                    self.assertEqual((backups[0] / "config").read_text(), "# previous working config\n")
+                    self.assertEqual((backups[0] / "index").read_text(), "previous index\n")
+                    self.assertEqual((backups[0] / "uhttpd").read_text(), case.original_uci)
+                finally:
+                    case.doCleanups()
+
+    def test_missing_readiness_client_does_not_change_configuration(self):
+        self.prepare("openwrt")
+        (self.bin / "wget").unlink()
+        result = self.run_install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("wget is required", result.stderr)
+        self.assert_restored()
+        self.assertEqual(self.events(), [])
+
+    def test_missing_readiness_deadline_does_not_change_configuration(self):
+        self.prepare("openwrt")
+        (self.bin / "timeout").unlink()
+        result = self.run_install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("timeout is required", result.stderr)
+        self.assert_restored()
+        self.assertEqual(self.events(), [])
 
     def test_missing_nginx_after_package_command_does_not_change_configuration(self):
         self.prepare("openwrt", nginx=False)
@@ -220,7 +396,9 @@ class InstallerTests(unittest.TestCase):
         result = self.run_install("validate")
         self.assertNotEqual(result.returncode, 0)
         self.assert_restored()
-        self.assertFalse(any(e["command"] in ("uci", "uhttpd-service") for e in self.events()))
+        self.assertEqual([e["args"] for e in self.events() if e["command"] == "uci"],
+                         [["-q", "get", "nginx.global.uci_enable"]])
+        self.assertFalse(any(e["command"] == "uhttpd-service" for e in self.events()))
 
     def test_failed_first_proxy_restart_restores_luci_and_stops_proxy(self):
         self.prepare("openwrt")
@@ -230,8 +408,8 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
         service_calls = [(e["command"], e["args"]) for e in self.events()]
         self.assertIn(("nginx-service", ["stop"]), service_calls)
-        self.assertNotIn(("nginx-service", ["start"]), service_calls)
-        restored_restart = [e for e in self.events() if e["command"] == "uhttpd-service"][-1]
+        self.assertEqual(service_calls.count(("nginx-service", ["start"])), 1)
+        restored_restart = [e for e in self.events() if e["command"] == "uhttpd-service" and e["args"] == ["restart"]][-1]
         self.assertEqual(restored_restart["config"], json.loads(self.original_uci))
 
     def test_luci_restart_failure_restores_uci_without_restarting_nginx(self):

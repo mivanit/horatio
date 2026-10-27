@@ -47,7 +47,7 @@ function createCaptureState({ name, timestampId, headerSelector, durationFn }) {
       const hdr = document.querySelector(headerSelector);
       if (hdr) hdr.classList.remove('error');
     },
-    handleResponse(data) {
+    handleResponse(data, capturedAt = Date.now()) {
       if (data && data.status === 'in_progress') {
         if (!state.capturing) state.start();
         return;
@@ -60,7 +60,7 @@ function createCaptureState({ name, timestampId, headerSelector, durationFn }) {
       }
       state.clearError();
       if (data && Array.isArray(data)) {
-        state.lastCaptureTime = Date.now();
+        state.lastCaptureTime = capturedAt;
         renderUnifiedProcesses();
       }
     },
@@ -364,19 +364,17 @@ function fillHistoryGaps(count) {
   ];
 
   for (let i = 0; i < count; i++) {
-    arrays.forEach(arr => {
-      arr.push(null);
-      if (arr.length > historyLength) arr.shift();
-    });
+    // Gaps are unmeasured, so don't invent sample times for them. An in-flight
+    // poll may have finished during the pause and already added a real sample.
+    arrays.forEach(arr => pushHistory(arr, null, null));
 
     // Mark the slot as "not measured" so the ping loss band doesn't render the
     // gap as a 100%-loss outage.
-    pushHistory(history.pingGap, true);
+    pushHistory(history.pingGap, true, null);
 
     // GPU and per-drive disk arrays (dynamic)
     [...history.gpus, ...history.gpuMems, ...history.diskDriveReads, ...history.diskDriveWrites].forEach(arr => {
-      arr.push(null);
-      if (arr.length > historyLength) arr.shift();
+      pushHistory(arr, null, null);
     });
   }
   updatePingLossBand();
@@ -1406,7 +1404,7 @@ async function fetchSlowData() {
   // === DISK CAPTURE - runs independently, doesn't block above ===
   const useDiskCache = isCacheValid('diskProcesses');
   if (useDiskCache) {
-    diskCapture.handleResponse(getCache('diskProcesses'));
+    diskCapture.handleResponse(getCache('diskProcesses'), dataCache.diskProcesses.lastUpdate);
   } else {
     if (!diskCapture.capturing) diskCapture.start();
     safeFetch(`/api/disk-processes?duration=${diskDuration}`, [], getDiskTimeout())
@@ -1432,7 +1430,7 @@ async function fetchSlowData() {
   // === NETWORK CAPTURE - runs independently, doesn't block above ===
   const useNetworkCache = isCacheValid('networkProcesses');
   if (useNetworkCache) {
-    networkCapture.handleResponse(getCache('networkProcesses'));
+    networkCapture.handleResponse(getCache('networkProcesses'), dataCache.networkProcesses.lastUpdate);
   } else {
     if (!networkCapture.capturing) networkCapture.start();
     safeFetch(`/api/network-processes?duration=${nethogsDuration}`, [], getNethogsTimeout())
@@ -1832,7 +1830,6 @@ async function fetchDataOnce() {
             history.diskDriveWrites = drives.map(() => Array(historyLength).fill(null));
 
             // Recreate chart datasets: read (solid) and write (dashed) for each drive
-            charts.diskDrives.data.labels = generateTimeLabels();
             charts.diskDrives.data.datasets = [];
             drives.forEach((drive, i) => {
               const color = GPU_COLORS[i % GPU_COLORS.length];
@@ -2324,10 +2321,7 @@ pollSelectBtn.addEventListener('click', () => {
       localStorage.setItem('pollInterval', pollInterval);
 
       const timeCharts = [charts.cpu, charts.cpuCoresSpread, charts.mem, charts.swap, charts.gpu, charts.gpuMem, charts.net, charts.disk, charts.diskDrives, charts.ping];
-      timeCharts.forEach(chart => {
-        chart.data.labels = generateTimeLabels();
-        chart.update();
-      });
+      timeCharts.forEach(chart => chart.update());
 
       if (isConnected && pollingInterval) {
         clearInterval(pollingInterval);
@@ -2372,10 +2366,7 @@ historyLengthBtn.addEventListener('click', () => {
       resizeHistory(val);
 
       const timeCharts = [charts.cpu, charts.cpuCoresSpread, charts.mem, charts.swap, charts.gpu, charts.gpuMem, charts.net, charts.disk, charts.diskDrives, charts.ping];
-      timeCharts.forEach(chart => {
-        chart.data.labels = generateTimeLabels();
-        chart.update();
-      });
+      timeCharts.forEach(chart => chart.update());
     },
     custom: { type: 'int', min: 10, max: 1000, placeholder: 'samples' },
   });
@@ -2439,10 +2430,7 @@ historyLengthBtn.addEventListener('click', () => {
     resizeHistory(DEFAULT_HISTORY_LENGTH);
 
     const timeCharts = [charts.cpu, charts.cpuCoresSpread, charts.mem, charts.swap, charts.gpu, charts.gpuMem, charts.net, charts.disk, charts.diskDrives, charts.ping];
-    timeCharts.forEach(chart => {
-      chart.data.labels = generateTimeLabels();
-      chart.update();
-    });
+    timeCharts.forEach(chart => chart.update());
   }
 
   // Reset layout button handler
@@ -4068,22 +4056,25 @@ function createHistorySettingsPopup() {
   popup.style.top = (rect.bottom + 6) + 'px';
   popup.style.left = rect.left + 'px';
 
-  // Fetch current settings to populate inputs
-  loadHistorySettings();
+  // Defaults in the HTML are not the server's settings. Keep the form disabled
+  // until this popup's read succeeds so an early Confirm cannot overwrite them.
+  setHistorySettingsDisabled(popup, true);
+  popup.querySelector('#hs-status').textContent = 'Loading settings...';
+  loadHistorySettings(popup);
 
   // Wire up buttons
-  popup.querySelector('#hs-confirm').addEventListener('click', submitHistorySettings);
-  popup.querySelector('#hs-reset').addEventListener('click', resetHistorySettings);
+  popup.querySelector('#hs-confirm').addEventListener('click', () => submitHistorySettings(popup));
+  popup.querySelector('#hs-reset').addEventListener('click', () => resetHistorySettings(popup));
 
   // Close on outside click (delayed to avoid immediate trigger)
   setTimeout(() => {
-    document.addEventListener('mousedown', historySettingsOutsideClick);
+    if (historySettingsPopup === popup) document.addEventListener('mousedown', historySettingsOutsideClick);
   }, 0);
 }
 
-function closeHistorySettingsPopup() {
-  if (historySettingsPopup) {
-    historySettingsPopup.remove();
+function closeHistorySettingsPopup(popup = historySettingsPopup) {
+  if (popup && historySettingsPopup === popup) {
+    popup.remove();
     historySettingsPopup = null;
     document.removeEventListener('mousedown', historySettingsOutsideClick);
   }
@@ -4095,29 +4086,47 @@ function historySettingsOutsideClick(e) {
   }
 }
 
-async function loadHistorySettings() {
+function setHistorySettingsDisabled(popup, disabled) {
+  popup.querySelectorAll('input, button').forEach(el => { el.disabled = disabled; });
+}
+
+function fillHistorySettings(popup, data) {
+  popup.querySelector('#hs-interval').value = data.record_interval;
+  popup.querySelector('#hs-duration').value = data.sample_duration;
+  popup.querySelector('#hs-min-interval').value = data.min_record_interval;
+  popup.querySelector('#hs-ping-enabled').checked = data.ping_enabled;
+  popup.querySelector('#hs-processes-enabled').checked = !!data.processes_enabled;
+  popup.querySelector('#hs-process-count').value = data.process_count ?? '';
+}
+
+async function loadHistorySettings(popup = historySettingsPopup) {
+  if (!popup) return;
   const { data, ok } = await safeFetch('/api/history/settings', {});
-  if (!ok || !historySettingsPopup) return;
-  document.getElementById('hs-interval').value = data.record_interval;
-  document.getElementById('hs-duration').value = data.sample_duration;
-  document.getElementById('hs-min-interval').value = data.min_record_interval;
-  document.getElementById('hs-ping-enabled').checked = data.ping_enabled;
-  document.getElementById('hs-processes-enabled').checked = !!data.processes_enabled;
-  document.getElementById('hs-process-count').value = data.process_count ?? '';
+  if (historySettingsPopup !== popup) return;
+  const status = popup.querySelector('#hs-status');
+  if (!ok) {
+    status.textContent = 'Could not load settings. Close and reopen to retry.';
+    status.className = 'history-settings-status history-settings-status--error';
+    return;
+  }
+  fillHistorySettings(popup, data);
+  popup.settingsDefaults = data.defaults;
+  setHistorySettingsDisabled(popup, false);
+  status.textContent = '';
 
   if (!data.password_configured) {
-    const status = document.getElementById('hs-status');
     status.textContent = 'No password configured on server';
     status.className = 'history-settings-status history-settings-status--error';
   }
 }
 
-async function submitHistorySettings() {
-  const interval = document.getElementById('hs-interval').value;
-  const duration = document.getElementById('hs-duration').value;
-  const minInterval = document.getElementById('hs-min-interval').value;
-  const password = document.getElementById('hs-password').value;
-  const status = document.getElementById('hs-status');
+async function submitHistorySettings(popup = historySettingsPopup) {
+  if (!popup || historySettingsPopup !== popup || popup.querySelector('#hs-confirm').disabled) return;
+  const interval = popup.querySelector('#hs-interval').value;
+  const duration = popup.querySelector('#hs-duration').value;
+  const minInterval = popup.querySelector('#hs-min-interval').value;
+  const password = popup.querySelector('#hs-password').value;
+  const status = popup.querySelector('#hs-status');
 
   if (!password) {
     status.textContent = 'Password is required';
@@ -4129,11 +4138,15 @@ async function submitHistorySettings() {
   if (interval) body.record_interval = parseInt(interval);
   if (duration) body.sample_duration = parseInt(duration);
   if (minInterval !== '') body.min_record_interval = parseInt(minInterval);
-  body.ping_enabled = document.getElementById('hs-ping-enabled').checked;
-  body.processes_enabled = document.getElementById('hs-processes-enabled').checked;
-  const processCount = document.getElementById('hs-process-count').value;
+  body.ping_enabled = popup.querySelector('#hs-ping-enabled').checked;
+  body.processes_enabled = popup.querySelector('#hs-processes-enabled').checked;
+  const processCount = popup.querySelector('#hs-process-count').value;
   if (processCount) body.process_count = parseInt(processCount);
 
+  setHistorySettingsDisabled(popup, true);
+  status.textContent = 'Saving settings...';
+  status.className = 'history-settings-status history-settings-status--info';
+  let saved = false;
   try {
     const resp = await fetch('/api/history/settings', {
       method: 'POST',
@@ -4141,39 +4154,35 @@ async function submitHistorySettings() {
       body: JSON.stringify(body),
     });
     const data = await resp.json();
-    if (!historySettingsPopup) return;
+    if (historySettingsPopup !== popup) return;
 
     if (resp.ok) {
+      saved = true;
       status.textContent = 'Settings updated';
       status.className = 'history-settings-status history-settings-status--success';
-      document.getElementById('hs-password').value = '';
-      document.getElementById('hs-interval').value = data.record_interval;
-      document.getElementById('hs-duration').value = data.sample_duration;
-      document.getElementById('hs-min-interval').value = data.min_record_interval;
-      document.getElementById('hs-processes-enabled').checked = !!data.processes_enabled;
-      document.getElementById('hs-process-count').value = data.process_count ?? '';
-      setTimeout(closeHistorySettingsPopup, 1200);
+      popup.querySelector('#hs-password').value = '';
+      fillHistorySettings(popup, data);
+      setTimeout(() => closeHistorySettingsPopup(popup), 1200);
     } else {
       const msg = data.details ? data.details.join(', ') : data.error;
       status.textContent = msg;
       status.className = 'history-settings-status history-settings-status--error';
     }
   } catch (e) {
+    if (historySettingsPopup !== popup) return;
     status.textContent = 'Network error';
     status.className = 'history-settings-status history-settings-status--error';
+  } finally {
+    if (historySettingsPopup === popup && !saved) setHistorySettingsDisabled(popup, false);
   }
 }
 
-async function resetHistorySettings() {
-  const { data, ok } = await safeFetch('/api/history/settings', {});
-  if (!ok || !historySettingsPopup) return;
-  document.getElementById('hs-interval').value = data.defaults.record_interval;
-  document.getElementById('hs-duration').value = data.defaults.sample_duration;
-  document.getElementById('hs-min-interval').value = data.defaults.min_record_interval;
-  document.getElementById('hs-ping-enabled').checked = data.defaults.ping_enabled;
-  document.getElementById('hs-processes-enabled').checked = !!data.defaults.processes_enabled;
-  document.getElementById('hs-process-count').value = data.defaults.process_count ?? '';
-  const status = document.getElementById('hs-status');
+function resetHistorySettings(popup = historySettingsPopup) {
+  if (!popup || historySettingsPopup !== popup || popup.querySelector('#hs-confirm').disabled || !popup.settingsDefaults) return;
+  // The initial GET includes defaults, so Reset needs no second request that
+  // could finish after the user edits or closes this form.
+  fillHistorySettings(popup, popup.settingsDefaults);
+  const status = popup.querySelector('#hs-status');
   status.textContent = 'Defaults loaded \u2014 enter password and confirm';
   status.className = 'history-settings-status history-settings-status--info';
 }

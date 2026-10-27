@@ -52,7 +52,7 @@ const makeChart = () => ({ data: { datasets: [{ data: [] }, { data: [] }] }, opt
 function liveContext(ids) {
   const dom = makeDOM(ids), statuses = {}, errors = [];
   const context = vm.createContext({
-    ...dom, statuses, errors, historyLength: 3, dataCache: {},
+    ...dom, statuses, errors, historyLength: 3, pollInterval: 2000, dataCache: {},
     thresholds: { gpu_util_percent: 80, gpu_memory_percent: 80, temp_celsius: 60, ping_ms: 100 },
     GPU_COLORS: ['#123456'], getCssColor: () => '#123456',
     updateCardNoData: (id, ok) => { statuses[id] = ok; }, updateCardWarning() {},
@@ -534,9 +534,264 @@ function testPingLoss() {
   assert.deepEqual(context.errors, []);
 }
 
+async function testCaptureCacheAge() {
+  let now = 103000, captureError = false;
+  const calls = {};
+  const context = vm.createContext({
+    Date: { now: () => now }, console: { error() {}, warn() {} },
+    document: { getElementById: () => null, querySelector: () => null },
+    setInterval: () => 1, clearInterval() {},
+    nethogsDuration: 3, diskDuration: 1, API_BASE: '/api/4',
+    getDiskTimeout: () => 6500, getNethogsTimeout: () => 9500,
+    renderUnifiedProcesses() {}, renderGpuInfo() {}, renderDrives() {}, renderIpInfo() {},
+    renderMail() {}, renderHardware() {}, renderDriveHealth() {}, renderSystemInfo() {},
+    async safeFetch(url) {
+      calls[url] = (calls[url] || 0) + 1;
+      const data = url.includes('processes')
+        ? captureError ? { error: 'capture failed' } : [{ pid: 100, name: 'worker' }]
+        : url.endsWith('/fs') ? [] : {};
+      return { ok: true, data };
+    },
+  });
+  evaluate(context,
+    between(config, 'const dataCache =', '// The CPU core temperatures') +
+    between(config, 'function formatTimeAgo', 'function updateCacheDisplay') +
+    between(app, 'function createCaptureState', '// Unified processes table state') +
+    between(app, 'async function fetchSlowData', '// One poll at a time'));
+  await context.fetchSlowData();  // Initial captures complete three seconds after startup.
+  const timestamp = name => evaluate(context, `${name}Capture.getTimestamp()`);
+  const capturedAt = name => evaluate(context, `${name}Capture.lastCaptureTime`);
+  now = 130000;  // The regular slow poll reuses a still-valid 27-second-old result.
+  assert.equal(timestamp('network'), '27s ago');
+  await context.fetchSlowData();
+  for (const name of ['network', 'disk']) {
+    assert.equal(timestamp(name), '27s ago', 'cache reuse preserves the capture age');
+    assert.equal(capturedAt(name), 103000);
+    const url = `/api/${name}-processes?duration=${name === 'network' ? 3 : 1}`;
+    assert.equal(calls[url], 1, 'the cached poll did not perform another capture');
+  }
+  now = 163000;
+  await context.fetchSlowData();
+  assert.equal(timestamp('network'), '0s ago', 'a fresh capture advances the timestamp');
+  assert.equal(capturedAt('disk'), now);
+  captureError = true;
+  now = 200000;
+  await context.fetchSlowData();
+  for (const name of ['network', 'disk']) {
+    assert.equal(capturedAt(name), 163000, 'errors do not replace the last successful capture');
+    assert.equal(evaluate(context, `${name}Capture.error`), true);
+    assert.equal(evaluate(context, `${name}Capture.capturing`), false);
+  }
+}
+
+// Popup-local elements matter here: a closed popup's pending request must not
+// resolve global IDs against a newly opened form. Inputs derive from the real HTML.
+function historySettingsContext() {
+  const popups = [], reads = [], writes = [], timers = [];
+  class Element {
+    constructor(tag) { this.tag = tag; this.style = {}; this.events = {}; this.value = ''; this.checked = false; this.disabled = false; }
+    set value(value) { this._value = String(value); }
+    get value() { return this._value; }
+    set innerHTML(html) {
+      this.children = new Map();
+      for (const match of html.matchAll(/<(input|button|div)\b([^>]*\bid="([^"]+)"[^>]*)>/g)) {
+        const el = new Element(match[1]);
+        el.checked = /\bchecked\b/.test(match[2]);
+        el.disabled = /\bdisabled\b/.test(match[2]);
+        this.children.set(match[3], el);
+      }
+    }
+    querySelector(selector) { return this.children.get(selector.slice(1)); }
+    querySelectorAll() { return [...this.children.values()].filter(el => ['input', 'button'].includes(el.tag)); }
+    addEventListener(type, callback) { this.events[type] = callback; }
+    click() { if (!this.disabled) return this.events.click?.(); }
+    remove() { this.removed = true; }
+    getBoundingClientRect() { return { left: 0, bottom: 10 }; }
+  }
+  const defer = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+  const context = vm.createContext({
+    document: {
+      createElement: tag => new Element(tag), body: { appendChild: popup => popups.push(popup) },
+      querySelector: () => new Element('label'),
+      getElementById: id => popups.findLast(popup => !popup.removed)?.children.get(id),
+      addEventListener() {}, removeEventListener() {},
+    },
+    safeFetch() { const pending = defer(); reads.push(pending); return pending.promise; },
+    fetch(url, options) { const pending = defer(); writes.push({ ...pending, body: JSON.parse(options.body) }); return pending.promise; },
+    setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; },
+  });
+  evaluate(context, between(app, 'let historySettingsPopup =', '// Middle-click on History label'));
+  const current = () => evaluate(context, 'historySettingsPopup');
+  const open = () => { context.createHistorySettingsPopup(); return current(); };
+  const finishRead = async (index, data, ok = true) => {
+    reads[index].resolve({ ok, data });
+    await new Promise(setImmediate);
+  };
+  const finishWrite = (index, data, ok = true) => writes[index].resolve({ ok, json: async () => data });
+  return { context, reads, writes, timers, current, open, finishRead, finishWrite };
+}
+
+const historySettings = {
+  record_interval: 600, sample_duration: 10, min_record_interval: 60,
+  ping_enabled: false, processes_enabled: true, process_count: 10, password_configured: true,
+  defaults: { record_interval: 300, sample_duration: 5, min_record_interval: 30,
+    ping_enabled: true, processes_enabled: false, process_count: 8 },
+};
+
+async function testHistorySettingsLoading() {
+  const h = historySettingsContext();
+  let popup = h.open();
+  const field = id => popup.querySelector('#hs-' + id);
+  assert(field('confirm').disabled && field('interval').disabled);
+  field('password').value = 'test';
+  await h.context.submitHistorySettings();  // Also guard direct invocation before GET completes.
+  assert.equal(h.writes.length, 0, 'unloaded checkbox defaults cannot be submitted');
+  await h.finishRead(0, {}, false);
+  assert(field('status').textContent.includes('Could not load settings'));
+  assert(field('confirm').disabled);
+  await h.context.submitHistorySettings();
+  assert.equal(h.writes.length, 0, 'a failed read cannot silently enable Confirm');
+  h.context.closeHistorySettingsPopup();
+  popup = h.open();
+  await h.finishRead(1, historySettings);
+  assert(!field('confirm').disabled && !field('interval').disabled);
+  field('interval').value = '60';
+  field('password').value = 'test';
+  const pending = field('confirm').click();
+  assert.deepEqual(h.writes[0].body, { password: 'test', record_interval: 60, sample_duration: 10,
+    min_record_interval: 60, ping_enabled: false, processes_enabled: true, process_count: 10 });
+  assert(field('confirm').disabled, 'a pending save cannot be submitted twice');
+  await h.context.submitHistorySettings();
+  assert.equal(h.writes.length, 1);
+  h.finishWrite(0, { error: 'Incorrect password' }, false);
+  await pending;
+  assert(!field('confirm').disabled, 'a failed save permits correction and retry');
+  assert.equal(field('interval').value, '60');
+  assert.equal(field('status').textContent, 'Incorrect password');
+  field('reset').click();
+  assert.equal(h.reads.length, 2, 'Reset uses the defaults included in the initial read');
+  assert.equal(field('interval').value, '300');
+  assert.equal(field('processes-enabled').checked, false);
+}
+
+async function testHistorySettingsPopupOwnership() {
+  const h = historySettingsContext();
+  const first = h.open();
+  h.context.closeHistorySettingsPopup();
+  const second = h.open();
+  await h.finishRead(1, historySettings);
+  second.querySelector('#hs-interval').value = '120';
+  await h.finishRead(0, { ...historySettings, record_interval: 86400 });
+  assert.equal(second.querySelector('#hs-interval').value, '120', 'old GET cannot overwrite a reopened form');
+  second.querySelector('#hs-password').value = 'test';
+  const oldSave = second.querySelector('#hs-confirm').click();
+  h.context.closeHistorySettingsPopup();
+  const third = h.open();
+  await h.finishRead(2, historySettings);
+  third.querySelector('#hs-password').value = 'keep this';
+  h.finishWrite(0, { ...historySettings, record_interval: 120 });
+  await oldSave;
+  assert.equal(h.current(), third);
+  assert.equal(third.querySelector('#hs-password').value, 'keep this', 'old POST cannot clear a new password');
+  assert.equal(third.querySelector('#hs-interval').value, '600');
+  assert.equal(h.timers.filter(t => t.delay === 1200).length, 0, 'old POST does not schedule a close');
+  const saved = third.querySelector('#hs-confirm').click();
+  h.finishWrite(1, historySettings);
+  await saved;
+  assert.equal(third.querySelector('#hs-password').value, '');
+  assert(third.querySelector('#hs-confirm').disabled, 'successful form stays disabled until it closes');
+  h.context.closeHistorySettingsPopup();
+  const fourth = h.open();
+  h.timers.filter(t => t.delay === 1200).forEach(t => t.callback());
+  assert.equal(h.current(), fourth, 'an old success timer cannot close the new popup');
+  await h.finishRead(3, historySettings);
+  assert(!fourth.querySelector('#hs-confirm').disabled);
+  assert(first.removed && second.removed && third.removed);
+}
+
+function testLiveSampleTimes() {
+  const dom = makeDOM(['poll-select']);
+  let click, picker, now = 100000;
+  dom.elements.get('poll-select').addEventListener = (_, callback) => { click = callback; };
+  const context = vm.createContext({
+    ...dom, historyLength: 3, pollInterval: 2000, MIN_POLL_INTERVAL: 1000,
+    isConnected: false, pollingInterval: null, Date: { now: () => now },
+    getCssColor: () => '#123456', localStorage: { setItem() {} },
+    createDropdownPicker: (_, options) => { picker = options; },
+  });
+  evaluate(context, between(charts, '// Data stores', '// Initialize charts'));
+  evaluate(context, `
+    function makeLiveChart(data) {
+      const config = buildChart({ data: { labels: [], datasets: [{ data }] } });
+      return { ...config, update() { config.plugins.forEach(plugin => plugin.beforeUpdate(this)); } };
+    }
+    const charts = {
+      cpu: makeLiveChart(history.cpu), mem: makeLiveChart(history.mem),
+      cpuCoresSpread: makeLiveChart(history.cpuCoresMin), swap: makeLiveChart(history.swap),
+      net: makeLiveChart(history.netIn), disk: makeLiveChart(history.diskRead),
+      gpu: makeLiveChart([]), gpuMem: makeLiveChart([]), diskDrives: makeLiveChart([]),
+      ping: makeLiveChart([]),
+    };
+  `);
+  evaluate(context,
+    between(app, 'function fillHistoryGaps', '// Render functions for cached cards') +
+    between(app, 'const pollSelectBtn =', '// Set up process count selector'));
+  const labels = name => plain(evaluate(context, `charts.${name}.data.labels`));
+  const values = name => plain(evaluate(context, `history.${name}`));
+  for (let i = 0; i < 3; i++) {
+    now = 100000 + i * 2000;
+    evaluate(context, `pushHistory(history.cpu, ${10 + i}); pushHistory(history.mem, ${20 + i});`);
+  }
+  click();
+  picker.onSelect(30);
+  assert.deepEqual(labels('cpu'), [4, 2, 0], 'changing cadence preserves old sample ages');
+  assert.deepEqual(values('cpu'), [10, 11, 12], 'changing cadence preserves every value');
+  now = 134000;
+  evaluate(context, 'pushHistory(history.cpu, 40); charts.cpu.update(); charts.mem.update();');
+  assert.deepEqual(labels('cpu'), [32, 30, 0], 'new and old cadences coexist');
+  assert.deepEqual(labels('mem'), [34, 32, 30], 'an endpoint that missed a poll keeps its own sample times');
+  assert.deepEqual(values('cpu'), [11, 12, 40]);
+
+  evaluate(context, 'resizeHistory(5); charts.cpu.update();');
+  assert.deepEqual(labels('cpu'), ['', '', 32, 30, 0], 'resizing pads times without redating samples');
+  picker.onSelect(1);
+  now = 135000;
+  evaluate(context, 'pushHistory(history.cpu, 50); charts.cpu.update();');
+  assert.deepEqual(labels('cpu'), ['', 33, 31, 1, 0]);
+  evaluate(context, 'resizeHistory(3); charts.cpu.update();');
+  assert.deepEqual(labels('cpu'), [31, 1, 0]);
+  assert.deepEqual(values('cpu'), [12, 40, 50]);
+
+  // A request started before Pause can still complete during it. Reconnect
+  // gaps are unmeasured and must not place synthetic dates before that result.
+  now = 138000;
+  evaluate(context, 'pushHistory(history.cpu, 60);');
+  now = 140000;
+  evaluate(context, 'fillHistoryGaps(2); charts.cpu.update();');
+  assert.deepEqual(labels('cpu'), [2, '', '']);
+  assert.deepEqual(values('cpu'), [60, null, null]);
+  evaluate(context, 'pushHistory(history.cpu, 70); charts.cpu.update();');
+  assert.deepEqual(labels('cpu'), ['', '', 0]);
+
+  // Dynamically created series use the same clock; the ping shading is a
+  // derived dataset and must not hide the actual measured (even failed) ping.
+  evaluate(context, `
+    history.pings = [Array(historyLength).fill(null)];
+    charts.ping.data.datasets = [{ label: 'loss', data: [1, 1, 1] }, { data: history.pings[0] }];
+    pushHistory(history.pings[0], null); charts.ping.update();
+  `);
+  assert.deepEqual(labels('ping'), ['', '', 0], 'a measured ping failure still has a sample time');
+  evaluate(context, `
+    const bars = buildChart({ type: 'bar', data: { labels: ['Core 0'], datasets: [] } });
+    bars.plugins.forEach(plugin => plugin.beforeUpdate(bars));
+  `);
+  assert.deepEqual(plain(evaluate(context, 'bars.data.labels')), ['Core 0'], 'categorical charts retain their labels');
+}
+
 (async () => {
   for (const test of [testFetchBodyTimeout, testGpuRecovery, testGpuUnavailableReadings,
-    testDriveTemperatureFreshness, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss]) {
+    testDriveTemperatureFreshness, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
+    testCaptureCacheAge, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes]) {
     await test();
     console.log(`PASS ${test.name}`);
   }
