@@ -409,6 +409,109 @@ def test_read_history_unit() -> None:
         server.HISTORY_FILE = orig_history_file
 
 
+def test_append_history_unit() -> None:
+    """Appending after an interrupted write must preserve old and new records."""
+    from unittest.mock import mock_open, patch
+    import server
+
+    print(f"\n{BOLD}History append recovery{RESET}\n")
+    with tempfile.TemporaryDirectory() as tmp, \
+            patch.object(server, "LOGS_DIR", Path(tmp)), \
+            patch.object(server, "HISTORY_FILE", Path(tmp) / "history.jsonl"):
+        hist = server.HISTORY_FILE
+        before = _history_line(2, id="before").encode()
+        complete = _history_line(1, id="complete").encode().rstrip(b"\n")
+        recovered = json.loads(_history_line(0.1, id="recovered"))
+        following = json.loads(_history_line(0, id="following"))
+
+        def readable_ids() -> tuple[list[str], int]:
+            result = server._read_history(24)
+            assert isinstance(result, tuple), result
+            return [row["id"] for row in result[0]], result[1]
+
+        for label, original, expected, skipped in [
+            ("missing", None, [], 0),
+            ("empty", b"", [], 0),
+            ("terminated", before, ["before"], 0),
+            ("missing newline", before + complete, ["before", "complete"], 0),
+            ("partial JSON", before + b'{"timestamp":"2026-', ["before"], 1),
+            ("partial UTF-8", before + b'{"name":"\xe2\x82', ["before"], 1),
+        ]:
+            if original is None:
+                hist.unlink(missing_ok=True)
+            else:
+                hist.write_bytes(original)
+            server.append_history_record(recovered)
+            server.append_history_record(following)
+            prefix = original or b""
+            separator = b"\n" if prefix and not prefix.endswith(b"\n") else b""
+            suffix = b"".join((json.dumps(row) + "\n").encode() for row in (recovered, following))
+            check(hist.read_bytes() == prefix + separator + suffix,
+                  f"{label}: append preserves every existing byte")
+            check(readable_ids() == (expected + ["recovered", "following"], skipped),
+                  f"{label}: both acknowledged appends remain readable")
+
+        # A real short write, isolated in a child so the test runner's files and
+        # signal disposition are unaffected. Repeat it to cover failed recovery.
+        hist.write_bytes(before)
+        short_write = '''
+import errno, resource, signal, sys
+from pathlib import Path
+import server
+server.LOGS_DIR = Path(sys.argv[1])
+server.HISTORY_FILE = server.LOGS_DIR / "history.jsonl"
+limit = server.HISTORY_FILE.stat().st_size + 80
+signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+try:
+    server.append_history_record({"timestamp": "2026-01-01T00:00:00+00:00", "pad": "x" * 8192})
+except OSError as exc:
+    if exc.errno != errno.EFBIG:
+        raise
+else:
+    raise AssertionError("file-size limit did not fail the append")
+'''
+        for attempt in range(2):
+            prior = hist.read_bytes()
+            result = subprocess.run([sys.executable, "-c", short_write, tmp],
+                                    cwd=Path(__file__).parent, capture_output=True, text=True, timeout=10)
+            partial = hist.read_bytes()
+            check(result.returncode == 0 and partial.startswith(prior)
+                  and len(partial) == len(prior) + 80 and not partial.endswith(b"\n"),
+                  f"short write {attempt + 1}: real failure preserves the prior bytes", result.stderr)
+        server.append_history_record(recovered)
+        server.append_history_record(following)
+        check(hist.read_bytes().startswith(partial + b"\n")
+              and readable_ids() == (["before", "recovered", "following"], 2),
+              "repeated short writes: recovery keeps old and both subsequent records")
+
+        for failure in ("seek", "read", "short-read"):
+            prior = hist.read_bytes()
+            opener = mock_open()
+            handle = opener.return_value
+            handle.seek.return_value = len(prior)
+            if failure == "short-read":
+                handle.read.return_value = b""
+            else:
+                getattr(handle, failure).side_effect = OSError("injected tail inspection failure")
+            rejected = False
+            with patch("server.open", opener, create=True):
+                try:
+                    server.append_history_record(recovered)
+                except OSError:
+                    rejected = True
+            check(rejected and not handle.write.called and hist.read_bytes() == prior,
+                  f"tail {failure} failure refuses to append or alter history")
+
+        prior = hist.read_bytes()
+        rejected = False
+        try:
+            server.append_history_record({"invalid": object()})
+        except TypeError:
+            rejected = True
+        check(rejected and hist.read_bytes() == prior, "serialization failure leaves history untouched")
+
+
 def test_rate_clamp_unit() -> None:
     """Rate caps: _cfg_num, _clamp_rate, clamp_record_rates, and the read path."""
     print(f"\n{BOLD}rate clamp unit tests{RESET}\n")
@@ -1889,6 +1992,7 @@ def test_regression_suites() -> None:
 def main() -> int:
     global passes, fails
     test_read_history_unit()
+    test_append_history_unit()
     test_rate_clamp_unit()
     test_history_fetch_js()
     test_auth_throttle_unit()

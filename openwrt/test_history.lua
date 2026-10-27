@@ -21,8 +21,8 @@ local function check(cond, label, detail)
 end
 
 -- Minimal luci.jsonc shim: parses flat objects with string/number values
--- (all the fixtures need). Returns nil for anything else, like the real
--- library does for invalid input.
+-- (all the fixtures need). Check delimiters and unescaped fixture strings so
+-- two fused records cannot be accepted as one string-valued record.
 package.preload["luci.jsonc"] = function()
     local J = {}
     function J.parse(s)
@@ -30,16 +30,24 @@ package.preload["luci.jsonc"] = function()
         local body = s:match("^%s*{(.*)}%s*$")
         if not body then return nil end
         local t = {}
-        for k, v in body:gmatch('"([^"]-)"%s*:%s*([^,]+)') do
-            v = v:match("^%s*(.-)%s*$")
-            local str = v:match('^"(.*)"$')
-            if str then
+        while not body:match("^%s*$") do
+            local k, value_start = body:match('^%s*"([^"\\%c]*)"%s*:%s*()')
+            if not k then return nil end
+            body = body:sub(value_start)
+            local str, value_end = body:match('^"([^"\\%c]*)"()')
+            if value_end then
                 t[k] = str
             else
-                local n = tonumber(v)
+                local raw
+                raw, value_end = body:match("^([^,%s]+)()")
+                local n = tonumber(raw)
                 if n == nil then return nil end
                 t[k] = n
             end
+            body = body:sub(value_end)
+            if body:match("^%s*$") then break end
+            body = body:match("^%s*,%s*(.+)$")
+            if not body then return nil end
         end
         if next(t) == nil then return nil end
         return t
@@ -566,6 +574,104 @@ for _, failure in ipairs({"open", "full-device", "close", "rename"}) do
         check(recovered and count_records(path) == expected + 1 and contents(stamp) ~= previous,
             method .. " releases the lock and can recover from timestamp " .. failure .. " failure")
     end
+end
+
+-- 19. A short write or interrupted process may leave an unterminated final
+-- line. Keep every existing byte and make the next acknowledged record readable.
+for _, kind in ipairs({"complete", "partial-json", "partial-utf8"}) do
+    local h, _, path, dir = fixture("torn-" .. kind)
+    local tail = line(0.5):sub(1, -2)
+    if kind == "partial-json" then tail = '{"timestamp":"' .. iso(0.5) .. '","v":' end
+    if kind == "partial-utf8" then
+        tail = '{"timestamp":"' .. iso(0.5) .. '","pad":"' .. string.char(0xe2, 0x82)
+    end
+    local original = line(1) .. tail
+    write(path, original)
+    local result = h.record_now()
+    local after = original .. "\n" .. jsonc.stringify(result.record) .. "\n"
+    local parsed = h.get(24)
+    local expected = kind == "complete" and 3 or 2
+    check(result.status == "ok" and contents(path) == after
+        and parsed.count == expected and parsed.skipped_lines == (kind == "complete" and 0 or 1),
+        kind .. " tail is preserved byte-for-byte and the next record is readable")
+    os.remove(dir .. "/dashboard-last-record")
+    result = h.record_now()
+    parsed = h.get(24)
+    check(result.status == "ok" and contents(path) == after .. jsonc.stringify(result.record) .. "\n"
+        and parsed.count == expected + 1,
+        kind .. " recovery leaves subsequent appends readable without extra separators")
+end
+
+-- Repeated interruptions must not alter earlier valid or partial lines either.
+do
+    local h, _, path, dir = fixture("torn-repeated")
+    write(path, line(1) .. '{"timestamp":')
+    local expected, succeeded = contents(path), true
+    for i = 1, 2 do
+        local result = h.record_now()
+        expected = expected .. "\n" .. jsonc.stringify(result.record) .. "\n"
+        succeeded = succeeded and result.status == "ok" and contents(path) == expected
+        os.remove(dir .. "/dashboard-last-record")
+        if i == 1 then
+            local f = assert(io.open(path, "ab"))
+            assert(f:write('{"v":')); assert(f:close())
+            expected = expected .. '{"v":'
+        end
+    end
+    local parsed = h.get(24)
+    check(succeeded and parsed.count == 3 and parsed.skipped_lines == 2,
+        "repeated torn tails retain all bytes and every acknowledged record")
+end
+
+-- 20. Uncertain inspection must not write even a separator. A retry in another
+-- process also verifies that inspection failures release the writer lock.
+for _, failure in ipairs({"size", "tail-seek", "read", "eof", "append-seek"}) do
+    local h, _, path = fixture("inspect-" .. failure)
+    local original = line(1):sub(1, -2)
+    write(path, original)
+    local open, injected, closed, wrote, seeks = io.open, false, false, false, 0
+    io.open = function(name, mode)
+        local f, err = open(name, mode)
+        if f and name == path and mode == "a+" then
+            return wrap_file(f, {
+                seek = function(_, ...)
+                    seeks = seeks + 1
+                    local target = ({size = 1, ["tail-seek"] = 2, ["append-seek"] = 3})[failure]
+                    if seeks == target then injected = true; return nil, "injected seek failure" end
+                    return f:seek(...)
+                end,
+                read = function(_, ...)
+                    if failure == "read" or failure == "eof" then
+                        injected = true
+                        if failure == "read" then return nil, "injected read failure" end
+                        return nil
+                    end
+                    return f:read(...)
+                end,
+                write = function(_, ...) wrote = true; return f:write(...) end,
+                close = function() closed = true; return f:close() end,
+            })
+        end
+        return f, err
+    end
+    local ok, result = pcall(h.record_now)
+    io.open = open
+    local unchanged = contents(path) == original
+    local recovered = in_child(function() assert(h.record_now().status == "ok") end)
+    check(ok and injected and closed and not wrote and result.error ~= nil
+        and unchanged and recovered and h.get(24).count == 2,
+        failure .. " inspection failure preserves the tail and permits a safe retry")
+end
+
+do
+    local h, _, path = fixture("torn-serialization")
+    local original, stringify = line(1) .. '{"v":', jsonc.stringify
+    write(path, original)
+    jsonc.stringify = function() return nil end
+    local result = h.record_now()
+    jsonc.stringify = stringify
+    check(result.error ~= nil and contents(path) == original,
+        "serialization fails before any separator is appended to a torn tail")
 end
 
 os.execute("rm -rf " .. quote(base))

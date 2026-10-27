@@ -323,9 +323,10 @@ function pingLoss(entry) {
   return entry.loss ?? 0;                               // partial / ok (legacy record: no loss = 0)
 }
 
-// % of the window a target was up (non-null), for the live footer.
-function pingWinUp(arr) {
-  return arr.length ? Math.round(arr.filter(v => v != null).length / arr.length * 100) : 0;
+// % up among measured slots; null when the window contains only gaps.
+function pingWinUp(arr, gaps) {
+  const measured = arr.filter((_, i) => !gaps[i]);
+  return measured.length ? Math.round(measured.filter(v => v != null).length / measured.length * 100) : null;
 }
 
 // Canvas hatch for one slot: faint fill (partial) + solid stripes (full outage),

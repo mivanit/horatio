@@ -1520,9 +1520,20 @@ def append_history_record(record: dict[str, Any]) -> None:
     worker threads; the lock keeps two records from interleaving into one torn
     line (a record over the 8 KiB text buffer is more than one write()).
     """
+    line = json.dumps(record).encode("utf-8") + b"\n"
     LOGS_DIR.mkdir(exist_ok=True)
-    with _history_write_lock, open(HISTORY_FILE, "a") as f:
-        f.write(json.dumps(record) + "\n")
+    with _history_write_lock, open(HISTORY_FILE, "a+b") as f:
+        if f.seek(0, os.SEEK_END):
+            f.seek(-1, os.SEEK_END)
+            tail = f.read(1)
+            if not tail:
+                raise OSError("Cannot read history tail")
+            # Preserve a failed append's bytes, even an incomplete UTF-8 code
+            # point. Separate them so the next valid record stays readable.
+            if tail != b"\n":
+                line = b"\n" + line
+        f.seek(0, os.SEEK_END)
+        f.write(line)
         f.flush()
     logger.info("History record saved: %s", record.get("timestamp"))
 

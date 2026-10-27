@@ -2118,10 +2118,7 @@ async function fetchDataOnce() {
         const ms = data?.latency_ms;
         if (history.pings[i]) pushHistory(history.pings[i], ms ?? null);
         const el = document.getElementById('ping-value-' + i);
-        if (el) {
-          if (ms !== undefined) animateValue(el, ms, '', 1);
-          else el.textContent = '--';
-        }
+        if (el) el.textContent = ms != null ? ms.toFixed(1) : '--';
         if (ms != null) worstMs = Math.max(worstMs, ms);
       });
       // This slot was actually measured (see history.pingGap).
@@ -2283,9 +2280,12 @@ function applyConfigToDom() {
   charts.ping.options.plugins.tooltip = pingTooltipCfg(
     (i) => targets.map((t, k) => {
       const v = history.pings[k][i];
-      return { name: t.address, color: pingColors[k], down: v == null, cur: v, min: null, max: null, pct: null };
+      return { name: t.address, color: pingColors[k], down: v == null && !history.pingGap[i], cur: v, min: null, max: null, pct: null };
     }),
-    () => 'last ' + historyLength + ': ' + targets.map((t, k) => `${t.address} ${pingWinUp(history.pings[k])}% up`).join('  ·  ')
+    () => 'last ' + historyLength + ': ' + targets.map((t, k) => {
+      const up = pingWinUp(history.pings[k], history.pingGap);
+      return `${t.address} ${up == null ? '--' : up + '%'} up`;
+    }).join('  ·  ')
   );
   charts.ping.update();
 }

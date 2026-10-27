@@ -206,13 +206,35 @@ local function append_record(record)
         io.stderr:write("[dashboard] history append FAILED: " .. err .. "\n")
         return false, err
     end
-    local f, open_err = io.open(HISTORY_FILE, "a")
+    local f, open_err = io.open(HISTORY_FILE, "a+")
     if not f then
         local err = "cannot open " .. HISTORY_FILE .. ": " .. tostring(open_err)
         io.stderr:write("[dashboard] history append FAILED: " .. err .. "\n")
         return false, err
     end
-    local written, write_err = f:write(json_line .. "\n")
+    -- A failed/interrupted append can leave a partial final line. Preserve it,
+    -- but separate the next record so that one bad line cannot swallow it.
+    -- Inspect through the same locked append handle; uncertainty must not write.
+    local function inspection_failed(err)
+        f:close()
+        return false, "cannot inspect history tail: " .. tostring(err)
+    end
+    local previous_size, inspect_err = f:seek("end")
+    if not previous_size then return inspection_failed(inspect_err) end
+    local separator = ""
+    if previous_size > 0 then
+        local position, seek_err = f:seek("set", previous_size - 1)
+        if not position then return inspection_failed(seek_err) end
+        local last, read_err = f:read(1)
+        if read_err or not last or #last ~= 1 then
+            return inspection_failed(read_err or "unexpected end of history file")
+        end
+        if last ~= "\n" then separator = "\n" end
+        -- An update stream needs a seek between reading and writing.
+        position, seek_err = f:seek("end")
+        if not position then return inspection_failed(seek_err) end
+    end
+    local written, write_err = f:write(separator .. json_line .. "\n")
     local size, seek_err = f:seek("end")
     local closed, close_err = f:close()
     if not written or not size or not closed then

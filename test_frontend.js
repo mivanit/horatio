@@ -409,6 +409,89 @@ async function testStartupPolling() {
   }
 }
 
+function testPingDisplay() {
+  const context = liveContext(['ping-value', 'ping-legend']);
+  const tooltip = { style: {} };
+  context.dashboardConfig = { ping_targets: [{ address: 'example.test' }] };
+  context.DEFAULT_PING_TARGETS = [];
+  context.charts = { ping: makeChart() };
+  context.charts.ping.options.plugins = {};
+  context.charts.ping.canvas = { getBoundingClientRect: () => ({ left: 0, top: 0 }) };
+  context.pingBandPattern = () => 'hatch';
+  context.escapeHtml = String;
+  context.window = { scrollX: 0, scrollY: 0 };
+  context._ensurePingTooltip = () => tooltip;
+  evaluate(context,
+    between(config, 'function pingWinUp', '// Canvas hatch') +
+    between(config, 'function pingRowsHTML', 'function _ensurePingTooltip') +
+    between(config, 'function pingTooltipCfg', '// History feature constants') +
+    between(app, 'function fillHistoryGaps', '// Render functions for cached cards') +
+    between(app, 'function applyConfigToDom', '// Load config, discover endpoints') +
+    'function tickPing() {' + between(app, "  guard('ping',", "  guard('processes',") + '}');
+  context.applyConfigToDom();
+  const hover = i => {
+    context.charts.ping.options.plugins.tooltip.external({
+      chart: context.charts.ping,
+      tooltip: { opacity: 1, dataPoints: [{ dataIndex: i }], caretX: 0, caretY: 0 },
+    });
+    return tooltip.innerHTML;
+  };
+  const expectTooltip = (i, value, uptime) => {
+    const html = hover(i);
+    assert(html.includes(`>${value}</span>`), `slot ${i} should show ${value}: ${html}`);
+    assert(html.includes(`example.test ${uptime} up</div>`), `uptime should be ${uptime}: ${html}`);
+  };
+  const tick = ms => {
+    context.ping = { ok: true, data: { targets: {
+      'example.test': ms == null ? { error: 'timeout' } : { latency_ms: ms },
+    } } };
+    context.tickPing();
+  };
+  let now = 1950, frames = [];
+  context.performance.now = () => now;
+  context.requestAnimationFrame = callback => frames.push(callback);
+  const frame = at => {
+    now = at;
+    const pending = frames;
+    frames = [];
+    pending.forEach(callback => callback(now));
+  };
+  const label = () => context.elements.get('ping-value-0').textContent;
+
+  expectTooltip(0, '—', '--');  // No measurement yet, so uptime is unknown.
+  tick(20);
+  expectTooltip(1, '—', '100%');  // Initial padding is not a failed ping.
+  expectTooltip(2, '20ms', '100%');
+  frame(1966);
+  now = 2020;  // A quick failure follows a slow poll before its animation ends.
+  tick(null);
+  assert.equal(label(), '--');
+  expectTooltip(2, 'down', '50%');
+  frame(2350);
+  assert.equal(label(), '--', 'old frames cannot restore latency after a measured failure');
+  assert.equal(evaluate(context, 'history.pings[0].at(-1)'), null);
+  tick(0);
+  assert.equal(label(), '0.0', 'zero latency is a successful reading');
+  expectTooltip(2, '0ms', '67%');
+
+  evaluate(context, 'resizeHistory(5)');
+  expectTooltip(0, '—', '67%');  // New padding does not change the denominator.
+  expectTooltip(3, 'down', '67%');
+  evaluate(context, 'fillHistoryGaps(2)');
+  expectTooltip(3, '—', '67%');  // Pause/reconnect gaps are also unmeasured.
+  expectTooltip(1, 'down', '67%');
+  evaluate(context, 'resizeHistory(3)');
+  expectTooltip(0, '0ms', '100%');
+  expectTooltip(1, '—', '100%');
+  evaluate(context, 'fillHistoryGaps(3)');
+  expectTooltip(2, '—', '--');  // Every measured sample has now aged out.
+  tick(null);
+  expectTooltip(2, 'down', '0%');
+  tick(0);
+  expectTooltip(2, '0ms', '50%');
+  assert.deepEqual(context.errors, []);
+}
+
 function testPingLoss() {
   const context = liveContext(['ping-value-0']);
   context.dashboardConfig = { ping_targets: [{ address: 'example.test' }] };
@@ -453,7 +536,7 @@ function testPingLoss() {
 
 (async () => {
   for (const test of [testFetchBodyTimeout, testGpuRecovery, testGpuUnavailableReadings,
-    testDriveTemperatureFreshness, testSensorFreshness, testPausedStatus, testStartupPolling, testPingLoss]) {
+    testDriveTemperatureFreshness, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss]) {
     await test();
     console.log(`PASS ${test.name}`);
   }
