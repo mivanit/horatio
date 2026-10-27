@@ -13,7 +13,6 @@ PATH="$PATH:/usr/sbin:/sbin"
 # As the user who will run the service: this script calls sudo itself where needed.
 # A root run leaves a root-owned .venv, config.json and Chart.js that the service cannot write.
 [ "$(id --user)" -ne 0 ] || { echo "Run ./install.sh as your own user, not root or sudo." >&2; exit 1; }
-command -v uv > /dev/null || { echo "Error: 'uv' not found. Install from https://docs.astral.sh/uv/" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The unit file's ExecStart= and ReadWritePaths= are word-split by systemd and the
@@ -52,6 +51,8 @@ if [ "$UNINSTALL" = 1 ]; then
     echo "Done. The checkout, .venv, logs/ and config.json are untouched."
     exit 0
 fi
+
+command -v uv > /dev/null || { echo "Error: 'uv' not found. Install from https://docs.astral.sh/uv/" >&2; exit 1; }
 
 # --- per-machine config: created from the example once, never overwritten ---
 if [ ! -e "$SCRIPT_DIR/config.json" ]; then

@@ -1260,47 +1260,15 @@ function renderUnifiedProcesses() {
   updateCacheDisplay('processes', 'processes');
 }
 
-// Fetch static data (GPU/CPU/System info) - called once at startup
-async function fetchStaticData() {
-  const [gpuInfo, cpuInfo, systemInfo, uptime] = await Promise.all([
-    safeFetch('/api/gpu-info', []),
-    safeFetch('/api/cpu-info', {}),
-    safeFetch(API_BASE + '/system', {}),
-    safeFetch(API_BASE + '/uptime', '')
-  ]);
-
-  if (gpuInfo.ok) {
-    updateCache('gpuInfo', gpuInfo.data);
-    renderGpuInfo(gpuInfo.data);
-  } else {
-    const gpuInfoContent = document.getElementById('gpu-info-content');
-    gpuInfoContent.innerHTML = '<div class="info-item text-error">Error loading GPU info</div>';
-    updateCardNoData('gpu-info', false);
-  }
-
-  if (cpuInfo.ok) {
-    updateCache('cpuInfo', cpuInfo.data);
-    renderCpuInfo(cpuInfo.data);
-  } else {
-    const cpuInfoContent = document.getElementById('cpu-info-content');
-    cpuInfoContent.innerHTML = '<div class="info-item text-error">Error loading CPU info</div>';
-    updateCardNoData('cpu-info', false);
-  }
-
-  if (systemInfo.ok) {
-    updateCache('systemInfo', systemInfo.data);
-    const uptimeStr = uptime.ok && uptime.data ? uptime.data.replace(/"/g, '') : '--';
-    renderSystemInfo(systemInfo.data, uptimeStr);
-  } else {
-    const systemInfoContent = document.getElementById('system-info-content');
-    systemInfoContent.innerHTML = '<div class="info-item text-error">Error loading system info</div>';
-    updateCardNoData('system-info', false);
-  }
-}
-
-// Fetch drives (with caching - 1 minute TTL), uptime, network processes (30s), and disk processes (30s)
+// Fetch slow-changing data; CPU/System Info retry until their permanent caches fill.
 async function fetchSlowData() {
-  // === SETUP PROMISES FOR FAST FETCHES ===
+  const cpuInfoPromise = isCacheValid('cpuInfo')
+    ? Promise.resolve({ data: getCache('cpuInfo'), ok: true, cached: true })
+    : safeFetch('/api/cpu-info', {});
+  const systemInfoPromise = isCacheValid('systemInfo')
+    ? Promise.resolve({ data: getCache('systemInfo'), ok: true, cached: true })
+    : safeFetch(API_BASE + '/system', {});
+
   const drivesPromise = isCacheValid('drives')
     ? Promise.resolve({ data: getCache('drives'), ok: true, cached: true })
     : safeFetch(API_BASE + '/fs', []);
@@ -1328,22 +1296,44 @@ async function fetchSlowData() {
     ? Promise.resolve({ data: getCache('gpuInfo'), ok: true, cached: true })
     : safeFetch('/api/gpu-info', []);
 
-  // === FAST FETCHES - await these together ===
-  const [fs, uptime, ipInfo, mail, storageHealth, sensorsSnap, gpuInfoSlow] = await Promise.all([
-    drivesPromise,
-    safeFetch(API_BASE + '/uptime', ''),
-    ipPromise,
-    mailPromise,
-    storageHealthPromise,
-    sensorsPromise,
-    gpuInfoPromise
-  ]);
+  // Metadata must not wait for the longer public-IP lookup. Uptime is read
+  // once per slow poll and shares the metadata update.
+  const infoPromise = Promise.all([
+    gpuInfoPromise, cpuInfoPromise, systemInfoPromise, safeFetch(API_BASE + '/uptime', '')
+  ]).then(([gpuInfo, cpuInfo, systemInfo, uptime]) => {
+    if (gpuInfo.ok && !gpuInfo.cached) {
+      updateCache('gpuInfo', gpuInfo.data);
+      renderGpuInfo(gpuInfo.data);
+    } else if (!gpuInfo.ok && !getCache('gpuInfo')) {
+      document.getElementById('gpu-info-content').innerHTML = '<div class="info-item text-error">Error loading GPU info</div>';
+      updateCardNoData('gpu-info', false);
+    }
 
+    if (cpuInfo.ok) {
+      if (!cpuInfo.cached) {
+        updateCache('cpuInfo', cpuInfo.data);
+        renderCpuInfo(cpuInfo.data);
+      }
+    } else {
+      document.getElementById('cpu-info-content').innerHTML = '<div class="info-item text-error">Error loading CPU info</div>';
+      updateCardNoData('cpu-info', false);
+    }
+
+    if (systemInfo.ok) {
+      if (!systemInfo.cached) updateCache('systemInfo', systemInfo.data);
+      if (!systemInfo.cached || (uptime.ok && uptime.data)) {
+        renderSystemInfo(systemInfo.data, uptime.ok && uptime.data ? uptime.data.replace(/"/g, '') : '--');
+      }
+    } else {
+      document.getElementById('system-info-content').innerHTML = '<div class="info-item text-error">Error loading system info</div>';
+      updateCardNoData('system-info', false);
+    }
+  });
+
+  const [fs, ipInfo, mail, storageHealth, sensorsSnap] = await Promise.all([
+    drivesPromise, ipPromise, mailPromise, storageHealthPromise, sensorsPromise, infoPromise
+  ]);
   if (sensorsSnap.ok && !sensorsSnap.cached) updateCache('sensors', sensorsSnap.data);
-  if (gpuInfoSlow.ok && !gpuInfoSlow.cached) {
-    updateCache('gpuInfo', gpuInfoSlow.data);
-    renderGpuInfo(gpuInfoSlow.data);
-  }
 
   // === PROCESS FAST RESULTS IMMEDIATELY ===
 
@@ -1396,11 +1386,6 @@ async function fetchSlowData() {
     updateCardNoData('hardware', false);
     setHtml(document.getElementById('drive-health-content'), '<div class="info-item text-error">Error loading drive health</div>');
     updateCardNoData('drive-health', false);
-  }
-
-  // Always update uptime
-  if (uptime.ok && uptime.data && isCacheValid('systemInfo')) {
-    renderSystemInfo(getCache('systemInfo'), uptime.data.replace(/"/g, ''));
   }
 
   // === DISK CAPTURE - runs independently, doesn't block above ===
@@ -2198,6 +2183,9 @@ function toggleConnection() {
     dataCache.networkProcesses.lastUpdate = null;
     dataCache.diskProcesses.data = null;
     dataCache.diskProcesses.lastUpdate = null;
+    // Reconnect also refreshes metadata, while retaining the last readings
+    // until their replacements arrive.
+    for (const key of ['cpuInfo', 'systemInfo', 'gpuInfo']) dataCache[key].lastUpdate = null;
 
     // Update all charts to show the gaps
     charts.cpu.update();
@@ -2214,7 +2202,6 @@ function toggleConnection() {
     // Resume polling
     isConnected = true;
     disconnectTime = null;
-    fetchStaticData();
     fetchSlowData();
     fetchData();
     startPolling();
@@ -2296,7 +2283,6 @@ loadConfig().then(async () => {
   hideUnavailableCards();
   initProcessTableListeners();  // Set up event delegation once
   if (isConnected) {
-    fetchStaticData();
     fetchSlowData();
     fetchData();
   }
@@ -3029,15 +3015,17 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
     // Per-device charts (disk-drives, drive-usage)
     // Collect all device names across all records
     const deviceNames = new Set();
-    records.forEach(r => {
-      const v = extractHistoryValue(r, metric);
-      if (v && Array.isArray(v)) {
-        v.forEach(d => {
-          const name = metric === 'disk-drives' ? d.name : d.mount;
-          if (name) deviceNames.add(name);
-        });
-      }
-    });
+    if (metric === 'disk-drives' || metric === 'drive-usage') {
+      records.forEach(r => {
+        const v = extractHistoryValue(r, metric);
+        if (v && Array.isArray(v)) {
+          v.forEach(d => {
+            const name = metric === 'disk-drives' ? d.name : d.mount;
+            if (name) deviceNames.add(name);
+          });
+        }
+      });
+    }
 
     const devices = Array.from(deviceNames);
     const colors = GPU_COLORS; // Reuse GPU colors for variety

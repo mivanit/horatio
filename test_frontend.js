@@ -128,6 +128,69 @@ async function testFetchBodyTimeout() {
   }
 }
 
+async function testStartupReadTimeouts() {
+  const server = http.createServer((request, response) => {
+    const phase = request.url.split('/')[1];
+    const url = request.url.slice(phase.length + 1);
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    if ((phase === 'config' && url === '/config.json') ||
+        (phase === 'discovery' && url === '/api/list-endpoints')) {
+      response.write('{"unfinished":');
+    } else response.end(JSON.stringify(url === '/config.json'
+      ? { title: 'Configured', limits: { network_mbps: 100 } } : { endpoints: ['/4/cpu'] }));
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const timers = new Set();
+  try {
+    for (const phase of ['config', 'discovery', 'healthy']) {
+      const calls = { fast: 0, slow: 0, intervals: 0 };
+      const context = vm.createContext({
+        availableEndpoints: null, dashboardConfig: {}, thresholds: {}, limits: { network_mbps: 1250 },
+        isConnected: true, pollingInterval: null, slowPollingInterval: null,
+        pollInterval: 2000, SLOW_POLL_INTERVAL: 30000, AbortController, console: { warn() {} },
+        fetch: (url, options) => fetch(`http://127.0.0.1:${server.address().port}/${phase}${url}`, options),
+        setTimeout(callback, delay) {
+          assert.equal(delay, 5000, 'startup reads use the existing safeFetch deadline');
+          const timer = setTimeout(() => { timers.delete(timer); callback(); }, 150);
+          timers.add(timer);
+          return timer;
+        },
+        clearTimeout(timer) { timers.delete(timer); clearTimeout(timer); },
+        setInterval() { return ++calls.intervals; },
+        applyConfigToDom() {}, hideUnavailableCards() {}, initProcessTableListeners() {},
+        fetchData() { calls.fast++; }, fetchSlowData() { calls.slow++; },
+      });
+      evaluate(context,
+        between(config, 'async function loadConfig', '// Update card warning') +
+        between(config, 'async function fetchEndpointList', 'function isEndpointAvailable') +
+        between(config, 'async function safeFetch', '// Data cache for reducing API calls') +
+        between(app, 'function startPolling', '// Toggle connection'));
+      let watchdog;
+      try {
+        await Promise.race([
+          evaluate(context, between(app, 'loadConfig().then', '// Set up toggle button')),
+          new Promise((resolve, reject) => {
+            watchdog = setTimeout(() => reject(new Error(`${phase} read blocked dashboard startup`)), 1500);
+          }),
+        ]);
+      } finally { clearTimeout(watchdog); }
+      assert.deepEqual(calls, { fast: 1, slow: 1, intervals: 2 }, 'startup reaches both polling loops');
+      assert.equal(context.dashboardConfig.title, phase === 'config' ? undefined : 'Configured');
+      assert.equal(context.limits.network_mbps, phase === 'config' ? 1250 : 100);
+      assert.deepEqual(context.availableEndpoints === null ? null : [...context.availableEndpoints],
+        phase === 'discovery' ? null : ['/4/cpu']);
+      assert.equal(timers.size, 0, 'startup reads clear every deadline');
+    }
+  } finally {
+    timers.forEach(clearTimeout);
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+}
+
 async function testIpInfoTimeout() {
   const info = { lan: [{ interface: 'eth0', ipv4: '192.168.1.20' }],
     public: { error: 'lookup failed' }, tailscale: {} };
@@ -467,20 +530,20 @@ async function testStartupPolling() {
     dom.elements.get('status').querySelector = selector => dom.elements.get(selector.slice(1));
     let finishDiscovery;
     const discovery = new Promise(resolve => { finishDiscovery = resolve; });
-    const timers = new Map(), calls = { fast: 0, slow: 0, static: 0, setup: 0 };
+    const timers = new Map(), calls = { fast: 0, slow: 0, setup: 0 };
     let nextTimer = 1;
     const context = vm.createContext({
       ...dom, isConnected: true, pollingInterval: null, slowPollingInterval: null, disconnectTime: null,
       pollInterval: 2000, SLOW_POLL_INTERVAL: 30000, historyLength: 3,
       COLORS: { success: 'green', errorLight: 'red', partial: 'orange' }, cardStatus: { cpu: { ok: true } },
-      dataCache: Object.fromEntries(['drives', 'processes', 'networkProcesses', 'diskProcesses']
+      dataCache: Object.fromEntries(['drives', 'processes', 'networkProcesses', 'diskProcesses', 'cpuInfo', 'systemInfo', 'gpuInfo']
         .map(key => [key, { data: [], lastUpdate: 1 }])),
       charts: Object.fromEntries(['cpu', 'cpuCoresSpread', 'mem', 'swap', 'net', 'disk', 'gpu', 'gpuMem', 'ping', 'diskDrives']
         .map(key => [key, makeChart()])),
       loadConfig: async () => {}, applyConfigToDom() {}, fetchEndpointList: () => discovery,
       hideUnavailableCards() { context.updateConnectionStatus(); },
       initProcessTableListeners() { calls.setup++; }, fillHistoryGaps() {},
-      fetchStaticData() { calls.static++; }, fetchSlowData() { calls.slow++; },
+      fetchSlowData() { calls.slow++; },
       async fetchDataOnce() { calls.fast++; context.updateConnectionStatus(); },
       setInterval(callback, delay) { const id = nextTimer++; timers.set(id, { callback, delay }); return id; },
       clearInterval(id) { timers.delete(id); },
@@ -501,7 +564,7 @@ async function testStartupPolling() {
     assert.equal(calls.setup, 1, 'discovery/listener setup completes even while paused');
     if (action === 'pause') {
       assert.equal(timers.size, 0, 'startup cannot restart paused timers');
-      assert.deepEqual([calls.fast, calls.slow, calls.static], [0, 0, 0], 'startup does not fetch while paused');
+      assert.deepEqual([calls.fast, calls.slow], [0, 0], 'startup does not fetch while paused');
       assert.equal(dom.elements.get('status-text').textContent, 'Paused');
       context.toggleConnection();
     }
@@ -517,6 +580,10 @@ async function testStartupPolling() {
     assert.equal(dom.elements.get('status-text').textContent, 'Paused');
     context.toggleConnection();
     assert.equal(timers.size, 2, 'normal reconnect restores one pair');
+    for (const key of ['cpuInfo', 'systemInfo', 'gpuInfo']) {
+      assert.equal(context.dataCache[key].lastUpdate, null, 'reconnect refreshes metadata');
+      assert.deepEqual(context.dataCache[key].data, [], 'reconnect retains the last metadata until replacement');
+    }
     context.toggleConnection();
     assert.equal(timers.size, 0);
   }
@@ -647,6 +714,70 @@ function testPingLoss() {
   assert.deepEqual(context.errors, []);
 }
 
+async function testStaticInfoRecovery() {
+  const dom = makeDOM(['cpu-info-content', 'system-info-content']);
+  const calls = {}, statuses = {}, rendered = { cpu: [], system: [] };
+  let now = 1000;
+  let pendingIp = null;
+  const context = vm.createContext({
+    ...dom, Date: { now: () => now }, API_BASE: '/api/4', IP_INFO_TIMEOUT_MS: 20000,
+    async safeFetch(url) {
+      calls[url] = (calls[url] || 0) + 1;
+      if (url === '/api/ip-info' && pendingIp) return pendingIp;
+      if (url === '/api/cpu-info') return { ok: calls[url] > 1, data: { model: 'CPU' } };
+      if (url === '/api/4/system') return { ok: calls[url] > 2, data: { hostname: 'server' } };
+      return { ok: true, data: `${now}s` };
+    },
+    renderCpuInfo(data) { rendered.cpu.push(data); statuses['cpu-info'] = true; },
+    renderSystemInfo(data, uptime) { rendered.system.push({ data, uptime }); statuses['system-info'] = true; },
+    updateCardNoData(id, ok) { statuses[id] = ok; },
+    renderGpuInfo() {}, renderDrives() {}, renderIpInfo() {}, renderMail() {}, renderHardware() {}, renderDriveHealth() {},
+    diskCapture: { handleResponse() {} }, networkCapture: { handleResponse() {} },
+  });
+  evaluate(context,
+    between(config, 'const dataCache =', '// The CPU core temperatures') +
+    between(app, 'async function fetchSlowData', '// One poll at a time') +
+    between(app, 'async function refreshData', '// Set up refresh button handlers') +
+    "Object.keys(dataCache).filter(key => !['cpuInfo', 'systemInfo'].includes(key)).forEach(key => { dataCache[key].ttl = Infinity; updateCache(key, []); });");
+  await context.fetchSlowData();
+  assert.deepEqual(statuses, { 'cpu-info': false, 'system-info': false });
+  assert.equal(context.getCache('cpuInfo'), null);
+  assert.equal(context.getCache('systemInfo'), null);
+
+  now += 30000;
+  let finishIp, finished = false;
+  pendingIp = new Promise(resolve => { finishIp = resolve; });
+  evaluate(context, 'dataCache.ipInfo.lastUpdate = null;');
+  const pendingPoll = context.fetchSlowData().then(() => { finished = true; });
+  await new Promise(setImmediate);
+  assert.equal(finished, false, 'IP lookup remains pending');
+  assert.equal(rendered.cpu.length, 1, 'metadata renders before the pending IP lookup finishes');
+  assert.equal(calls['/api/4/uptime'], 2, 'one uptime request per slow poll');
+  finishIp({ ok: true, data: [] });
+  await pendingPoll;
+  pendingIp = null;
+  assert.deepEqual(statuses, { 'cpu-info': true, 'system-info': false }, 'each static endpoint recovers independently');
+  now += 30000;
+  await context.fetchSlowData();
+  assert.deepEqual(statuses, { 'cpu-info': true, 'system-info': true });
+  assert.equal(calls['/api/cpu-info'], 2);
+  assert.equal(calls['/api/4/system'], 3);
+  assert.equal(rendered.cpu.length, 1);
+  assert.equal(rendered.system.length, 1);
+
+  now += 86400000;
+  await context.fetchSlowData();
+  assert.equal(calls['/api/cpu-info'], 2, 'successful CPU metadata stays cached');
+  assert.equal(calls['/api/4/system'], 3, 'successful system metadata stays cached');
+  assert.equal(rendered.system.at(-1).uptime, `${now}s`, 'uptime still refreshes beside cached metadata');
+
+  const button = { classList: { add() {}, remove() {} } };
+  await context.refreshData('cpuInfo', button);
+  await context.refreshData('systemInfo', button);
+  assert.equal(calls['/api/cpu-info'], 3, 'manual CPU refresh bypasses the permanent cache');
+  assert.equal(calls['/api/4/system'], 4, 'manual system refresh bypasses the permanent cache');
+}
+
 async function testCaptureCacheAge() {
   let now = 103000, captureError = false;
   const calls = {};
@@ -656,13 +787,13 @@ async function testCaptureCacheAge() {
     setInterval: () => 1, clearInterval() {},
     nethogsDuration: 3, diskDuration: 1, API_BASE: '/api/4',
     getDiskTimeout: () => 6500, getNethogsTimeout: () => 9500,
-    renderUnifiedProcesses() {}, renderGpuInfo() {}, renderDrives() {}, renderIpInfo() {},
+    renderUnifiedProcesses() {}, renderGpuInfo() {}, renderCpuInfo() {}, renderDrives() {}, renderIpInfo() {},
     renderMail() {}, renderHardware() {}, renderDriveHealth() {}, renderSystemInfo() {},
     async safeFetch(url) {
       calls[url] = (calls[url] || 0) + 1;
       const data = url.includes('processes')
         ? captureError ? { error: 'capture failed' } : [{ pid: 100, name: 'worker' }]
-        : url.endsWith('/fs') ? [] : {};
+        : url.endsWith('/fs') ? [] : url.endsWith('/uptime') ? '1h' : {};
       return { ok: true, data };
     },
   });
@@ -903,9 +1034,9 @@ function testLiveSampleTimes() {
 }
 
 (async () => {
-  for (const test of [testFetchBodyTimeout, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
+  for (const test of [testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
-    testCaptureCacheAge, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes]) {
+    testStaticInfoRecovery, testCaptureCacheAge, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes]) {
     await test();
     console.log(`PASS ${test.name}`);
   }

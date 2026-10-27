@@ -204,6 +204,7 @@ Run the OpenWrt Lua tests from the checkout root:
 ```sh
 lua5.1 openwrt/test_history.lua   # requires Nixio
 lua5.1 openwrt/test_handler.lua
+lua5.1 openwrt/test_metrics.lua   # CPU/IP fixtures; no native modules or network
 python3 openwrt/test_install.py  # also run by test.py; no router needed
 ```
 

@@ -178,20 +178,27 @@ function M.cpu_info()
     local logical = 0
     local cache_size = ""
 
-    for line in content:gmatch("[^\n]+") do
-        local key, val = line:match("^(.-)%s*:%s*(.+)")
-        if key then
-            key = key:gsub("%s+$", "")
-            if (key == "model name" or key == "Processor") and model == "" then
-                model = val
-            elseif key == "core id" then
-                physical_ids[val] = true
-            elseif key == "processor" then
-                logical = logical + 1
-            elseif key == "cache size" and cache_size == "" then
-                cache_size = val
+    -- Core IDs repeat across sockets; collect both IDs before counting a block.
+    for block in (content .. "\n\n"):gmatch("(.-)\n%s*\n") do
+        local socket, core = "", nil
+        for line in block:gmatch("[^\n]+") do
+            local key, val = line:match("^(.-)%s*:%s*(.+)")
+            if key then
+                key = key:gsub("%s+$", "")
+                if (key == "model name" or key == "Processor") and model == "" then
+                    model = val
+                elseif key == "physical id" then
+                    socket = val
+                elseif key == "core id" then
+                    core = val
+                elseif key == "processor" then
+                    logical = logical + 1
+                elseif key == "cache size" and cache_size == "" then
+                    cache_size = val
+                end
             end
         end
+        if core then physical_ids[socket .. ":" .. core] = true end
     end
 
     if logical == 0 then logical = 1 end
@@ -553,10 +560,15 @@ function M.ip_info()
             v4 = v4:gsub("%s+", "")
             if v4 ~= "" then public.ipv4 = v4 end
         end
-        local v6 = run_cmd("wget -qO- -T 3 https://api64.ipify.org")
-        if v6 then
-            v6 = v6:gsub("%s+", "")
-            if v6 ~= "" and v6 ~= public.ipv4 then public.ipv6 = v6 end
+        -- api64 is dual-stack and may return IPv4 when IPv6 is unavailable.
+        local address = run_cmd("wget -qO- -T 3 https://api64.ipify.org")
+        if address then
+            address = address:gsub("%s+", "")
+            if address:find(":") then
+                public.ipv6 = address
+            elseif address ~= "" and not public.ipv4 then
+                public.ipv4 = address
+            end
         end
         local f = io.open(PUBLIC_IP_FILE, "w")
         if f then

@@ -960,7 +960,6 @@ function createHistoryChart(canvasId, metric, records, unitType, hours) {
 }
 let thresholds = { network_mbps: 3 }, dashboardConfig = {};
 let configBody = null;
-async function fetch() { return { ok: true, json: async () => configBody }; }
 """ + between(src, "const historyFetchInflight", "// Markup for a failed history fetch") \
         + between(src, "function historyErrorHTML", "// Extract metric value from a history record") \
         + between(src, "async function loadHistoryData", "// Show history for all metrics") \
@@ -1241,6 +1240,7 @@ const card = (hours) => {
     }
   }
   // 15. config.js: limits from /config.json, validated like the server's _cfg_num.
+  responder = () => ({ ok: true, data: configBody });
   configBody = { thresholds: { network_mbps: 9 }, limits: { network_mbps: 5, disk_io_mbps: 'x', bogus: 7 } };
   await loadConfig();
   assert.deepStrictEqual(limits, { network_mbps: 5, disk_io_mbps: 15000 }, 'valid limit taken, bad one ignored');
@@ -1425,6 +1425,54 @@ def test_gpu_stats_compatibility_unit() -> None:
         gpus = server.get_gpu_stats()
     check(gpus == [] and run.call_count == 2 and warning.call_args.args[-1] == failure.stderr,
           "GPU stats: failed fallback is reported without further retries")
+
+
+def test_system_info_unit() -> None:
+    """CPU topology and address-family fallbacks, without hardware or network."""
+    from unittest.mock import patch
+    import server
+
+    print(f"\n{BOLD}System information unit tests{RESET}\n")
+    # Core IDs repeat across sockets and SMT siblings; field order is arbitrary.
+    multi = "\n\n".join(
+        f"processor : {i}\ncore id : {(i % 4) // 2}\nphysical id : {i // 4}\n"
+        "model name : Fixture CPU\ncache size : 32768 KB"
+        for i in range(8)
+    )
+    no_socket = "\n\n".join(f"processor : {i}\ncore id : {i // 2}" for i in range(4))
+    no_topology = "processor : 0\n\nprocessor : 1\n"
+    for label, cpuinfo, physical, logical in (
+        ("multiple sockets with SMT", multi, 4, 8),
+        ("missing socket IDs", no_socket, 2, 4),
+        ("missing core IDs", no_topology, 2, 2),
+    ):
+        with patch.object(server.Path, "exists", return_value=True), \
+                patch.object(server.Path, "read_text", side_effect=[cpuinfo, "32M\n"]):
+            info = server._get_cpu_info()
+        check(info["physical_cores"] == physical and info["logical_cores"] == logical
+              and info["l3_cache"] == "32M"
+              and (label != "multiple sockets with SMT"
+                   or (info["model"], info["cache_size"]) == ("Fixture CPU", "32768 KB")),
+              f"CPU info: {label}", describe(info))
+
+    for label, first, second, expected in (
+        ("IPv4 fallback after first provider fails", httpx.ConnectTimeout("offline"),
+         "198.51.100.9", {"ipv4": "198.51.100.9"}),
+        ("both address families", "198.51.100.9", "2001:db8::9",
+         {"ipv4": "198.51.100.9", "ipv6": "2001:db8::9"}),
+        ("IPv4-only providers keep the first address", "198.51.100.9", "198.51.100.10",
+         {"ipv4": "198.51.100.9"}),
+        ("both providers fail", httpx.ConnectTimeout("offline"), httpx.ConnectTimeout("offline"),
+         {"error": "lookup failed"}),
+    ):
+        with patch.object(server.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "")), \
+                patch.object(server.httpx, "Client") as client:
+            client.return_value.__enter__.return_value.get.side_effect = [
+                httpx.Response(200, text=value) if isinstance(value, str) else value
+                for value in (first, second)
+            ]
+            info = server._get_ip_info()
+        check(info["public"] == expected, f"IP info: {label}", describe(info["public"]))
 
 
 def test_null_metrics_unit() -> None:
@@ -1832,6 +1880,77 @@ def test_process_history_unit() -> None:
     )
 
 
+def test_history_process_sources_unit() -> None:
+    """A missing Glances process list must not discard available GPU processes."""
+    from unittest.mock import Mock, patch
+    import server
+
+    print(f"\n{BOLD}History process source recovery unit tests{RESET}\n")
+    pid = 2**31 - 1  # cannot be a live process on Linux
+    gpu_rows = [{"pid": pid, "name": "trainer", "gpu_index": 0,
+                 "gpu_memory_mib": 4096, "gpu_util_percent": 90}]
+    cpu_rows = [{"pid": pid, "name": "trainer", "cpu_percent": 20,
+                 "memory_info": {"rss": 1024**2}}]
+    responses = {
+        "cpu": {"total": 20}, "percpu": [{"total": 20}], "network": [], "diskio": [],
+        "mem": {"used": 1024, "total": 2048, "percent": 50}, "memswap": {},
+        "gpu": [], "sensors": [], "load": {}, "fs": [],
+    }
+    requests = []
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url, **kwargs):
+            name = url.rsplit("/", 1)[1]
+            requests.append(name)
+            return process_reply if name == "processlist" else httpx.Response(200, json=responses[name])
+
+    async def run():
+        nonlocal process_reply
+        with patch.multiple(server.APP.state, create=True,
+                            history_sample_duration=1, history_sample_count=1,
+                            history_processes_enabled=True, history_process_count=10, ping_enabled=False), \
+                patch.object(server.httpx, "AsyncClient", Client), \
+                patch.multiple(server, _read_cpu_freqs=Mock(return_value=[]),
+                               _get_ip_info=Mock(return_value={}), get_gpu_stats=Mock(return_value=[]),
+                               _get_storage_health=Mock(return_value={"status": "missing"})), \
+                patch.object(server, "_get_gpu_processes", return_value=gpu_rows) as gpu:
+            for label, status, data in (("failed", 500, []), ("empty", 200, []), ("non-list", 200, {})):
+                process_reply = httpx.Response(status, json=data)
+                gpu.reset_mock()
+                record = await server.collect_history_sample("http://fixture")
+                rows = record.get("processes", [])
+                check(gpu.call_count == 1 and len(rows) == 1
+                      and rows[0].get("gpu_mem_mib") == 4096 and rows[0].get("gpu_util_percent") == 90
+                      and rows[0].get("gpus") == [0] and "cpu_percent" not in rows[0]
+                      and record["cpu"]["avg"] == 20 and record["memory"]["percent"] == 50,
+                      f"History: {label} Glances processes preserve GPU rows and other metrics")
+
+            server.APP.state.history_processes_enabled = False
+            gpu.reset_mock()
+            requests.clear()
+            record = await server.collect_history_sample("http://fixture")
+            check(gpu.call_count == 0 and "processes" not in record and "processlist" not in requests,
+                  "History: disabled process recording skips both process sources")
+
+            server.APP.state.history_processes_enabled = True
+            process_reply = httpx.Response(200, json=cpu_rows)
+            gpu.side_effect = FileNotFoundError("nvidia-smi")
+            record = await server.collect_history_sample("http://fixture")
+            rows = record.get("processes", [])
+            check(len(rows) == 1 and rows[0].get("cpu_percent") == 20
+                  and rows[0].get("rss_mb") == 1 and "gpu_mem_mib" not in rows[0],
+                  "History: missing NVIDIA keeps Glances process rows")
+
+    process_reply = None
+    asyncio.run(run())
+
+
 def test_dedupe_fs_unit() -> None:
     """Unit tests for filesystem de-dup by backing device (no server needed).
 
@@ -2174,8 +2293,10 @@ def main() -> int:
     test_subprocess_decoding_unit()
     test_gpu_info_partial_unit()
     test_gpu_stats_compatibility_unit()
+    test_system_info_unit()
     test_null_metrics_unit()
     test_process_history_unit()
+    test_history_process_sources_unit()
     test_gpu_processes_unit()
     test_dedupe_fs_unit()
     test_mail_and_health_unit()

@@ -1493,7 +1493,7 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
     # nvidia-smi shells out and the sanitizer reads /proc per process.
     # Like every other section, a failure here drops only this key: the record's
     # cpu/memory/... must never be lost to one unreadable process.
-    if processes_enabled and isinstance(process_data, list) and process_data:
+    if processes_enabled:
         gpu_procs: list[dict[str, Any]] = []
         try:
             gpu_procs = await asyncio.to_thread(_get_gpu_processes)
@@ -1503,7 +1503,9 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
             logger.warning("History: failed to read GPU processes: %s", e)
         try:
             record["processes"] = await asyncio.to_thread(
-                build_process_records, process_data, gpu_procs, process_count
+                build_process_records,
+                process_data if isinstance(process_data, list) else [],
+                gpu_procs, process_count,
             )
         except Exception as e:
             logger.warning("History: failed to build process records: %s", e)
@@ -2631,30 +2633,22 @@ def _get_cpu_info() -> dict[str, Any]:
     content = cpuinfo_path.read_text()
 
     model_name: str = ""
-    physical_cores: set[str] = set()
+    physical_cores: set[tuple[str, str]] = set()
     logical_cores: int = 0
-    cpu_mhz: str = ""
     cache_size: str = ""
 
-    for line in content.split("\n"):
-        if ":" not in line:
-            continue
-        key: str
-        value: str
-        key, value = line.split(":", 1)
-        key = key.strip()
-        value = value.strip()
-
-        if key == "model name" and not model_name:
-            model_name = value
-        elif key == "core id":
-            physical_cores.add(value)
-        elif key == "processor":
+    for block in re.split(r"\n\s*\n", content.strip()):
+        fields = {
+            key.strip(): value.strip()
+            for key, value in (line.split(":", 1) for line in block.splitlines() if ":" in line)
+        }
+        model_name = model_name or fields.get("model name", "")
+        cache_size = cache_size or fields.get("cache size", "")
+        if "processor" in fields:
             logical_cores += 1
-        elif key == "cpu MHz" and not cpu_mhz:
-            cpu_mhz = value
-        elif key == "cache size" and not cache_size:
-            cache_size = value
+            # Core IDs repeat across sockets; block parsing makes field order irrelevant.
+            if fields.get("core id"):
+                physical_cores.add((fields.get("physical id", ""), fields["core id"]))
 
     # Try to get L3 cache from sysfs
     l3_cache: str = ""
@@ -2742,9 +2736,8 @@ def _get_ip_info() -> dict[str, Any]:
                 resp = client.get("https://api64.ipify.org")
                 if resp.status_code == 200 and resp.text.strip():
                     addr = resp.text.strip()
-                    # api64 returns IPv4 if no IPv6 — only store if different
-                    if addr != result["public"].get("ipv4"):
-                        result["public"]["ipv6"] = addr
+                    # api64 can return IPv4, including when the first lookup failed.
+                    result["public"].setdefault("ipv6" if ":" in addr else "ipv4", addr)
             except Exception as e:
                 logger.debug("Failed to get public IPv6: %s", e)
     except Exception as e:

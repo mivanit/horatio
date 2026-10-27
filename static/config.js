@@ -234,9 +234,9 @@ function updateCardNoData(cardId, ok) {
 // Load dashboard config from JSON file
 async function loadConfig() {
   try {
-    const response = await fetch('/config.json');
+    const response = await safeFetch('/config.json', {});
     if (response.ok) {
-      const data = await response.json();
+      const data = response.data;
       dashboardConfig = data;
       if (data.thresholds) {
         thresholds = { ...thresholds, ...data.thresholds };
@@ -497,9 +497,9 @@ const CARD_ENDPOINT_DEPS = {
 
 async function fetchEndpointList() {
   try {
-    const r = await fetch('/api/list-endpoints');
+    const r = await safeFetch('/api/list-endpoints', {});
     if (r.ok) {
-      const data = await r.json();
+      const data = r.data;
       if (Array.isArray(data.endpoints)) {
         availableEndpoints = new Set(data.endpoints);
       }
