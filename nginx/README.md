@@ -44,6 +44,12 @@ sudo sh install.sh myhost.services              # install or update
 sudo sh install.sh myhost.services --uninstall   # remove
 ```
 
+Uninstall validates and reloads nginx after removing the generated configuration,
+then removes only `index.html`. Extra files in the index directory are kept.
+If validation, reload, or file removal fails, the previous files and nginx state
+are restored; incomplete recovery leaves backups at the printed path. The nginx
+default site is not restored automatically.
+
 ### OpenWrt
 
 ```sh

@@ -1307,7 +1307,7 @@ async function fetchSlowData() {
 
   const ipPromise = isCacheValid('ipInfo')
     ? Promise.resolve({ data: getCache('ipInfo'), ok: true, cached: true })
-    : safeFetch('/api/ip-info', {});
+    : safeFetch('/api/ip-info', {}, IP_INFO_TIMEOUT_MS);
 
   // /api/mail is a dashboard endpoint (not under the API_BASE Glances proxy);
   // CARD_ENDPOINT_DEPS lists it as '/mail', which is what safeFetch checks.
@@ -2597,7 +2597,7 @@ async function refreshData(cacheKey, btn) {
         break;
 
       case 'ipInfo':
-        const ipInfo = await safeFetch('/api/ip-info', {});
+        const ipInfo = await safeFetch('/api/ip-info', {}, IP_INFO_TIMEOUT_MS);
         if (ipInfo.ok) {
           updateCache('ipInfo', ipInfo.data);
           renderIpInfo(ipInfo.data);

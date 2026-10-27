@@ -139,8 +139,13 @@ elif name == "mv":
         sys.exit(1)
     sys.exit(subprocess.run([os.environ["HORATIO_REAL_MV"], *args]).returncode)
 elif name == "rm":
-    if failure == "remove-index" and args[-1] == str(root / "www/example-internal/index.html"):
+    if failure == "remove-index" and args[-1] in (
+        str(root / "www/example-internal/index.html"), str(root / "var/www/example-internal/index.html"),
+    ):
         print("injected index removal failure", file=sys.stderr)
+        sys.exit(1)
+    if failure == "remove-config" and args[-1] == str(root / "etc/nginx/sites-enabled/example-internal"):
+        print("injected config removal failure", file=sys.stderr)
         sys.exit(1)
     sys.exit(subprocess.run([os.environ["HORATIO_REAL_RM"], *args]).returncode)
 '''
@@ -418,6 +423,102 @@ http {
         self.assertEqual(os.readlink(self.default), "../sites-available/default")
         self.assertEqual(self.default_target.read_text(), "# distribution default\n")
         self.assertEqual(list(self.nginx.glob(".horatio-*")), [])
+
+    def test_ubuntu_uninstall_preserves_extra_content_and_symlink_targets(self):
+        self.prepare()
+        config_target, index_target = self.root / "config-source", self.root / "index-source"
+        self.conf.rename(config_target)
+        self.index.rename(index_target)
+        self.conf.symlink_to(config_target)
+        self.index.symlink_to(index_target)
+        asset = self.index.parent / "custom-logo.svg"
+        asset.write_text("keep this user asset")
+        result = self.run_uninstall()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.conf.is_symlink())
+        self.assertFalse(self.index.is_symlink())
+        self.assertEqual(config_target.read_text(), "# previous working config\n")
+        self.assertEqual(index_target.read_text(), "previous index\n")
+        self.assertEqual(asset.read_text(), "keep this user asset")
+        self.assertTrue(self.default.is_symlink())
+        self.assertEqual(list(self.nginx.glob(".horatio-*")), [])
+
+    def test_ubuntu_uninstall_validation_failure_restores_files_before_reload(self):
+        self.prepare()
+        result = self.run_uninstall("validate")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Done.", result.stdout)
+        self.assertIn("invalid port", result.stderr)
+        self.assert_restored()
+        self.assertFalse(any(e["args"] == ["reload-or-restart", "nginx"] for e in self.events()))
+
+    def test_ubuntu_uninstall_reload_failure_restores_symlinks_and_reloads_original(self):
+        self.prepare()
+        config_target, index_target = self.root / "config-source", self.root / "index-source"
+        self.conf.rename(config_target)
+        self.index.rename(index_target)
+        self.conf.symlink_to(config_target)
+        self.index.symlink_to(index_target)
+        result = self.run_uninstall("reload")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Done.", result.stdout)
+        self.assert_restored()
+        self.assertTrue(self.conf.is_symlink())
+        self.assertTrue(self.index.is_symlink())
+        self.assertEqual(config_target.read_text(), "# previous working config\n")
+        self.assertEqual(index_target.read_text(), "previous index\n")
+        self.assertEqual(sum(e["args"] == ["reload-or-restart", "nginx"] for e in self.events()), 2)
+
+    def test_ubuntu_uninstall_failure_restores_originally_stopped_service(self):
+        self.prepare()
+        result = self.run_uninstall("reload", HORATIO_WAS_RUNNING="0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_restored()
+        calls = [e["args"] for e in self.events() if e["command"] == "systemctl"]
+        self.assertEqual(calls, [["is-active", "--quiet", "nginx"], ["reload-or-restart", "nginx"], ["stop", "nginx"]])
+
+    def test_ubuntu_uninstall_removal_failures_restore_files_and_modes(self):
+        for failure in ("remove-config", "remove-index"):
+            with self.subTest(failure=failure):
+                case = InstallerTests()
+                case.setUp()
+                try:
+                    case.prepare()
+                    (case.bin / "rm").unlink()
+                    (case.bin / "rm").symlink_to(case.mock)
+                    result = case.run_uninstall(failure)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("Done.", result.stdout)
+                    self.assertIn("removal failure", result.stderr)
+                    case.assert_restored()
+                    reloads = sum(e["args"] == ["reload-or-restart", "nginx"] for e in case.events())
+                    self.assertEqual(reloads, 2 if failure == "remove-index" else 0)
+                finally:
+                    case.doCleanups()
+
+    def test_ubuntu_uninstall_incomplete_recovery_retains_backups(self):
+        self.prepare()
+        self.script.write_text(self.script.read_text().replace("nginx -t\n", "false\n"))
+        (self.bin / "mv").unlink()
+        (self.bin / "mv").symlink_to(self.mock)
+        result = self.run_uninstall("restore")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("recovery was incomplete", result.stderr)
+        backups = list(self.nginx.glob(".horatio-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertIn(str(backups[0]), result.stderr)
+        self.assertEqual((backups[0] / "config").read_text(), "# previous working config\n")
+        self.assertEqual((backups[0] / "index").read_text(), "previous index\n")
+        self.assertFalse(self.conf.exists())
+        self.assertEqual(self.index.read_text(), "previous index\n")
+
+    def test_ubuntu_uninstall_requires_nginx_before_removing_files(self):
+        self.prepare(nginx=False)
+        result = self.run_uninstall()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("nginx is unavailable", result.stderr)
+        self.assert_restored()
+        self.assertEqual(self.events(), [])
 
     def test_rejected_config_restores_files_and_default_symlink(self):
         self.prepare()

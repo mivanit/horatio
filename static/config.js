@@ -49,6 +49,9 @@ const COLORS = {
   muted: getCssColor('--text-muted'),
 };
 
+// IP info includes local addresses (5 s), two public lookups (3 s each), and
+// Tailscale (5 s). Allow their fallback results to arrive when the WAN is down.
+const IP_INFO_TIMEOUT_MS = 20000;
 const SLOW_POLL_INTERVAL = 30000; // 30 seconds for static/slow-changing data
 const DEFAULT_PROCESS_COUNT = 8;
 let topProcessesLimit = parseInt(localStorage.getItem('topProcessesLimit')) || DEFAULT_PROCESS_COUNT;

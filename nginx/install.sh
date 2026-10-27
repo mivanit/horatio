@@ -65,20 +65,6 @@ else
     exit 1
 fi
 
-# --- Uninstall ---
-if [ "$2" = "--uninstall" ] && [ "$PLATFORM" = ubuntu ]; then
-    echo "Removing nginx config for $DOMAIN..."
-    rm -f "$CONF_DEST"
-    rm -rf "$INDEX_DIR"
-
-    nginx -t 2>/dev/null && systemctl reload-or-restart nginx 2>/dev/null || true
-    echo "Note: nginx default site was not restored."
-    echo "  To restore: ln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default"
-
-    echo "Done."
-    exit 0
-fi
-
 # Automatic OpenWrt removal stops nginx altogether: its packaged defaults also
 # claim ports 80/443. Only do that for the dedicated, stock UCI setup. Unknown
 # configurations need a manual port handoff, not an nginx-language parser here.
@@ -123,7 +109,7 @@ include conf.d/*.conf;
     if sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' /etc/nginx/restrict_locally | grep -Ev '^[[:space:]]*(allow|deny)[[:space:]]+[^;]+;[[:space:]]*$' >/dev/null; then return 1; fi
 }
 
-if [ "$2" = --uninstall ]; then
+if [ "$2" = --uninstall ] && [ "$PLATFORM" = openwrt ]; then
     stock_openwrt_nginx || {
         echo "Error: automatic removal requires a dedicated stock OpenWrt nginx setup." >&2
         echo "Custom/manual sites or an unrecognized template were found; no files or services were changed." >&2
@@ -396,7 +382,7 @@ trap 'exit 1' HUP INT TERM
 
 save_entry "$CONF_DEST" "$RECOVERY_DIR/config"
 if [ "$PLATFORM" = ubuntu ]; then
-    if [ "$CONF_DEST" != /etc/nginx/sites-enabled/default ]; then
+    if [ "$2" != --uninstall ] && [ "$CONF_DEST" != /etc/nginx/sites-enabled/default ]; then
         save_entry /etc/nginx/sites-enabled/default "$RECOVERY_DIR/default"
     fi
     if systemctl is-active --quiet nginx; then NGINX_WAS_RUNNING=1; fi
@@ -406,6 +392,24 @@ fi
 
 if [ "$2" = --uninstall ]; then
     save_entry "$INDEX_DIR/index.html" "$RECOVERY_DIR/index"
+    if [ "$PLATFORM" = ubuntu ]; then
+        echo "Removing nginx config for $DOMAIN..."
+        CONFIG_CHANGED=1
+        rm -f "$CONF_DEST"
+        nginx -t
+        NGINX_CHANGED=1
+        systemctl reload-or-restart nginx
+
+        # Preserve extra content, and keep the index until nginx accepts removal.
+        INDEX_CHANGED=1
+        rm -f "$INDEX_DIR/index.html"
+        COMMITTED=1
+        rmdir "$INDEX_DIR" 2>/dev/null || true
+        echo "Note: nginx default site was not restored."
+        echo "  To restore: ln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default"
+        echo "Done."
+        exit 0
+    fi
     uci export uhttpd > "$RECOVERY_DIR/uhttpd"
     if /etc/init.d/nginx enabled; then NGINX_WAS_ENABLED=1; fi
     LUCI_HOME=$(uci -q get uhttpd.main.home)

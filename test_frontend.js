@@ -128,6 +128,81 @@ async function testFetchBodyTimeout() {
   }
 }
 
+async function testIpInfoTimeout() {
+  const info = { lan: [{ interface: 'eth0', ipv4: '192.168.1.20' }],
+    public: { error: 'lookup failed' }, tailscale: {} };
+  const responses = new Set(), timers = new Set();
+  let ipRequests = 0, completedIPs = 0;
+  const server = http.createServer((request, response) => {
+    if (request.url === '/api/ip-info') {
+      ipRequests++;
+      // Two public-IP lookups can each spend 3 s timing out before LAN data returns.
+      const timer = setTimeout(() => {
+        responses.delete(timer);
+        completedIPs++;
+        response.setHeader('Content-Type', 'application/json');
+        response.end(JSON.stringify(info));
+      }, 6000);
+      responses.add(timer);
+    } else if (request.url !== '/stall') response.end('');
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const makeContext = () => {
+    const dom = makeDOM(['ip-info-content']), statuses = {};
+    const context = vm.createContext({
+      ...dom, statuses, availableEndpoints: null, API_BASE: '/api/4', AbortController,
+      fetch: (url, options) => fetch(base + url, options),
+      setTimeout(callback, delay) {
+        const timer = setTimeout(() => { timers.delete(timer); callback(); }, delay);
+        timers.add(timer);
+        return timer;
+      },
+      clearTimeout(timer) { timers.delete(timer); clearTimeout(timer); },
+      updateCardNoData: (id, ok) => { statuses[id] = ok; }, updateCacheDisplay() {}, escapeHtml: String,
+      renderGpuInfo() {}, renderDrives() {}, renderMail() {}, renderHardware() {},
+      renderDriveHealth() {}, renderSystemInfo() {},
+      diskCapture: { handleResponse() {} }, networkCapture: { handleResponse() {} },
+    });
+    evaluate(context,
+      between(config, 'const IP_INFO_TIMEOUT_MS', 'const SLOW_POLL_INTERVAL') +
+      between(config, 'async function safeFetch', '// The CPU core temperatures') +
+      between(app, 'function renderIpInfo', '// System Mail card') +
+      between(app, 'async function fetchSlowData', '// One poll at a time') +
+      between(app, 'async function refreshData', '// Set up refresh button handlers') +
+      "Object.keys(dataCache).filter(key => key !== 'ipInfo').forEach(key => updateCache(key, []));");
+    return context;
+  };
+  const scheduled = makeContext(), manual = makeContext();
+  try {
+    const [, , ordinary] = await Promise.all([
+      scheduled.fetchSlowData(),
+      manual.refreshData('ipInfo', { classList: { add() {}, remove() {} } }),
+      scheduled.safeFetch('/stall', {}).then(result => {
+        assert.equal(completedIPs, 0, 'ordinary requests time out before the slower IP response');
+        return result;
+      }),
+    ]);
+    assert.equal(ordinary.errorType, 'timeout', 'ordinary requests still use the shorter deadline');
+    assert.equal(ipRequests, 2, 'both scheduled and manual refresh requested IP information');
+    for (const context of [scheduled, manual]) {
+      assert.deepEqual(plain(context.getCache('ipInfo')), info);
+      const html = context.elements.get('ip-info-content').innerHTML;
+      assert(html.includes('192.168.1.20') && html.includes('lookup failed'), 'LAN data survives public lookup timeouts');
+      assert.equal(context.statuses['ip-info'], true);
+    }
+    assert.equal(timers.size, 0, 'completed and aborted requests clear their deadlines');
+  } finally {
+    timers.forEach(clearTimeout);
+    responses.forEach(clearTimeout);
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+}
+
 function testGpuRecovery() {
   const context = liveContext(['gpu-value', 'gpu-mem-value']);
   context.charts = { gpu: makeChart(), gpuMem: makeChart() };
@@ -592,6 +667,7 @@ async function testCaptureCacheAge() {
     },
   });
   evaluate(context,
+    between(config, 'const IP_INFO_TIMEOUT_MS', 'const SLOW_POLL_INTERVAL') +
     between(config, 'const dataCache =', '// The CPU core temperatures') +
     between(config, 'function formatTimeAgo', 'function updateCacheDisplay') +
     between(app, 'function createCaptureState', '// Unified processes table state') +
@@ -827,7 +903,7 @@ function testLiveSampleTimes() {
 }
 
 (async () => {
-  for (const test of [testFetchBodyTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
+  for (const test of [testFetchBodyTimeout, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testCaptureCacheAge, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes]) {
     await test();
