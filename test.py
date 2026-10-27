@@ -1340,6 +1340,41 @@ def test_subprocess_decoding_unit() -> None:
             os.environ["PATH"] = orig_path
 
 
+def test_gpu_info_partial_unit() -> None:
+    """Unsupported nvidia-smi fields must not hide usable GPU metadata."""
+    from unittest.mock import patch
+    import server
+
+    print(f"\n{BOLD}partial GPU information unit tests{RESET}\n")
+    output = (
+        "0, NVIDIA H100 80GB HBM3, [N/A], 87, 81559, 30, 141, 700, 580.65.06\n"
+        "1, NVIDIA Virtual GPU, 0, N/A, 8192, [Not Supported], nan, inf, 580.65.06\n"
+        "bad, invalid index, 0, 0, 8192, 30, 0, 100, 580.65.06\n"
+    )
+    with patch.object(server.subprocess, "run", side_effect=[
+        subprocess.CompletedProcess([], 0, output, ""),
+        subprocess.CompletedProcess([], 0, "CUDA Version: 13.0\n", ""),
+    ]):
+        gpus = server._get_gpu_info()
+    check([g["index"] for g in gpus] == [0, 1],
+          "GPU info: unavailable metrics preserve rows; invalid index is skipped")
+    if len(gpus) != 2:
+        return
+    check(gpus[0]["utilization"] is None and gpus[0]["memory_used"] == 87
+          and gpus[0]["memory_total"] == 81559 and gpus[0]["temperature"] == 30,
+          "GPU info: MIG utilization N/A preserves memory and temperature")
+    check(gpus[0]["name"] == "NVIDIA H100 80GB HBM3"
+          and gpus[0]["driver_version"] == "580.65.06" and gpus[0]["cuda_version"] == "13.0",
+          "GPU info: partial readings preserve device identity and versions")
+    check(gpus[1]["utilization"] == 0 and gpus[1]["memory_total"] == 8192
+          and gpus[1]["memory_used"] is None and gpus[1]["temperature"] is None,
+          "GPU info: genuine zero and known capacity survive other unavailable fields")
+    check(gpus[1]["power_draw"] is None and gpus[1]["power_limit"] is None,
+          "GPU info: non-finite metrics stay unavailable")
+    check(json.loads(json.dumps(gpus, allow_nan=False)) == gpus,
+          "GPU info: partial readings serialize as valid JSON")
+
+
 def test_null_metrics_unit() -> None:
     """Unit tests for null-safe metric handling (no server/Glances/GPU needed).
 
@@ -2084,6 +2119,7 @@ def main() -> int:
     test_history_fetch_js()
     test_auth_throttle_unit()
     test_subprocess_decoding_unit()
+    test_gpu_info_partial_unit()
     test_null_metrics_unit()
     test_process_history_unit()
     test_gpu_processes_unit()

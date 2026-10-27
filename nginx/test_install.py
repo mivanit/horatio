@@ -57,6 +57,14 @@ elif name == "uci":
     config = root / "uci.json"
     if args == ["-q", "get", "nginx.global.uci_enable"]:
         print(os.environ.get("HORATIO_UCI_ENABLED", "true"))
+    elif args[:3] == ["-q", "show", "nginx"]:
+        for key, value in json.loads((root / "nginx-uci.json").read_text()).items():
+            print(key + "=" + repr(value))
+    elif args[:2] == ["-q", "get"]:
+        source = root / "nginx-uci.json" if args[2].startswith("nginx.") else config
+        data = json.loads(source.read_text())
+        if args[2] not in data: sys.exit(1)
+        print(data[args[2]])
     elif args[0] == "export":
         sys.stdout.write(config.read_text())
     elif args[0] == "import":
@@ -74,6 +82,12 @@ elif name in ("nginx-service", "uhttpd-service"):
         "phase": "initial", "running": name == "uhttpd-service" or os.environ.get("HORATIO_WAS_RUNNING", "1") == "1",
         "checks": 0,
     }
+    if args == ["enabled"]:
+        enabled = root / "nginx-enabled"
+        value = enabled.read_text() if enabled.exists() else os.environ.get("HORATIO_WAS_ENABLED", "1")
+        sys.exit(0 if value == "1" else 1)
+    if args in (["enable"], ["disable"]):
+        (root / "nginx-enabled").write_text("1" if args == ["enable"] else "0")
     if args == ["running"]:
         state["checks"] += 1
         state_file.write_text(json.dumps(state))
@@ -92,6 +106,8 @@ elif name in ("nginx-service", "uhttpd-service"):
             candidate = json.loads((root / "uci.json").read_text())["uhttpd.main.listen_http"] == "127.0.0.1:8081"
         else:
             candidate = "proxy_pass" in (root / "etc/nginx/conf.d/example-internal.conf").read_text()
+        if os.environ.get("HORATIO_UNINSTALL"):
+            candidate = not candidate if name == "uhttpd-service" else False
         state = {"phase": "candidate" if candidate else "rollback", "running": True, "checks": 0}
         if candidate and failure == name:
             state["running"] = False
@@ -99,6 +115,16 @@ elif name in ("nginx-service", "uhttpd-service"):
             sys.exit(1)
     state_file.write_text(json.dumps(state))
 elif name == "wget":
+    if "--no-check-certificate" in args:
+        assert args[:-1] == ["-qO-", "-T", "2", "-Y", "off", "--no-check-certificate"]
+        if failure == "luci-probe": sys.exit(4)
+        assert (root / "etc/nginx/conf.d/example-internal.conf").exists(), "configuration removed before recovery"
+        assert (root / "www/example-internal/index.html").exists(), "index removed before recovery"
+        assert (root / "nginx-enabled").read_text() == "0", "nginx may reclaim ports on boot"
+        assert json.loads((root / "nginx-service-state.json").read_text())["phase"] == "stopping"
+        home = json.loads((root / "uci.json").read_text())["uhttpd.main.home"]
+        sys.stdout.write((pathlib.Path(home) / args[-1].rsplit("/", 1)[1]).read_text())
+        sys.exit(0)
     assert args == ["-qO-", "-T", "2", "-Y", "off", "--header=Host: example.internal", "http://127.0.0.1/"]
     attempts = sum(e["command"] == "wget" for e in previous)
     if failure == "nginx-async" or attempts < int(os.environ.get("HORATIO_READY_DELAY", "0")):
@@ -112,6 +138,11 @@ elif name == "mv":
         print("injected restore failure", file=sys.stderr)
         sys.exit(1)
     sys.exit(subprocess.run([os.environ["HORATIO_REAL_MV"], *args]).returncode)
+elif name == "rm":
+    if failure == "remove-index" and args[-1] == str(root / "www/example-internal/index.html"):
+        print("injected index removal failure", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(subprocess.run([os.environ["HORATIO_REAL_RM"], *args]).returncode)
 '''
 
 
@@ -132,12 +163,12 @@ class InstallerTests(unittest.TestCase):
         # A closed PATH allows a real missing-nginx/apk-only OpenWrt scenario,
         # regardless of commands installed on the test host.
         for name in ("awk", "basename", "chmod", "cp", "dirname", "grep", "head",
-                     "mkdir", "mktemp", "mv", "rm", "sed", "timeout", "tr"):
+                     "mkdir", "mktemp", "mv", "rm", "rmdir", "sed", "timeout", "tr"):
             command = shutil.which(name)
             self.assertIsNotNone(command, name)
             (self.bin / name).symlink_to(command)
         self.env = dict(os.environ, PATH=str(self.bin), HORATIO_NGINX_TEST_ROOT=str(self.root),
-                        HORATIO_REAL_MV=shutil.which("mv"))
+                        HORATIO_REAL_MV=shutil.which("mv"), HORATIO_REAL_RM=shutil.which("rm"))
         script = (ROOT / "nginx/install.sh").read_text()
         script = script.replace("/etc/nginx", str(self.nginx))
         script = script.replace("/etc/init.d", str(self.root / "init.d"))
@@ -153,8 +184,195 @@ class InstallerTests(unittest.TestCase):
             "uhttpd.main.listen_http": ["0.0.0.0:80", "[::]:80"],
             "uhttpd.main.listen_https": ["0.0.0.0:443", "[::]:443"],
             "uhttpd.custom.option": "keep this",
+            "uhttpd.main.home": str(self.root / "www/luci"),
         }, indent=2)
         (self.root / "uci.json").write_text(self.original_uci)
+
+    def prepare_uninstall(self):
+        self.prepare("openwrt")
+        self.conf.write_text("# generated configuration\n# proxy_pass\n")
+        self.runtime_conf.parent.mkdir(parents=True)
+        self.runtime_conf.write_text("# generated UCI configuration\n")
+        (self.root / "www/luci").mkdir(parents=True)
+        (self.nginx / "module.d").mkdir()
+        (self.nginx / "restrict_locally").write_text("allow 127.0.0.0/8;\nallow 192.168.0.0/16;\ndeny all;\n")
+        (self.nginx / "uci.conf.template").write_text('''# UCI_CONF_VERSION=1.2
+worker_processes auto;
+user root;
+include module.d/*.module;
+events {}
+http {
+    access_log off;
+    log_format openwrt
+        '$request_method $scheme://$host$request_uri => $status'
+        ' (${body_bytes_sent}B in ${request_time}s) <- $http_referer';
+    include mime.types;
+    default_type application/octet-stream;
+    sendfile on;
+    client_max_body_size 128M;
+    large_client_header_buffers 2 1k;
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    root /www;
+    #UCI_HTTP_CONFIG
+    include conf.d/*.conf;
+}
+''')
+        (self.root / "nginx-uci.json").write_text(json.dumps({
+            "nginx.global": "main", "nginx.global.uci_enable": "true",
+            "nginx._lan": "server", "nginx._lan.listen": "443 ssl default_server [::]:443 ssl default_server",
+            "nginx._lan.server_name": "_lan", "nginx._lan.include": "restrict_locally conf.d/*.locations",
+            "nginx._lan.uci_manage_ssl": "self-signed", "nginx._lan.ssl_certificate": "/etc/nginx/conf.d/_lan.crt",
+            "nginx._lan.ssl_certificate_key": "/etc/nginx/conf.d/_lan.key",
+            "nginx._lan.ssl_session_cache": "shared:SSL:32k", "nginx._lan.ssl_session_timeout": "64m",
+            "nginx._lan.access_log": "off; # logd openwrt",
+            "nginx._redirect2ssl": "server", "nginx._redirect2ssl.listen": "80 [::]:80",
+            "nginx._redirect2ssl.server_name": "_redirect2ssl",
+            "nginx._redirect2ssl.return": "302 https://$host$request_uri",
+        }))
+        current = json.loads(self.original_uci)
+        current["uhttpd.main.listen_http"] = "127.0.0.1:8081"
+        current.pop("uhttpd.main.listen_https")
+        self.original_uci = json.dumps(current, indent=2)
+        (self.root / "uci.json").write_text(self.original_uci)
+
+    def run_uninstall(self, failure="", **env):
+        return subprocess.run(["/bin/sh", str(self.script), str(self.services), "--uninstall"],
+                              env=dict(self.env, HORATIO_NGINX_FAIL=failure, HORATIO_UNINSTALL="1", **env),
+                              capture_output=True, text=True, timeout=10)
+
+    def test_uninstall_releases_ports_disables_nginx_and_preserves_extra_content(self):
+        self.prepare_uninstall()
+        asset = self.index.parent / "custom-logo.svg"
+        asset.write_text("keep this user asset")
+        result = self.run_uninstall()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.conf.exists())
+        self.assertFalse(self.index.exists())
+        self.assertEqual(asset.read_text(), "keep this user asset")
+        self.assertEqual((self.root / "nginx-enabled").read_text(), "0")
+        events = self.events()
+        stop = next(i for i, e in enumerate(events) if e["command"] == "nginx-service" and e["args"] == ["stop"])
+        restart = next(i for i, e in enumerate(events) if e["command"] == "uhttpd-service" and e["args"] == ["restart"])
+        self.assertLess(stop, restart)
+        self.assertFalse(any(e["command"] == "nginx-service" and e["args"] in (["start"], ["restart"]) for e in events))
+        self.assertEqual(json.loads((self.root / "uci.json").read_text())["uhttpd.main.listen_http"], "0.0.0.0:80")
+        self.assertEqual(list((self.root / "www/luci").iterdir()), [])
+        self.assertEqual(list(self.nginx.glob(".horatio-*")), [])
+
+    def test_uninstall_failed_port_handoff_restores_files_uci_and_nginx(self):
+        self.prepare_uninstall()
+        config, index = self.conf.read_bytes(), self.index.read_bytes()
+        result = self.run_uninstall("luci-probe")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not serve its verification file", result.stderr)
+        self.assertEqual(self.conf.read_bytes(), config)
+        self.assertEqual(self.index.read_bytes(), index)
+        self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
+        self.assertEqual((self.root / "nginx-enabled").read_text(), "1")
+        state = json.loads((self.root / "nginx-service-state.json").read_text())
+        self.assertTrue(state["running"])
+        self.assertEqual(list((self.root / "www/luci").iterdir()), [])
+        self.assertEqual(list(self.nginx.glob(".horatio-*")), [])
+
+    def test_uninstall_failed_deferred_removal_restores_original_files(self):
+        self.prepare_uninstall()
+        config, index = self.conf.read_bytes(), self.index.read_bytes()
+        (self.bin / "rm").unlink()
+        (self.bin / "rm").symlink_to(self.mock)
+        result = self.run_uninstall("remove-index")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("injected index removal failure", result.stderr)
+        self.assertEqual(self.conf.read_bytes(), config)
+        self.assertEqual(self.index.read_bytes(), index)
+        self.assertEqual(self.conf.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(self.index.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
+        self.assertEqual((self.root / "nginx-enabled").read_text(), "1")
+        self.assertTrue(json.loads((self.root / "nginx-service-state.json").read_text())["running"])
+        self.assertEqual(list(self.nginx.glob(".horatio-*")), [])
+
+    def test_uninstall_failed_handoff_preserves_disabled_stopped_state(self):
+        self.prepare_uninstall()
+        result = self.run_uninstall("luci-probe", HORATIO_WAS_RUNNING="0", HORATIO_WAS_ENABLED="0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.root / "nginx-enabled").read_text(), "0")
+        self.assertFalse(any(e["command"] == "nginx-service" and e["args"] == ["start"] for e in self.events()))
+        self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
+        self.assertTrue(self.conf.is_file() and self.index.is_file())
+
+    def test_uninstall_failed_recovery_retains_backups(self):
+        self.prepare_uninstall()
+        result = self.run_uninstall("luci-probe", HORATIO_FAIL_RESTORE="uhttpd")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("recovery was incomplete", result.stderr)
+        backups = list(self.nginx.glob(".horatio-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / "config").read_bytes(), self.conf.read_bytes())
+        self.assertEqual((backups[0] / "index").read_bytes(), self.index.read_bytes())
+        self.assertEqual((backups[0] / "uhttpd").read_text(), self.original_uci)
+        self.assertEqual(list((self.root / "www/luci").iterdir()), [])
+
+    def test_uninstall_unknown_setups_refused_before_any_mutation(self):
+        for kind in ("manual", "server", "root", "listen", "locations", "conf", "template", "module", "restrict"):
+            with self.subTest(kind=kind):
+                case = InstallerTests()
+                case.setUp()
+                try:
+                    case.prepare_uninstall()
+                    data = json.loads((case.root / "nginx-uci.json").read_text())
+                    env = {}
+                    if kind == "manual":
+                        env["HORATIO_UCI_ENABLED"] = "false"
+                    elif kind == "server":
+                        data["nginx.custom"] = "server"
+                    elif kind == "root":
+                        data["nginx._lan.root"] = "/www/custom"
+                    elif kind == "listen":
+                        data["nginx._lan.listen"] = "8443 ssl"
+                    elif kind in ("locations", "conf"):
+                        (case.nginx / "conf.d" / ("custom." + kind)).write_text("# keep custom site\n")
+                    elif kind == "template":
+                        with (case.nginx / "uci.conf.template").open("a") as f:
+                            f.write("# custom include\ninclude custom.conf;\n")
+                    elif kind == "module":
+                        (case.nginx / "module.d/custom.module").write_text("include custom.conf;\n")
+                    elif kind == "restrict":
+                        (case.nginx / "restrict_locally").write_text("location /custom { proxy_pass http://localhost:9000; }\n")
+                    (case.root / "nginx-uci.json").write_text(json.dumps(data))
+                    config, index = case.conf.read_bytes(), case.index.read_bytes()
+                    result = case.run_uninstall(**env)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("no files or services were changed", result.stderr)
+                    self.assertEqual(case.conf.read_bytes(), config)
+                    self.assertEqual(case.index.read_bytes(), index)
+                    self.assertEqual((case.root / "uci.json").read_text(), case.original_uci)
+                    self.assertFalse(any(e["command"].endswith("-service") for e in case.events()))
+                    self.assertEqual(list(case.nginx.glob(".horatio-*")), [])
+                finally:
+                    case.doCleanups()
+
+    def test_uninstall_accepts_stock_ipv4_only_routing(self):
+        self.prepare_uninstall()
+        path = self.root / "nginx-uci.json"
+        data = json.loads(path.read_text())
+        data["nginx._lan.listen"] = "443 ssl default_server"
+        data["nginx._redirect2ssl.listen"] = "80"
+        path.write_text(json.dumps(data))
+        result = self.run_uninstall()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.index.parent.exists())
+
+    def test_uninstall_invalid_probe_home_does_not_stop_services(self):
+        self.prepare_uninstall()
+        (self.root / "www/luci").rmdir()
+        result = self.run_uninstall()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not a directory", result.stderr)
+        self.assertTrue(self.conf.is_file() and self.index.is_file())
+        self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
+        self.assertFalse(any(e["command"].endswith("-service") and e["args"] not in (["running"], ["enabled"]) for e in self.events()))
 
     def prepare(self, platform="ubuntu", *, nginx=True):
         if platform == "ubuntu":

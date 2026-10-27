@@ -52,6 +52,19 @@ sh install.sh myrouter.services --uninstall   # remove, restores uhttpd to port 
 ```
 
 On OpenWrt the script moves uhttpd (LuCI) from port 80 to 8081 so nginx can take port 80.
-Uninstalling reverses this.
+Automatic uninstall supports a dedicated nginx installation with the stock UCI
+`_lan`/`_redirect2ssl` servers and nginx-util 1.2 template, with this services file
+as its only custom site. It stops and disables nginx (including its packaged
+80/443 listeners), restores uhttpd, and verifies a temporary file through uhttpd
+before removing the generated configuration and `index.html`. Other files in
+the index directory are kept. A failed transition restores the previous setup;
+incomplete recovery leaves backups at the path printed by the installer.
+
+Manual configurations, extra sites or location files, and changed or older
+unrecognized templates are refused before any changes. For those setups, first
+arrange which server will own ports 80/443: preserve nginx for its other sites,
+or stop/disable it and verify uhttpd after restoring its listeners. Then remove
+only this services file's generated configuration and index. Do not restart
+nginx with remaining 80/443 listeners while assigning those ports to uhttpd.
 
 `sh install.sh --help` prints the full usage.

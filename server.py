@@ -2529,8 +2529,9 @@ def _get_gpu_info() -> list[dict[str, int | float | str | None]]:
     """Detailed GPU info from nvidia-smi (sync, called from thread pool).
 
     One shape: a list of GPU dicts, empty when nvidia-smi is missing, times out
-    or fails (like get_gpu_stats); the reason goes to the log. The UI's cache
-    readers and test.py rely on always getting a list.
+    or fails (like get_gpu_stats); the reason goes to the log. Unsupported
+    metric fields stay None so, for example, unavailable MIG utilization does
+    not hide the GPU's usable memory totals from the live charts.
     """
     try:
         result = subprocess.run(
@@ -2571,6 +2572,12 @@ def _get_gpu_info() -> list[dict[str, int | float | str | None]]:
     except Exception:
         pass  # CUDA version is optional — GPU data still valid
 
+    def metric(value: str) -> float | None:
+        try:
+            return _num(float(value))
+        except ValueError:
+            return None
+
     gpus: list[dict[str, int | float | str | None]] = []
     for line in result.stdout.strip().split("\n"):
         if not line.strip():
@@ -2578,25 +2585,16 @@ def _get_gpu_info() -> list[dict[str, int | float | str | None]]:
         parts: list[str] = [p.strip() for p in line.split(",")]
         if len(parts) >= 9:
             try:
-                # power.draw may be "[N/A]" if not supported
-                try:
-                    power_draw = float(parts[6])
-                except (ValueError, TypeError):
-                    power_draw = None
-                try:
-                    power_limit = float(parts[7])
-                except (ValueError, TypeError):
-                    power_limit = None
                 gpus.append(
                     {
                         "index": int(parts[0]),
                         "name": parts[1],
-                        "utilization": float(parts[2]),  # %
-                        "memory_used": float(parts[3]),  # MiB
-                        "memory_total": float(parts[4]),  # MiB
-                        "temperature": float(parts[5]),  # °C
-                        "power_draw": power_draw,  # W
-                        "power_limit": power_limit,  # W
+                        "utilization": metric(parts[2]),  # %
+                        "memory_used": metric(parts[3]),  # MiB
+                        "memory_total": metric(parts[4]),  # MiB
+                        "temperature": metric(parts[5]),  # °C
+                        "power_draw": metric(parts[6]),  # W
+                        "power_limit": metric(parts[7]),  # W
                         "driver_version": parts[8],
                         "cuda_version": cuda_version,
                     }

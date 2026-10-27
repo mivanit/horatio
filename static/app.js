@@ -390,15 +390,17 @@ function renderGpuInfo(data) {
   if (data && Array.isArray(data) && data.length > 0) {
     gpuInfoContent.innerHTML = data.map(g => {
       const shortName = escapeHtml(abbreviateGpuName(g.name));
-      const memUsedGiB = (g.memory_used / 1024).toFixed(1);
-      const memTotalGiB = (g.memory_total / 1024).toFixed(1);
+      const utilization = Number.isFinite(g.utilization) ? Math.round(g.utilization) : '--';
+      const temperature = Number.isFinite(g.temperature) ? Math.round(g.temperature) : '--';
+      const memUsedGiB = Number.isFinite(g.memory_used) ? (g.memory_used / 1024).toFixed(1) : '--';
+      const memTotalGiB = Number.isFinite(g.memory_total) ? (g.memory_total / 1024).toFixed(1) : '--';
       const powerStr = g.power_draw != null && g.power_limit != null
         ? `<span>${Math.round(g.power_draw)} / ${Math.round(g.power_limit)} W</span>` : '';
       return `<div class="info-item">
         <div class="info-name">GPU ${g.index}: ${shortName}</div>
         <div class="info-details">
-          <span>Util: ${Math.round(g.utilization)}%</span>
-          <span>Temp: ${Math.round(g.temperature)}°C</span>
+          <span>Util: ${utilization}%</span>
+          <span>Temp: ${temperature}°C</span>
           ${powerStr}
         </div>
         <div class="info-details">

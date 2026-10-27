@@ -214,6 +214,44 @@ function testGpuUnavailableReadings() {
   assert.deepEqual(context.errors, []);
 }
 
+function testGpuInfoUnavailableReadings() {
+  const context = liveContext(['gpu-info-card', 'gpu-info-content', 'gpu-value', 'gpu-mem-value']);
+  context.charts = { gpu: makeChart(), gpuMem: makeChart() };
+  context.updateGpuLegend = () => {};
+  context.updateCacheDisplay = () => {};
+  context.escapeHtml = String;
+  context.abbreviateGpuName = String;
+  evaluate(context,
+    between(app, 'function renderGpuInfo', 'function renderCpuInfo') +
+    'function tickGpu() {' + between(app, "  guard('gpu',", "  guard('network',") + '}');
+  const info = { index: 0, name: 'NVIDIA A100', driver_version: 'test',
+    utilization: null, temperature: 55, memory_used: 12288, memory_total: 24576 };
+  context.dataCache.gpuInfo = { data: [info] };
+  context.renderGpuInfo([info]);
+  const html = () => context.elements.get('gpu-info-content').innerHTML;
+  assert(html().includes('GPU 0: NVIDIA A100'));
+  assert(html().includes('Util: --%'));
+  assert(html().includes('Temp: 55°C'));
+  assert(html().includes('Mem: 12.0 / 24.0 GB'));
+  context.gpu = { ok: true, data: [{ proc: null, mem: 50 }] };
+  context.tickGpu();
+  assert.equal(context.elements.get('gpu-mem-used-0').textContent, '12.0');
+  assert.equal(evaluate(context, 'history.gpuMems[0].at(-1)'), 12);
+  assert.equal(context.statuses['gpu-mem'], true, 'unavailable utilization does not hide valid memory');
+  for (const unavailable of [null, undefined, NaN, Infinity]) {
+    context.renderGpuInfo([{ ...info, utilization: unavailable, temperature: unavailable,
+      memory_used: unavailable, memory_total: unavailable }]);
+    assert(html().includes('Util: --%'));
+    assert(html().includes('Temp: --°C'));
+    assert(html().includes('Mem: -- / -- GB'));
+  }
+  context.renderGpuInfo([{ ...info, utilization: 0, temperature: 0, memory_used: 0 }]);
+  assert(html().includes('Util: 0%'));
+  assert(html().includes('Temp: 0°C'));
+  assert(html().includes('Mem: 0.0 / 24.0 GB'), 'genuine zeros remain visible');
+  assert.deepEqual(context.errors, []);
+}
+
 function testDriveTemperatureFreshness() {
   const context = liveContext(['temps-value', 'fans-card', 'power-card']);
   let now = 100000000;
@@ -789,7 +827,7 @@ function testLiveSampleTimes() {
 }
 
 (async () => {
-  for (const test of [testFetchBodyTimeout, testGpuRecovery, testGpuUnavailableReadings,
+  for (const test of [testFetchBodyTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testCaptureCacheAge, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes]) {
     await test();

@@ -66,30 +66,74 @@ else
 fi
 
 # --- Uninstall ---
-if [ "$2" = "--uninstall" ]; then
+if [ "$2" = "--uninstall" ] && [ "$PLATFORM" = ubuntu ]; then
     echo "Removing nginx config for $DOMAIN..."
     rm -f "$CONF_DEST"
     rm -rf "$INDEX_DIR"
 
-    if [ "$PLATFORM" = "openwrt" ]; then
-        echo "Restoring uhttpd to port 80..."
-        uci set uhttpd.main.listen_http='0.0.0.0:80'
-        uci set uhttpd.main.listen_https='0.0.0.0:443' 2>/dev/null || true
-        uci commit uhttpd
-        /etc/init.d/uhttpd restart
-        /etc/init.d/nginx restart 2>/dev/null || true
-    else
-        nginx -t 2>/dev/null && systemctl reload-or-restart nginx 2>/dev/null || true
-        echo "Note: nginx default site was not restored."
-        echo "  To restore: ln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default"
-    fi
+    nginx -t 2>/dev/null && systemctl reload-or-restart nginx 2>/dev/null || true
+    echo "Note: nginx default site was not restored."
+    echo "  To restore: ln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default"
 
     echo "Done."
     exit 0
 fi
 
+# Automatic OpenWrt removal stops nginx altogether: its packaged defaults also
+# claim ports 80/443. Only do that for the dedicated, stock UCI setup. Unknown
+# configurations need a manual port handoff, not an nginx-language parser here.
+stock_openwrt_nginx() {
+    case "$(uci -q get nginx.global.uci_enable)" in 1|on|true|yes|enabled) ;; *) return 1 ;; esac
+    [ "$(uci -q get nginx.global)" = main ] && [ "$(uci -q get nginx._lan)" = server ] &&
+        [ "$(uci -q get nginx._redirect2ssl)" = server ] || return 1
+    keys=$(uci -q show nginx) || return 1
+    if printf '%s\n' "$keys" | sed 's/=.*//' | grep -Ev '^nginx\.(global(\.uci_enable)?|_lan(\.(listen|server_name|include|uci_manage_ssl|ssl_certificate|ssl_certificate_key|ssl_session_cache|ssl_session_timeout|access_log))?|_redirect2ssl(\.(listen|server_name|return))?)$' >/dev/null; then return 1; fi
+    [ "$(uci -q get nginx._lan.server_name)" = _lan ] &&
+        [ "$(uci -q get nginx._redirect2ssl.server_name)" = _redirect2ssl ] &&
+        [ "$(uci -q get nginx._lan.include)" = 'restrict_locally conf.d/*.locations' ] &&
+        [ "$(uci -q get nginx._redirect2ssl.return)" = '302 https://$host$request_uri' ] || return 1
+    case "$(uci -q get nginx._lan.listen)" in '443 ssl default_server'|'443 ssl default_server [::]:443 ssl default_server') ;; *) return 1 ;; esac
+    case "$(uci -q get nginx._redirect2ssl.listen)" in '80'|'80 [::]:80') ;; *) return 1 ;; esac
+    for file in /etc/nginx/conf.d/*.conf /etc/nginx/conf.d/*.locations; do
+        [ "$file" = "$CONF_DEST" ] || [ ! -e "$file" ] || return 1
+    done
+    # The upstream nginx-util 1.2 template, ignoring comments/whitespace. This
+    # also excludes custom sites/includes added directly to the template.
+    expected='worker_processes auto; user root; include module.d/*.module; events {}
+http {
+access_log off;
+log_format openwrt
+  '\''$request_method $scheme://$host$request_uri => $status'\''
+  '\'' (${body_bytes_sent}B in ${request_time}s) <- $http_referer'\'';
+include mime.types; default_type application/octet-stream; sendfile on;
+client_max_body_size 128M; large_client_header_buffers 2 1k;
+gzip on; gzip_vary on; gzip_proxied any;
+root /www;
+include conf.d/*.conf;
+}'
+    [ -f /etc/nginx/uci.conf.template ] || return 1
+    actual=$(sed '/^[[:space:]]*#/d' /etc/nginx/uci.conf.template | tr -d '[:space:]')
+    [ "$actual" = "$(printf '%s' "$expected" | tr -d '[:space:]')" ] || return 1
+    # Included support files must not hide additional sites either.
+    for file in /etc/nginx/module.d/*.module; do
+        [ -e "$file" ] || continue
+        if sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$file" | grep -Ev '^[[:space:]]*load_module[[:space:]]+[^;]+;[[:space:]]*$' >/dev/null; then return 1; fi
+    done
+    [ -f /etc/nginx/restrict_locally ] || return 1
+    if sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' /etc/nginx/restrict_locally | grep -Ev '^[[:space:]]*(allow|deny)[[:space:]]+[^;]+;[[:space:]]*$' >/dev/null; then return 1; fi
+}
+
+if [ "$2" = --uninstall ]; then
+    stock_openwrt_nginx || {
+        echo "Error: automatic removal requires a dedicated stock OpenWrt nginx setup." >&2
+        echo "Custom/manual sites or an unrecognized template were found; no files or services were changed." >&2
+        echo "Arrange a manual port 80/443 handoff to uhttpd; see nginx/README.md." >&2
+        exit 1
+    }
+fi
+
 # --- Install nginx if needed ---
-if ! command -v nginx >/dev/null 2>&1; then
+if [ "$2" != --uninstall ] && ! command -v nginx >/dev/null 2>&1; then
     echo "Installing nginx..."
     if [ "$PLATFORM" = "ubuntu" ]; then
         apt install -y nginx
@@ -212,6 +256,9 @@ NGINX_CHANGED=0
 COMMITTED=0
 INDEX_TMP=""
 NGINX_WAS_RUNNING=0
+NGINX_WAS_ENABLED=0
+NGINX_ENABLE_CHANGED=0
+LUCI_PROBE=""
 
 save_entry() {
     [ ! -d "$1" ] || { echo "Error: expected a file, found a directory: $1" >&2; return 1; }
@@ -276,9 +323,25 @@ wait_openwrt_index() (
     exit 1
 )
 
+wait_openwrt_luci() (
+    attempts=0
+    while [ "$attempts" -lt 15 ]; do
+        if /etc/init.d/uhttpd running >/dev/null 2>&1 \
+            && body=$(timeout -s KILL 3 wget -qO- -T 2 -Y off --no-check-certificate "http://127.0.0.1/$(basename "$LUCI_PROBE")" 2>/dev/null) \
+            && [ "$body" = "$LUCI_TOKEN" ]; then
+            exit 0
+        fi
+        sleep 1
+        attempts=$((attempts + 1))
+    done
+    echo "Error: uhttpd did not serve its verification file after restoring port 80." >&2
+    exit 1
+)
+
 finish() {
     result=$?
     trap - 0 HUP INT TERM
+    [ -z "$LUCI_PROBE" ] || rm -f "$LUCI_PROBE" || true
     if [ "$COMMITTED" = 0 ]; then
         restored=1
         # A failed first install must release port 80 before LuCI returns to it.
@@ -299,6 +362,13 @@ finish() {
                 /etc/init.d/uhttpd restart && wait_openwrt_service uhttpd || restored=0
             else
                 restored=0
+            fi
+        fi
+        if [ "$NGINX_ENABLE_CHANGED" = 1 ]; then
+            if [ "$NGINX_WAS_ENABLED" = 1 ]; then
+                /etc/init.d/nginx enable || restored=0
+            else
+                /etc/init.d/nginx disable || restored=0
             fi
         fi
         if [ "$NGINX_CHANGED" = 1 ]; then
@@ -333,6 +403,41 @@ if [ "$PLATFORM" = ubuntu ]; then
 else
     if /etc/init.d/nginx running; then NGINX_WAS_RUNNING=1; fi
 fi
+
+if [ "$2" = --uninstall ]; then
+    save_entry "$INDEX_DIR/index.html" "$RECOVERY_DIR/index"
+    uci export uhttpd > "$RECOVERY_DIR/uhttpd"
+    if /etc/init.d/nginx enabled; then NGINX_WAS_ENABLED=1; fi
+    LUCI_HOME=$(uci -q get uhttpd.main.home)
+    [ -d "$LUCI_HOME" ] || { echo "Error: uhttpd.main.home is not a directory." >&2; exit 1; }
+    LUCI_PROBE=$(mktemp "$LUCI_HOME/horatio-check-XXXXXX")
+    LUCI_TOKEN=$(basename "$LUCI_PROBE")
+    printf '%s\n' "$LUCI_TOKEN" > "$LUCI_PROBE"
+    chmod 644 "$LUCI_PROBE"
+
+    echo "Releasing nginx listeners and restoring uhttpd..."
+    NGINX_CHANGED=1
+    stop_openwrt_nginx
+    NGINX_ENABLE_CHANGED=1
+    /etc/init.d/nginx disable
+    UHTTPD_CHANGED=1
+    uci set uhttpd.main.listen_http='0.0.0.0:80'
+    uci set uhttpd.main.listen_https='0.0.0.0:443'
+    uci commit uhttpd
+    /etc/init.d/uhttpd restart
+    wait_openwrt_luci
+
+    # Keep both generated files available for rollback until LuCI is ready.
+    CONFIG_CHANGED=1
+    rm -f "$CONF_DEST"
+    INDEX_CHANGED=1
+    rm -f "$INDEX_DIR/index.html"
+    COMMITTED=1
+    rmdir "$INDEX_DIR" 2>/dev/null || true  # preserve any other user content
+    echo "Done. LuCI is restored; nginx is stopped and disabled."
+    exit 0
+fi
+
 printf '%s\n' "$CONF" > "$RECOVERY_DIR/new-config"
 chmod 644 "$RECOVERY_DIR/new-config"
 CONFIG_CHANGED=1
