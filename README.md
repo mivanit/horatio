@@ -172,11 +172,25 @@ Node.js 18+ is required for the browser tests run by `test.py`, including
 the request timeout tests against a temporary localhost HTTP server.
 
 ```bash
-cp config.example.json config.json   # once
-uv sync
-uv run python test.py                # integration tests: starts a server, records into logs/
-uv run ruff check .
+uv sync --locked
+make format         # Ruff fixes and formatting (changes Python files)
+make check-format   # Ruff lint and formatting checks
+make typing         # ty type checking
+make test-linux     # Python/Glances integration + JS, installer, collector fixtures
+make test-openwrt   # native Lua tests; requires Lua 5.1 and Nixio
+make test           # both test suites; missing dependencies fail explicitly
+make check          # formatting, typing, and all tests (also the default target)
 ```
+
+The Linux suite requires Node.js and Git in addition to the Python dependencies.
+`make test-linux` copies current tracked and nonignored untracked source into a
+temporary directory, creates a fresh config from `config.example.json`, and runs
+the suite there. It preserves the checkout's config, password, and history.
+Running `uv run python test.py` directly still records into the checkout's `logs/`.
+
+There is currently no application test/lint CI workflow; these are local checks.
+The Makefile reports existing formatting/type failures rather than suppressing
+them. Avoid running the mutating `format` target concurrently with other targets.
 
 The collectors are tested against hand-written fixture directories; recipe in
 [`collector/README.md`](collector/README.md).
@@ -202,13 +216,90 @@ or the rate caps on history.
 Run the OpenWrt Lua tests from the checkout root:
 
 ```sh
-lua5.1 openwrt/test_history.lua   # requires Nixio
-lua5.1 openwrt/test_handler.lua
-lua5.1 openwrt/test_metrics.lua   # CPU/IP fixtures; no native modules or network
-python3 openwrt/test_install.py  # also run by test.py; no router needed
+make test-openwrt               # history runs under UTC and America/New_York
+# A native Lua/Nixio build outside the system installation also works:
+LUA_CPATH='/path/to/nixio/?.so;;' make test-openwrt LUA=/path/to/lua5.1
 ```
 
 The tests use temporary files, forked contenders, and injected I/O failures;
 they do not touch recorded history or the host's service configuration.
+They require Lua 5.1, native Nixio, gzip, and timezone data. On an OpenWrt box
+without GNU Make, run `lua openwrt/test_handler.lua`,
+`lua openwrt/test_metrics.lua`, and `lua openwrt/test_history.lua` directly.
+
+The appropriate environment depends on the claim being tested:
+
+| What is being checked | Environment | What it does not cover |
+|---|---|---|
+| Linux APIs and history, frontend logic, mocked installers/collectors | `make test-linux` on Linux with the locked Python environment and Node.js | Actual router services or GPU hardware |
+| Lua recording locks, interrupted writes, and rotation | `make test-openwrt` on Linux with real Lua 5.1/Nixio and gzip | OpenWrt's service lifecycle or flash storage |
+| Router installation and service readiness | A disposable, booted OpenWrt VM with its own UCI, procd, uhttpd, nginx, and BusyBox | Every custom router configuration or physical flash behavior |
+
+The Lua suite checks preservation after application/process failures, not
+durability through sudden power loss. A rootfs container or host Nixio build is
+useful for the Lua tests, but does not replace a booted router for service tests.
+
+<details>
+<summary>Build the native Lua test environment on Linux without installing host packages</summary>
+
+Requires a C toolchain, Make, Git, curl, and libcrypt development files. This
+recipe uses the [official Lua archive and checksum](https://www.lua.org/ftp/)
+and a pinned [OpenWrt Nixio source revision](https://github.com/openwrt/luci/tree/75a306df84a020c57a631ef5b4c02ace56d93387/libs/luci-lib-nixio).
+Run from the Horatio checkout:
+
+```sh
+(
+set -eu
+native_dir=$(mktemp -d /tmp/horatio-native-lua-XXXXXX)
+curl -fL https://www.lua.org/ftp/lua-5.1.5.tar.gz -o "$native_dir/lua.tar.gz"
+printf '%s  %s\n' \
+  2640fc56a795f29d28ef15e13c34a47e223960b0240e8cb0a82d9b0738695333 \
+  "$native_dir/lua.tar.gz" | sha256sum -c -
+tar -xzf "$native_dir/lua.tar.gz" -C "$native_dir"
+make -C "$native_dir/lua-5.1.5/src" all \
+  MYCFLAGS='-fPIC -DLUA_USE_POSIX -DLUA_USE_DLOPEN' \
+  MYLIBS=-ldl MYLDFLAGS=-Wl,-E
+
+git init "$native_dir/luci"
+git -C "$native_dir/luci" remote add origin https://github.com/openwrt/luci.git
+git -C "$native_dir/luci" fetch --depth 1 --filter=blob:none origin \
+  75a306df84a020c57a631ef5b4c02ace56d93387
+git -C "$native_dir/luci" sparse-checkout set libs/luci-lib-nixio
+git -C "$native_dir/luci" checkout --detach FETCH_HEAD
+nixio_src="$native_dir/luci/libs/luci-lib-nixio/src"
+make -C "$nixio_src" compile FPIC=-fPIC \
+  LUA_CFLAGS="-I$native_dir/lua-5.1.5/src" \
+  NIXIO_LDFLAGS='-shared -lm -ldl -lcrypt'
+
+LUA_CPATH="$nixio_src/?.so;;" \
+  make test-openwrt LUA="$native_dir/lua-5.1.5/src/lua"
+)
+```
+
+This runs the existing tests with native processes and file locks, but still
+uses the host's C library and utilities. It does not emulate a router.
+
+</details>
+
+For service integration, use a disposable VM of the OpenWrt release being
+deployed. The [official x86 images](https://downloads.openwrt.org/releases/25.12.6/targets/x86/64/)
+and [QEMU instructions](https://openwrt.org/docs/guide-user/virtualization/qemu)
+provide a starting point; a 25.12 guest uses `apk`, while older supported
+installations may use `opkg`. Boot the combined disk image with a writable
+snapshot, two virtual NICs for LAN/WAN, and host forwards bound to loopback.
+Inside a disposable 25.12 guest, install the test and service dependencies:
+
+```sh
+apk update
+apk add lua luci-lib-nixio luci-lib-jsonc uhttpd uhttpd-mod-lua \
+  luci nginx-ssl nginx-ssl-util make zoneinfo-northamerica
+```
+
+Copy the source checkout without local config/history, then run
+`make test-openwrt LUA=lua`. Separately exercise real dashboard install, update,
+and uninstall, plus the nginx/LuCI port handoff and a deliberately occupied port.
+The Python installer fixtures remain mocks even inside a VM. Save the guest disk
+and installed-package list if an exact environment must be repeated; package
+feeds can change. This VM procedure has not yet been boot-tested for Horatio.
 
 Chart.js (MIT) is fetched at install time; Glances (LGPL) is a Python dependency.
