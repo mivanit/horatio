@@ -93,10 +93,16 @@ if ! command -v nginx >/dev/null 2>&1; then
     echo "Installing nginx..."
     if [ "$PLATFORM" = "ubuntu" ]; then
         apt install -y nginx
+    elif command -v apk >/dev/null 2>&1; then
+        apk add nginx
     elif command -v opkg >/dev/null 2>&1; then
         opkg update && opkg install nginx
     fi
 fi
+command -v nginx >/dev/null 2>&1 || {
+    echo "Error: nginx is unavailable; no service configuration was changed." >&2
+    exit 1
+}
 
 # --- Generate nginx conf ---
 echo "Generating nginx config for $DOMAIN..."
@@ -184,25 +190,100 @@ ${LINKS}</ul>
 </body>
 </html>"
 
-# --- Write files ---
-mkdir -p "$INDEX_DIR"
-printf '%s\n' "$INDEX" > "$INDEX_DIR/index.html"
+# --- Publish with recovery until validation and service reload both succeed ---
+# Backups stay OUTSIDE nginx's include directories: sites-enabled/* would load
+# a backup as another live configuration. -P keeps symlinks as directory entries
+# instead of copying or later overwriting their targets.
+mkdir -p "$(dirname "$CONF_DEST")"
+RECOVERY_DIR="$(mktemp -d /etc/nginx/.horatio-XXXXXX)"
+CONFIG_CHANGED=0
+DEFAULT_CHANGED=0
+INDEX_CHANGED=0
+UHTTPD_CHANGED=0
+NGINX_CHANGED=0
+COMMITTED=0
+INDEX_TMP=""
+NGINX_WAS_RUNNING=0
 
-if [ "$PLATFORM" = "ubuntu" ]; then
+save_entry() {
+    [ ! -d "$1" ] || { echo "Error: expected a file, found a directory: $1" >&2; return 1; }
+    if [ -e "$1" ] || [ -L "$1" ]; then cp -pP "$1" "$2"; fi
+}
+
+restore_entry() {
+    if [ -e "$2" ] || [ -L "$2" ]; then
+        # Keep the backup until EVERY restore, including service restart, works.
+        cp -pP "$2" "$2.restore" && mv -f "$2.restore" "$1"
+    else
+        rm -f "$1"
+    fi
+}
+
+finish() {
+    result=$?
+    trap - 0 HUP INT TERM
+    if [ "$COMMITTED" = 0 ]; then
+        restored=1
+        # A failed first install must release port 80 before LuCI returns to it.
+        if [ "$PLATFORM" = openwrt ] && [ "$NGINX_CHANGED" = 1 ]; then
+            /etc/init.d/nginx stop || restored=0
+        fi
+        if [ "$CONFIG_CHANGED" = 1 ]; then
+            restore_entry "$CONF_DEST" "$RECOVERY_DIR/config" || restored=0
+        fi
+        if [ "$DEFAULT_CHANGED" = 1 ]; then
+            restore_entry /etc/nginx/sites-enabled/default "$RECOVERY_DIR/default" || restored=0
+        fi
+        if [ "$INDEX_CHANGED" = 1 ]; then
+            restore_entry "$INDEX_DIR/index.html" "$RECOVERY_DIR/index" || restored=0
+        fi
+        if [ "$UHTTPD_CHANGED" = 1 ]; then
+            if uci import uhttpd < "$RECOVERY_DIR/uhttpd" && uci commit uhttpd; then
+                /etc/init.d/uhttpd restart || restored=0
+            else
+                restored=0
+            fi
+        fi
+        if [ "$NGINX_CHANGED" = 1 ]; then
+            if [ "$PLATFORM" = ubuntu ]; then
+                if [ "$NGINX_WAS_RUNNING" = 1 ]; then
+                    systemctl reload-or-restart nginx || restored=0
+                else
+                    systemctl stop nginx || restored=0
+                fi
+            elif [ "$NGINX_WAS_RUNNING" = 1 ]; then
+                /etc/init.d/nginx start || restored=0
+            fi
+        fi
+        if [ "$restored" = 0 ]; then
+            echo "Error: recovery was incomplete; retained recovery files in $RECOVERY_DIR" >&2
+            exit 1
+        fi
+    fi
+    [ -z "$INDEX_TMP" ] || rm -f "$INDEX_TMP"
+    rm -rf "$RECOVERY_DIR"
+    exit "$result"
+}
+trap finish 0
+trap 'exit 1' HUP INT TERM
+
+save_entry "$CONF_DEST" "$RECOVERY_DIR/config"
+if [ "$PLATFORM" = ubuntu ]; then
+    if [ "$CONF_DEST" != /etc/nginx/sites-enabled/default ]; then
+        save_entry /etc/nginx/sites-enabled/default "$RECOVERY_DIR/default"
+    fi
+    if systemctl is-active --quiet nginx; then NGINX_WAS_RUNNING=1; fi
+else
+    if /etc/init.d/nginx running; then NGINX_WAS_RUNNING=1; fi
+fi
+printf '%s\n' "$CONF" > "$RECOVERY_DIR/new-config"
+chmod 644 "$RECOVERY_DIR/new-config"
+CONFIG_CHANGED=1
+mv -f "$RECOVERY_DIR/new-config" "$CONF_DEST"
+if [ "$PLATFORM" = ubuntu ] && [ "$CONF_DEST" != /etc/nginx/sites-enabled/default ]; then
+    DEFAULT_CHANGED=1
     rm -f /etc/nginx/sites-enabled/default
 fi
-
-if [ "$PLATFORM" = "openwrt" ]; then
-    echo "Moving uhttpd (LuCI) to port 8081..."
-    uci set uhttpd.main.listen_http='127.0.0.1:8081'
-    uci -q delete uhttpd.main.listen_https 2>/dev/null || true
-    uci commit uhttpd
-    /etc/init.d/uhttpd restart
-    mkdir -p /etc/nginx/conf.d
-fi
-
-# Write conf and test (if nginx -t fails, set -e exits but nginx keeps old running config)
-printf '%s\n' "$CONF" > "$CONF_DEST"
 
 echo "Testing nginx config..."
 if [ "$PLATFORM" = "openwrt" ]; then
@@ -211,13 +292,34 @@ else
     nginx -t
 fi
 
+# The candidate is valid. Only now replace the index and change LuCI's listener.
+mkdir -p "$INDEX_DIR"
+save_entry "$INDEX_DIR/index.html" "$RECOVERY_DIR/index"
+INDEX_TMP="$(mktemp "$INDEX_DIR/.index-XXXXXX")"
+printf '%s\n' "$INDEX" > "$INDEX_TMP"
+chmod 644 "$INDEX_TMP"
+INDEX_CHANGED=1
+mv -f "$INDEX_TMP" "$INDEX_DIR/index.html"
+INDEX_TMP=""
+if [ "$PLATFORM" = openwrt ]; then
+    uci export uhttpd > "$RECOVERY_DIR/uhttpd"
+    echo "Moving uhttpd (LuCI) to port 8081..."
+    UHTTPD_CHANGED=1
+    uci set uhttpd.main.listen_http='127.0.0.1:8081'
+    uci -q delete uhttpd.main.listen_https 2>/dev/null || true
+    uci commit uhttpd
+    /etc/init.d/uhttpd restart
+fi
+
 echo "Reloading nginx..."
+NGINX_CHANGED=1
 if [ "$PLATFORM" = "ubuntu" ]; then
     systemctl reload-or-restart nginx
 else
-    /etc/init.d/nginx enable
     /etc/init.d/nginx restart
+    /etc/init.d/nginx enable
 fi
+COMMITTED=1
 
 echo ""
 echo "Reverse proxy is active for $DOMAIN"

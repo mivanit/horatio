@@ -512,6 +512,91 @@ else:
         check(rejected and hist.read_bytes() == prior, "serialization failure leaves history untouched")
 
 
+def test_history_export_unit() -> None:
+    """A concurrent append must not change an export's bytes or HTTP framing."""
+    import gzip
+    import h11
+    from starlette.requests import Request
+    from unittest.mock import patch
+    import server
+
+    print(f"\n{BOLD}History export during recording{RESET}\n")
+    with tempfile.TemporaryDirectory() as tmp, \
+            patch.object(server, "LOGS_DIR", Path(tmp)), \
+            patch.object(server, "HISTORY_FILE", Path(tmp) / "history.jsonl"), \
+            patch.object(server, "PASSWORD_FILE", Path(tmp) / "password"):
+        server.PASSWORD_FILE.write_text(server._hash_password("export-test"))
+        original = _history_line(1, id="existing").encode() * 3000 + b'{"partial":"\xe2\x82'
+        appended = {"timestamp": datetime.now(timezone.utc).isoformat(), "id": "new"}
+
+        async def export(label, data, *, method="GET", headers=None, expected=None, status=200):
+            server.HISTORY_FILE.write_bytes(data)
+            scope = {
+                "type": "http", "method": method, "path": "/api/history/raw",
+                "headers": [(b"x-dashboard-password", b"export-test")],
+                "query_string": b"", "client": ("127.0.0.1", 12345),
+                "extensions": {},
+            }
+            response = await server.get_history_raw(Request(scope))
+            for key, value in (headers or {}).items():
+                if key == "if-range" and value == "match":
+                    value = response.headers["etag"]
+                scope["headers"].append((key.encode(), value.encode()))
+            connection = h11.Connection(h11.SERVER)
+            connection.receive_data(f"{method} /api/history/raw HTTP/1.1\r\nHost: local\r\n\r\n".encode())
+            connection.next_event()
+            connection.next_event()
+            body, response_headers, response_status, wrote = [], {}, None, False
+
+            async def send(message):
+                nonlocal response_headers, response_status, wrote
+                if message["type"] == "http.response.start":
+                    response_headers = dict(message["headers"])
+                    response_status = message["status"]
+                    connection.send(h11.Response(status_code=response_status, headers=message["headers"]))
+                else:
+                    chunk = message.get("body", b"")
+                    if chunk and not wrote:
+                        # Append from a real worker while the download is active.
+                        # This also proves the download does not hold the writer lock.
+                        await asyncio.wait_for(asyncio.to_thread(server.append_history_record, appended), 2)
+                        wrote = True
+                    body.append(chunk)
+                    connection.send(h11.Data(data=chunk))
+                    if not message.get("more_body", False):
+                        connection.send(h11.EndOfMessage())
+
+            async def receive():
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            await server._GZipUnlessRange(response, minimum_size=1000, compresslevel=1)(scope, receive, send)
+            downloaded = b"".join(body)
+            if response_headers.get(b"content-encoding") == b"gzip":
+                downloaded = gzip.decompress(downloaded)
+            wanted = b"" if method == "HEAD" else data if expected is None else expected
+            separator = b"\n" if data and not data.endswith(b"\n") else b""
+            disk = data + (separator + (json.dumps(appended) + "\n").encode() if wrote else b"")
+            check(response_status == status and downloaded == wanted
+                  and server.HISTORY_FILE.read_bytes() == disk,
+                  f"{label}: exact export, valid HTTP framing, history bytes preserved")
+
+        async def run():
+            await export("full export with torn UTF-8 tail", original)
+            await export("gzip export", original, headers={"accept-encoding": "gzip"})
+            await export("matching If-Range", original,
+                         headers={"range": "bytes=10-100000", "if-range": "match"},
+                         expected=original[10:100001], status=206)
+            await export("stale If-Range falls back to full export", original,
+                         headers={"range": "bytes=10-100000", "if-range": '"old"'})
+            await export("empty file", b"")
+            await export("exact chunk boundary", b"x" * server.FileResponse.chunk_size)
+            await export("small file with gzip accepted", b"{}\n", headers={"accept-encoding": "gzip"})
+            # Test the response's existing HEAD behavior without changing the GET-only route.
+            await export("HEAD response", original, method="HEAD")
+
+        asyncio.run(run())
+
+
 def test_rate_clamp_unit() -> None:
     """Rate caps: _cfg_num, _clamp_rate, clamp_record_rates, and the read path."""
     print(f"\n{BOLD}rate clamp unit tests{RESET}\n")
@@ -1974,6 +2059,7 @@ def test_regression_suites() -> None:
         ("process argument privacy", [sys.executable, "-m", "unittest", "test_process_info"]),
         ("browser timeouts, recovery, freshness and ping loss", ["node", "test_frontend.js"]),
         ("OpenWrt installer recovery", [sys.executable, "openwrt/test_install.py"]),
+        ("nginx installer recovery", [sys.executable, "nginx/test_install.py"]),
     ]:
         if command[0] == "node" and not shutil.which("node") and os.environ.get("HORATIO_SKIP_NODE") == "1":
             print("  SKIP  browser recovery tests (HORATIO_SKIP_NODE=1, node not installed)")
@@ -1993,6 +2079,7 @@ def main() -> int:
     global passes, fails
     test_read_history_unit()
     test_append_history_unit()
+    test_history_export_unit()
     test_rate_clamp_unit()
     test_history_fetch_js()
     test_auth_throttle_unit()

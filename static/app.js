@@ -2155,9 +2155,6 @@ async function fetchDataOnce() {
 
   // Update connection status based on all card states
   updateConnectionStatus();
-
-  // Clear any previous errors on success
-  hideError();
 }
 
 // Startup may finish after Pause or Reconnect. Keep one timer per polling loop.

@@ -135,9 +135,7 @@ function showError(message) {
   status.classList.add('hidden');
 
   if (errorTimeout) clearTimeout(errorTimeout);
-  errorTimeout = setTimeout(() => {
-    toast.classList.remove('visible');
-  }, 5000);
+  errorTimeout = setTimeout(hideError, 5000);
 }
 
 function hideError() {

@@ -42,12 +42,14 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Final, NamedTuple
 
+import anyio
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.types import Send
 
 STATIC_DIR: Final[Path] = Path(__file__).parent / "static"
 INDEX_FILE: Final[Path] = Path(__file__).parent / "index.html"
@@ -2193,6 +2195,33 @@ async def get_history_field(
     return Response(content=await asyncio.to_thread(json.dumps, body), media_type="application/json")
 
 
+def _history_export_stat() -> os.stat_result:
+    # Wait for an in-progress append to finish, then release the writer lock
+    # before sending anything. A slow download must never stall recording.
+    with _history_write_lock:
+        return HISTORY_FILE.stat()
+
+
+class _HistoryFileResponse(FileResponse):
+    """Keep FileResponse's range support, but bound full exports to their size."""
+
+    async def _handle_simple(self, send: Send, send_header_only: bool, send_pathsend: bool) -> None:
+        remaining = int(self.headers["content-length"])
+        await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
+        if send_header_only or not remaining:
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+            return
+        # FileResponse normally reads to EOF (or delegates to pathsend).
+        # History keeps growing: read only the bytes advertised at startup.
+        async with await anyio.open_file(self.path, mode="rb") as file:
+            while remaining:
+                chunk = await file.read(min(self.chunk_size, remaining))
+                if not chunk:
+                    raise OSError("History file shrank during export")
+                remaining -= len(chunk)
+                await send({"type": "http.response.body", "body": chunk, "more_body": remaining > 0})
+
+
 @APP.get("/api/history/raw")
 async def get_history_raw(request: Request) -> Response:
     """Stream the raw history JSONL file (full export, no parsing).
@@ -2216,16 +2245,19 @@ async def get_history_raw(request: Request) -> Response:
     if denied is not None:
         return denied
 
-    if not HISTORY_FILE.exists():
+    try:
+        stat_result = await asyncio.to_thread(_history_export_stat)
+    except FileNotFoundError:
         return Response(
             content=json.dumps({"error": "No history file"}),
             status_code=404,
             media_type="application/json",
         )
-    return FileResponse(
+    return _HistoryFileResponse(
         HISTORY_FILE,
         media_type="application/x-ndjson",
         filename="history.jsonl",
+        stat_result=stat_result,
     )
 
 
