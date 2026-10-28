@@ -16,9 +16,11 @@ Run: uv run python server.py   (config.json must exist; ./install.sh creates it)
 
 from __future__ import annotations
 
+import _thread
 import argparse
 import asyncio
 import email
+import email.message
 import email.policy
 import getpass
 import hashlib
@@ -36,11 +38,12 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Final, NamedTuple
+from typing import Any, BinaryIO, Final, Literal, NamedTuple, TypeAlias
 
 import anyio
 import httpx
@@ -48,8 +51,9 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import RequestResponseEndpoint
 from starlette.middleware.gzip import GZipMiddleware
-from starlette.types import Send
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 STATIC_DIR: Final[Path] = Path(__file__).parent / "static"
 INDEX_FILE: Final[Path] = Path(__file__).parent / "index.html"
@@ -85,8 +89,9 @@ def _load_config() -> dict[str, Any]:
             f"{CONFIG_FILE} is missing: run ./install.sh, or "
             f"cp {CONFIG_FILE.parent / 'config.example.json'} {CONFIG_FILE}"
         )
+    e: json.JSONDecodeError
     try:
-        cfg = json.loads(CONFIG_FILE.read_text())
+        cfg: Any = json.loads(CONFIG_FILE.read_text())
     except json.JSONDecodeError as e:
         sys.exit(f"{CONFIG_FILE}: invalid JSON: {e}")
     if not isinstance(cfg, dict):
@@ -109,7 +114,7 @@ def _cfg_int(
     recorder: ``"sample_count": 0`` makes ``range(0)`` take no samples at all, so
     every ping target is recorded as a full outage that never actually happened.
     """
-    value = cfg.get(key, default)
+    value: Any = cfg.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int) or not (lo <= value <= hi):
         logging.getLogger("dashboard").warning(
             "config.json %s.%s=%r is invalid or outside [%d, %d]; using %d",
@@ -134,7 +139,7 @@ def _cfg_num(
 ) -> float:
     """Read a numeric (int or float) setting, like _cfg_int. The range check
     also rejects inf and NaN (every comparison with them is False)."""
-    value = cfg.get(key, default)
+    value: Any = cfg.get(key, default)
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
@@ -261,8 +266,8 @@ _last_manual_record_time: float = 0.0
 
 def _hash_password(password: str) -> str:
     """Generate salt:hash string for a password using PBKDF2-HMAC-SHA256."""
-    salt = secrets.token_bytes(16)
-    hash_bytes = hashlib.pbkdf2_hmac(
+    salt: bytes = secrets.token_bytes(16)
+    hash_bytes: bytes = hashlib.pbkdf2_hmac(
         "sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS
     )
     return f"{salt.hex()}:{hash_bytes.hex()}"
@@ -273,14 +278,16 @@ def _verify_password(password: str) -> bool:
     if not PASSWORD_FILE.exists():
         return False
     try:
-        stored = PASSWORD_FILE.read_text().strip()
+        stored: str = PASSWORD_FILE.read_text().strip()
+        salt_hex: str
+        hash_hex: str
         salt_hex, hash_hex = stored.split(":", 1)
-        salt = bytes.fromhex(salt_hex)
-        expected_hash = bytes.fromhex(hash_hex)
+        salt: bytes = bytes.fromhex(salt_hex)
+        expected_hash: bytes = bytes.fromhex(hash_hex)
     except (ValueError, FileNotFoundError):
         return False
 
-    computed = hashlib.pbkdf2_hmac(
+    computed: bytes = hashlib.pbkdf2_hmac(
         "sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS
     )
     return hmac.compare_digest(computed, expected_hash)
@@ -312,6 +319,8 @@ async def _verify_password_throttled(
     """
     ip: str = request.client.host if request.client else "unknown"
     now: float = time.time()
+    fails: int
+    until: float
     fails, until = _auth_failures.get(ip, (0, 0.0))
     if now < until:
         return Response(
@@ -331,7 +340,7 @@ async def _verify_password_throttled(
         now + AUTH_LOCKOUT_SEC if fails >= AUTH_MAX_FAILS else 0.0,
     )
     async with _kdf_lock:
-        ok = await asyncio.to_thread(_verify_password, password)
+        ok: bool = await asyncio.to_thread(_verify_password, password)
     if not ok:
         return Response(
             content=json.dumps({"error": "Incorrect password"}),
@@ -347,10 +356,10 @@ def _sanitize_process_argv(argv: list[str]) -> dict[str, str]:
     operands or inline code. Unknown interpreter flags keep the executable
     alone: guessing the first non-flag can publish a password or a -c/-e body.
     """
-    exe = argv[0]
-    exe_name = Path(exe).name
-    executable = {"name": exe_name, "path": exe}
-    args = argv[1:]
+    exe: str = argv[0]
+    exe_name: str = Path(exe).name
+    executable: dict[str, str] = {"name": exe_name, "path": exe}
+    args: list[str] = argv[1:]
 
     def script(path: str) -> dict[str, str]:
         return (
@@ -360,13 +369,13 @@ def _sanitize_process_argv(argv: list[str]) -> dict[str, str]:
         )
 
     if re.fullmatch(r"(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?t?", exe_name.lower()):
-        i = 0
+        i: int = 0
         while i < len(args):
-            arg = args[i]
+            arg: str = args[i]
             if arg == "--":
                 return script(args[i + 1]) if i + 1 < len(args) else executable
             if arg == "-m":
-                module = args[i + 1] if i + 1 < len(args) else ""
+                module: str = args[i + 1] if i + 1 < len(args) else ""
                 if module and all(part.isidentifier() for part in module.split(".")):
                     return {"name": module, "path": f"{exe} -m {module}"}
                 return executable
@@ -401,12 +410,12 @@ def _sanitize_process_argv(argv: list[str]) -> dict[str, str]:
                 return executable  # includes -c, stdin, and unknown options
         return executable
 
-    interpreter = re.fullmatch(
+    interpreter: re.Match[str] | None = re.fullmatch(
         r"(node|nodejs|ruby|perl|php)(?:\.?\d+(?:\.\d+)*)?", exe_name.lower()
     )
     if interpreter:
-        kind = interpreter.group(1)
-        harmless_flags = {
+        kind: str = interpreter.group(1)
+        harmless_flags: set[str] = {
             "node": {"--no-warnings", "--trace-warnings", "--enable-source-maps"},
             "nodejs": {"--no-warnings", "--trace-warnings", "--enable-source-maps"},
             "ruby": {"-w", "-W0", "-W1", "-W2", "--disable-gems"},
@@ -440,8 +449,9 @@ def get_sanitized_process_info(
     if pid == 0:
         return {"name": "kernel", "path": ""}
 
+    e: OSError | IndexError | ValueError
     try:
-        cmdline_raw = Path(f"/proc/{pid}/cmdline").read_text()
+        cmdline_raw: str = Path(f"/proc/{pid}/cmdline").read_text()
         # Keep empty operands: dropping the value in `-W '' -c code` shifts
         # -c into the warning option and makes its code look like a script.
         cmdline: list[str] = (
@@ -525,6 +535,7 @@ def _parse_gpu_stats(stdout: str) -> list[dict[str, Any]]:
             return None
 
     gpus: list[dict[str, Any]] = []
+    line: str
     for line in stdout.strip().split("\n"):
         if not line.strip():
             continue
@@ -533,7 +544,7 @@ def _parse_gpu_stats(stdout: str) -> list[dict[str, Any]]:
             logger.warning("Skipping malformed nvidia-smi GPU line: %s", line)
             continue
         try:
-            index = int(parts[0])
+            index: int = int(parts[0])
         except (ValueError, TypeError):
             logger.warning("Skipping nvidia-smi GPU line with bad index: %s", line)
             continue
@@ -566,18 +577,19 @@ def get_gpu_stats() -> list[dict[str, Any]]:
     Tesla P40) while the driver's own CLI reads them fine. Per-field
     None-preserving; empty list on failure (nvidia-smi missing/timeout/error).
     """
-    basic_fields = "index,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,temperature.memory"
-    counters = (
+    basic_fields: str = "index,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,temperature.memory"
+    counters: tuple[str, str] = (
         "clocks_event_reasons_counters.sw_thermal_slowdown",
         "clocks_event_reasons_counters.hw_thermal_slowdown",
     )
-    command = [
+    command: list[str] = [
         "nvidia-smi",
         "--query-gpu=" + basic_fields + "," + ",".join(counters),
         "--format=csv,noheader,nounits",
     ]
+    e: Exception
     try:
-        result = subprocess.run(
+        result: subprocess.CompletedProcess[str] = subprocess.run(
             command,
             capture_output=True,
             text=True,
@@ -585,7 +597,7 @@ def get_gpu_stats() -> list[dict[str, Any]]:
         )
         # Pre-575 nvidia-smi rejects the entire query for these newer counters.
         # Retry only that diagnostic; keep valid memory/temperature/power data.
-        diagnostic = result.stdout + result.stderr
+        diagnostic: str = result.stdout + result.stderr
         if result.returncode != 0 and any(
             f'Field "{field}" is not a valid field to query' in diagnostic
             for field in counters
@@ -615,6 +627,7 @@ def get_gpu_stats() -> list[dict[str, Any]]:
 # Ping Helper
 # ============================================================================
 
+addr: str | None
 PING_TARGETS: Final[list[str]] = [
     addr
     for t in _CONFIG.get(
@@ -628,7 +641,7 @@ PING_TARGETS: Final[list[str]] = [
 def _run_ping(target: str = "8.8.8.8", timeout: int = 2) -> float | None:
     """Run a single ping and return latency in ms, or None on failure."""
     try:
-        result = subprocess.run(
+        result: subprocess.CompletedProcess[str] = subprocess.run(
             ["ping", "-c", "1", "-W", str(timeout), target],
             capture_output=True,
             text=True,
@@ -637,8 +650,10 @@ def _run_ping(target: str = "8.8.8.8", timeout: int = 2) -> float | None:
         if result.returncode != 0:
             return None
         # Parse "time=12.3 ms" from ping output
+        line: str
         for line in result.stdout.split("\n"):
             if "time=" in line:
+                part: str
                 for part in line.split():
                     if part.startswith("time="):
                         return float(part.split("=")[1])
@@ -652,9 +667,9 @@ def _run_ping(target: str = "8.8.8.8", timeout: int = 2) -> float | None:
 # ============================================================================
 
 
-def _parse_gpu_index(gpu: dict) -> int:
+def _parse_gpu_index(gpu: dict[str, Any]) -> int:
     """Extract numeric GPU index from Glances gpu_id (e.g. 'nvidia0' -> 0)."""
-    glances_id = gpu.get("gpu_id", 0)
+    glances_id: Any = gpu.get("gpu_id", 0)
     if isinstance(glances_id, str) and glances_id.startswith("nvidia"):
         try:
             return int(glances_id.replace("nvidia", ""))
@@ -663,7 +678,7 @@ def _parse_gpu_index(gpu: dict) -> int:
     return glances_id if isinstance(glances_id, int) else 0
 
 
-def _num(value: Any) -> float | None:
+def _num(value: object) -> float | None:
     """Coerce a metric to a finite number, or None if unavailable.
 
     Glances and nvidia-smi report None (or "[N/A]") for metrics they can't read
@@ -679,7 +694,7 @@ def _num(value: Any) -> float | None:
     return None
 
 
-def _round(value: Any, ndigits: int) -> float | None:
+def _round(value: object, ndigits: int) -> float | None:
     """Round a metric, preserving None (unavailable) as None. Never raises."""
     value = _num(value)
     return round(value, ndigits) if value is not None else None
@@ -703,6 +718,8 @@ def _dedupe_fs_by_device(fs_entries: list[dict[str, Any]]) -> list[dict[str, Any
     """
 
     def _key(fs: dict[str, Any]) -> tuple[str, Any, Any]:
+        size: Any
+        used: Any
         size, used = fs.get("size"), fs.get("used")
         if (
             isinstance(size, (int, float))
@@ -716,11 +733,12 @@ def _dedupe_fs_by_device(fs_entries: list[dict[str, Any]]) -> list[dict[str, Any
         return (mnt == "", len(mnt), mnt)  # non-empty first, then shortest
 
     winner: dict[tuple[str, Any, Any], str] = {}
+    fs: dict[str, Any]
     for fs in fs_entries:
         if not fs.get("device_name"):
             continue
-        mnt = fs.get("mnt_point") or ""
-        key = _key(fs)
+        mnt: Any = fs.get("mnt_point") or ""
+        key: tuple[str, Any, Any] = _key(fs)
         if key not in winner or _rank(mnt) < _rank(winner[key]):
             winner[key] = mnt
 
@@ -737,14 +755,14 @@ def _dedupe_fs_by_device(fs_entries: list[dict[str, Any]]) -> list[dict[str, Any
     return kept
 
 
-def compute_stats(samples: list[Any]) -> dict[str, float | None]:
+def compute_stats(samples: Sequence[object]) -> dict[str, float | None]:
     """min/avg/max over the finite samples, or all-None when there are none.
 
     None/non-finite samples are dropped (an unreadable sample is not a zero); an
     empty window yields None stats (unknown), never a misleading {0, 0, 0}. A real
     idle sample of 0.0 is kept and averages normally.
     """
-    vals = [v for v in (_num(s) for s in samples) if v is not None]
+    vals: list[float] = [v for v in (_num(s) for s in samples) if v is not None]
     if not vals:
         return {"avg": None, "min": None, "max": None}
     return {
@@ -755,7 +773,7 @@ def compute_stats(samples: list[Any]) -> dict[str, float | None]:
 
 
 def aggregate_cpu_cores(
-    percpu_samples: dict[int, list[Any]],
+    percpu_samples: dict[int, list[object]],
 ) -> dict[str, float] | None:
     """Cross-core spread: min/median/max across per-core burst averages.
 
@@ -765,8 +783,9 @@ def aggregate_cpu_cores(
     Returns None when no core had any finite sample (so the caller omits the key).
     """
     core_avgs: list[float] = []
+    samples: list[object]
     for samples in percpu_samples.values():
-        vals = [v for v in (_num(s) for s in samples) if v is not None]
+        vals: list[float] = [v for v in (_num(s) for s in samples) if v is not None]
         if vals:
             core_avgs.append(sum(vals) / len(vals))
     if not core_avgs:
@@ -780,11 +799,13 @@ def aggregate_cpu_cores(
 
 def _gpu_mem_fields(st: dict[str, Any]) -> dict[str, float | None]:
     """Memory fields from an nvidia-smi stats dict, preserving None."""
-    used_mb = _num(st.get("memory_used_mb"))
-    total_mb = _num(st.get("memory_total_mb"))
-    used_gb = _round(used_mb / 1024, 2) if used_mb is not None else None
-    total_gb = _round(total_mb / 1024, 2) if total_mb is not None else None
-    percent = (
+    used_mb: float | None = _num(st.get("memory_used_mb"))
+    total_mb: float | None = _num(st.get("memory_total_mb"))
+    used_gb: float | None = _round(used_mb / 1024, 2) if used_mb is not None else None
+    total_gb: float | None = (
+        _round(total_mb / 1024, 2) if total_mb is not None else None
+    )
+    percent: float | None = (
         _round(used_mb / total_mb * 100, 1)
         if used_mb is not None and total_mb
         else None
@@ -803,21 +824,22 @@ def build_gpu_records(
     fields stay None (never faked 0); a GPU without an index is dropped rather
     than collapsed into "GPU 0". Pure (no I/O) so the null behaviour is testable.
     """
-    glances_util: dict[Any, float | None] = {
+    glances_util: dict[int, float | None] = {
         _parse_gpu_index(g): _num(g.get("proc")) for g in (gpu_data or [])
     }
 
     gpus: list[dict[str, Any]] = []
     if gpu_stats:
+        st: dict[str, Any]
         for st in gpu_stats:
-            idx = st.get("index")
+            idx: Any = st.get("index")
             if idx is None:
                 continue
-            util = _num(st.get("util_percent"))
+            util: float | None = _num(st.get("util_percent"))
             if util is None:  # nvidia-smi had no util; try Glances for this GPU
                 util = glances_util.get(idx)
-            sw_us = _num(st.get("throttle_sw_thermal_us"))
-            hw_us = _num(st.get("throttle_hw_thermal_us"))
+            sw_us: float | None = _num(st.get("throttle_sw_thermal_us"))
+            hw_us: float | None = _num(st.get("throttle_hw_thermal_us"))
             gpus.append(
                 {
                     "index": idx,
@@ -835,6 +857,7 @@ def build_gpu_records(
             )
     elif gpu_data:
         # nvidia-smi unavailable: Glances utilization only, memory unknown.
+        gpu: dict[str, Any]
         for gpu in gpu_data:
             gpus.append(
                 {
@@ -862,13 +885,15 @@ def gpu_temps(
     """
     temps: dict[str, float | None] = {}
     if gpu_stats:
+        st: dict[str, Any]
         for st in gpu_stats:
-            idx = st.get("index")
+            idx: Any = st.get("index")
             if idx is not None:
                 temps[f"GPU {idx}"] = _round(st.get("temperature"), 1)
                 if st.get("temperature_memory") is not None:
                     temps[f"GPU {idx} mem"] = _round(st.get("temperature_memory"), 1)
     elif gpu_data:
+        gpu: dict[str, Any]
         for gpu in gpu_data:
             temps[f"GPU {_parse_gpu_index(gpu)}"] = _round(gpu.get("temperature"), 1)
     return temps
@@ -886,13 +911,15 @@ def aggregate_ping(
     outage. Pure (no I/O) so the behaviour is unit-testable.
     """
     result: dict[str, Any] = {}
+    target: str
+    attempts: int
     for target, attempts in ping_attempts.items():
-        vals = [
+        vals: list[float] = [
             v for v in (_num(s) for s in ping_samples.get(target, [])) if v is not None
         ]
         if vals:
-            failed = max(0, attempts - len(vals))
-            loss = round(failed / attempts, 4) if attempts else 0.0
+            failed: int = max(0, attempts - len(vals))
+            loss: float = round(failed / attempts, 4) if attempts else 0.0
             result[target] = {**compute_stats(vals), "loss": loss}
         else:
             result[target] = {"avg": None, "min": None, "max": None, "loss": 1.0}
@@ -910,6 +937,7 @@ def _read_cpu_freqs() -> list[float]:
     policies and yields [], so the caller omits the record key. Sync: thread pool.
     """
     freqs: list[float] = []
+    path: Path
     for path in CPUFREQ_DIR.glob("policy*/scaling_cur_freq"):
         try:
             freqs.append(int(path.read_text().strip()) / 1000)
@@ -921,6 +949,8 @@ def _read_cpu_freqs() -> list[float]:
 def _cpu_freq_limits() -> dict[str, float | None]:
     """The hardware clock range (MHz) from policy0, None when unreadable."""
     out: dict[str, float | None] = {}
+    key: str
+    name: str
     for key, name in (("min_mhz", "cpuinfo_min_freq"), ("max_mhz", "cpuinfo_max_freq")):
         try:
             out[key] = int((CPUFREQ_DIR / "policy0" / name).read_text().strip()) / 1000
@@ -930,7 +960,7 @@ def _cpu_freq_limits() -> dict[str, float | None]:
 
 
 def aggregate_cpu_freq(
-    freq_samples: list[float], limits: dict[str, float | None] | None = None
+    freq_samples: Sequence[object], limits: dict[str, float | None] | None = None
 ) -> dict[str, float | None] | None:
     """min/median/avg/max MHz over every (core, sample) reading of the burst.
 
@@ -939,7 +969,9 @@ def aggregate_cpu_freq(
     mean (Glances' quicklook ``cpu_hz_current``) blurs away. None when nothing
     was readable, so the caller omits the key; the hardware range rides along.
     """
-    vals = sorted(v for v in (_num(s) for s in freq_samples) if v is not None)
+    vals: list[float] = sorted(
+        v for v in (_num(s) for s in freq_samples) if v is not None
+    )
     if not vals:
         return None
     return {
@@ -978,12 +1010,12 @@ def _proc_parent_and_start(pid: int) -> tuple[int | None, float | None]:
     the start in clock ticks since boot, added to ``_BOOT_TIME``.
     """
     try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
+        stat: str = Path(f"/proc/{pid}/stat").read_text()
         # The comm field is in parentheses and may itself contain spaces/parens.
-        fields = stat[stat.rindex(")") + 2 :].split()
-        ppid = int(fields[1])
-        start_ticks = int(fields[19])
-        create_time = (
+        fields: list[str] = stat[stat.rindex(")") + 2 :].split()
+        ppid: int = int(fields[1])
+        start_ticks: int = int(fields[19])
+        create_time: float | None = (
             round(_BOOT_TIME + start_ticks / _CLK_TCK, 2)
             if _BOOT_TIME is not None
             else None
@@ -1013,21 +1045,22 @@ def build_process_records(
     only ``pid`` and ``name`` for sure. Sorted by CPU, GPU-only rows last.
     """
     gpu_by_pid: dict[int, dict[str, Any]] = {}
+    g: dict[str, Any]
     for g in gpu_processes:
-        pid = g.get("pid")
+        pid: Any = g.get("pid")
         if not isinstance(pid, int):
             continue
-        slot = gpu_by_pid.setdefault(
+        slot: dict[str, Any] = gpu_by_pid.setdefault(
             pid, {"mem": 0.0, "util": None, "gpus": set(), "name": g.get("name")}
         )
         slot["mem"] += _num(g.get("gpu_memory_mib")) or 0.0
-        util = _num(g.get("gpu_util_percent"))
+        util: float | None = _num(g.get("gpu_util_percent"))
         if util is not None:  # summed over the GPUs it runs on (like CPU over cores)
             slot["util"] = (slot["util"] or 0.0) + util
         if isinstance(g.get("gpu_index"), int):
             slot["gpus"].add(g["gpu_index"])
 
-    valid = [
+    valid: list[dict[str, Any]] = [
         p
         for p in processes
         if isinstance(p, dict)
@@ -1039,7 +1072,7 @@ def build_process_records(
         return _num(p.get("cpu_percent")) or 0.0
 
     def rss_bytes(p: dict[str, Any]) -> float | None:
-        info = p.get("memory_info")
+        info: Any = p.get("memory_info")
         return _num(info.get("rss")) if isinstance(info, dict) else None
 
     def rss(p: dict[str, Any]) -> float:
@@ -1048,14 +1081,18 @@ def build_process_records(
     def disk_kbps(p: dict[str, Any]) -> tuple[float | None, float | None]:
         # Glances: io_counters = [read, write, read_old, write_old, io_tag] cumulative
         # bytes, io_tag 1 when readable; the rate is over time_since_update.
-        io = p.get("io_counters")
-        dt = _num(p.get("time_since_update"))
+        io: Any = p.get("io_counters")
+        dt: float | None = _num(p.get("time_since_update"))
         if not (isinstance(io, list) and len(io) >= 5 and io[4] == 1 and dt):
             return None, None
-        vals = [_num(x) for x in io[:4]]
-        if any(v is None for v in vals):
+        read: float | None
+        write: float | None
+        read_old: float | None
+        write_old: float | None
+        read, write, read_old, write_old = (_num(x) for x in io[:4])
+        if read is None or write is None or read_old is None or write_old is None:
             return None, None
-        return (vals[0] - vals[2]) / dt / 1024, (vals[1] - vals[3]) / dt / 1024
+        return (read - read_old) / dt / 1024, (write - write_old) / dt / 1024
 
     def sparse(row: dict[str, Any], rates: tuple[str, ...] = ()) -> dict[str, Any]:
         # Drop unknowns, and the rate keys when zero or negative (counter reset).
@@ -1067,6 +1104,7 @@ def build_process_records(
         }
 
     chosen: dict[int, dict[str, Any]] = {}
+    p: dict[str, Any]
     for p in sorted(valid, key=cpu, reverse=True)[:count]:
         chosen.setdefault(p["pid"], p)
     for p in sorted(valid, key=rss, reverse=True)[:count]:
@@ -1077,9 +1115,16 @@ def build_process_records(
 
     rows: list[dict[str, Any]] = []
     for pid, p in chosen.items():
-        info = get_sanitized_process_info(pid, str(p.get("name") or "unknown"))
+        info: dict[str, str] = get_sanitized_process_info(
+            pid, str(p.get("name") or "unknown")
+        )
+        ppid: int | None
+        create_time: float | None
         ppid, create_time = _proc_parent_and_start(pid)
+        rd: float | None
+        wr: float | None
         rd, wr = disk_kbps(p)
+        memory_bytes: float | None = rss_bytes(p)
         row: dict[str, Any] = {
             "pid": pid,
             "ppid": ppid,
@@ -1088,8 +1133,8 @@ def build_process_records(
             "user": p.get("username"),
             "status": p.get("status"),
             "cpu_percent": _round(p.get("cpu_percent"), 1),
-            "rss_mb": _round(rss_bytes(p) / (1024**2), 1)
-            if rss_bytes(p) is not None
+            "rss_mb": _round(memory_bytes / (1024**2), 1)
+            if memory_bytes is not None
             else None,
             "threads": p.get("num_threads")
             if isinstance(p.get("num_threads"), int)
@@ -1097,7 +1142,7 @@ def build_process_records(
             "disk_read_kbps": _round(rd, 1),
             "disk_write_kbps": _round(wr, 1),
         }
-        gpu = gpu_by_pid.get(pid)
+        gpu: dict[str, Any] | None = gpu_by_pid.get(pid)
         if gpu and gpu["mem"] > 0:
             row["gpu_mem_mib"] = round(gpu["mem"], 1)
             row["gpus"] = sorted(gpu["gpus"])
@@ -1140,14 +1185,14 @@ async def collect_history_sample(
     sample_count: int = 1 if live else APP.state.history_sample_count
     sample_interval: float = sample_duration / max(1, sample_count)
 
-    cpu_samples: list[float] = []
+    cpu_samples: list[object] = []
     # Per-core CPU usage across the burst, keyed by core index: {idx: [total, ...]}
-    percpu_samples: dict[int, list[Any]] = {}
+    percpu_samples: dict[int, list[object]] = {}
     net_in_samples: list[float] = []
     net_out_samples: list[float] = []
     # Caps each interface / drive rate sample and remembers which went over
     # (see _RateCaps); summarised into the record's `rate_capped` note.
-    caps = _RateCaps()
+    caps: _RateCaps = _RateCaps()
     # Disk I/O, one dict per sample iteration: {disk_name: (read_mbps, write_mbps)}.
     # Keyed per iteration (not per disk) so a device that appears or vanishes
     # mid-window cannot shift another device's samples out of alignment.
@@ -1163,24 +1208,31 @@ async def collect_history_sample(
     ping_attempts: dict[str, int] = {t: 0 for t in PING_TARGETS} if ping_enabled else {}
 
     # Collect samples over time
+    client: httpx.AsyncClient
     async with httpx.AsyncClient() as client:
+        i: int
         for i in range(sample_count):
+            e: Exception
             try:
                 # Fetch CPU
-                cpu_resp = await client.get(f"{glances_url}/api/4/cpu", timeout=5.0)
+                cpu_resp: httpx.Response = await client.get(
+                    f"{glances_url}/api/4/cpu", timeout=5.0
+                )
                 if cpu_resp.status_code == 200:
-                    cpu_data: Any = cpu_resp.json()
+                    cpu_data: dict[str, Any] = cpu_resp.json()
                     # Raw value (may be None if Glances reports null); compute_stats
                     # drops non-numeric samples so this never crashes the record.
                     cpu_samples.append(cpu_data.get("total"))
 
                 # Fetch per-core CPU (for the cross-core spread record). Keyed by
                 # enumerate index to match the live per-core chart (app.js).
-                percpu_resp = await client.get(
+                percpu_resp: httpx.Response = await client.get(
                     f"{glances_url}/api/4/percpu", timeout=5.0
                 )
                 if percpu_resp.status_code == 200:
-                    percpu_data: Any = percpu_resp.json()
+                    percpu_data: list[dict[str, Any]] = percpu_resp.json()
+                    idx: int
+                    core: dict[str, Any]
                     for idx, core in enumerate(percpu_data):
                         percpu_samples.setdefault(idx, []).append(core.get("total"))
 
@@ -1188,17 +1240,22 @@ async def collect_history_sample(
                 freq_samples.extend(await asyncio.to_thread(_read_cpu_freqs))
 
                 # Fetch network I/O
-                net_resp = await client.get(f"{glances_url}/api/4/network", timeout=5.0)
+                net_resp: httpx.Response = await client.get(
+                    f"{glances_url}/api/4/network", timeout=5.0
+                )
                 if net_resp.status_code == 200:
-                    net_data: Any = net_resp.json()
+                    net_data: list[dict[str, Any]] = net_resp.json()
                     # MB/s (match live view), summed over every interface but
                     # loopback. Each interface is capped on its own: a counter
                     # glitch is per interface, while the sum legitimately
                     # exceeds one link's rate (bridges, veths and tunnels count
                     # the same traffic again), so the total is never capped.
+                    total_in: float
+                    total_out: float
                     total_in = total_out = 0.0
+                    iface: dict[str, Any]
                     for iface in net_data:
-                        name = iface.get("interface_name") or ""
+                        name: str = iface.get("interface_name") or ""
                         if name.startswith("lo"):
                             continue
                         total_in += caps.sample(
@@ -1219,14 +1276,17 @@ async def collect_history_sample(
                     )
 
                 # Fetch disk I/O
-                disk_resp = await client.get(f"{glances_url}/api/4/diskio", timeout=5.0)
+                disk_resp: httpx.Response = await client.get(
+                    f"{glances_url}/api/4/diskio", timeout=5.0
+                )
                 if disk_resp.status_code == 200:
-                    disk_data: Any = disk_resp.json()
+                    disk_data: list[dict[str, Any]] = disk_resp.json()
                     # Per-drive disk I/O; the whole-box totals are summed from
                     # these after the loop, once the mounted devices are known.
                     this_iter: dict[str, tuple[float, float]] = {}
+                    disk: dict[str, Any]
                     for disk in disk_data:
-                        disk_name: Any = disk.get("disk_name")
+                        disk_name: str | None = disk.get("disk_name")
                         if disk_name:
                             # Capped per device, like the network interfaces.
                             this_iter[disk_name] = (
@@ -1255,12 +1315,13 @@ async def collect_history_sample(
             if ping_enabled:
                 # Count an attempt per target up front so a gather-timeout (which
                 # skips the append below) still counts as a loss, not a non-event.
+                target: str
                 for target in PING_TARGETS:
                     ping_attempts[target] += 1
                 try:
                     # Live (/text) pings get a short leash: the request waits on
                     # this, and a dead target would otherwise hold it 2-8 s.
-                    ping_results = await asyncio.wait_for(
+                    ping_results: list[float | None] = await asyncio.wait_for(
                         asyncio.gather(
                             *(
                                 asyncio.to_thread(_run_ping, t, 1 if live else 2)
@@ -1269,6 +1330,7 @@ async def collect_history_sample(
                         ),
                         timeout=2.5 if live else 8,
                     )
+                    latency: float | None
                     for target, latency in zip(PING_TARGETS, ping_results):
                         if latency is not None:
                             ping_samples[target].append(latency)
@@ -1280,42 +1342,52 @@ async def collect_history_sample(
                 await asyncio.sleep(sample_interval)
 
         # Fetch point-in-time metrics (only need one sample)
-        memory_data: dict = {}
-        swap_data: dict = {}
-        gpu_data: list = []
-        temps_data: list = []
-        load_data: dict = {}
+        memory_data: dict[str, Any] = {}
+        swap_data: dict[str, Any] = {}
+        gpu_data: list[dict[str, Any]] = []
+        temps_data: list[dict[str, Any]] = []
+        load_data: dict[str, Any] = {}
 
         try:
-            mem_resp = await client.get(f"{glances_url}/api/4/mem", timeout=5.0)
+            mem_resp: httpx.Response = await client.get(
+                f"{glances_url}/api/4/mem", timeout=5.0
+            )
             if mem_resp.status_code == 200:
                 memory_data = mem_resp.json()
         except Exception as e:
             logger.warning("History: failed to fetch mem: %s", e)
 
         try:
-            swap_resp = await client.get(f"{glances_url}/api/4/memswap", timeout=5.0)
+            swap_resp: httpx.Response = await client.get(
+                f"{glances_url}/api/4/memswap", timeout=5.0
+            )
             if swap_resp.status_code == 200:
                 swap_data = swap_resp.json()
         except Exception as e:
             logger.warning("History: failed to fetch memswap: %s", e)
 
         try:
-            gpu_resp = await client.get(f"{glances_url}/api/4/gpu", timeout=5.0)
+            gpu_resp: httpx.Response = await client.get(
+                f"{glances_url}/api/4/gpu", timeout=5.0
+            )
             if gpu_resp.status_code == 200:
                 gpu_data = gpu_resp.json()
         except Exception as e:
             logger.warning("History: failed to fetch gpu: %s", e)
 
         try:
-            temps_resp = await client.get(f"{glances_url}/api/4/sensors", timeout=5.0)
+            temps_resp: httpx.Response = await client.get(
+                f"{glances_url}/api/4/sensors", timeout=5.0
+            )
             if temps_resp.status_code == 200:
                 temps_data = temps_resp.json()
         except Exception as e:
             logger.warning("History: failed to fetch sensors: %s", e)
 
         try:
-            load_resp = await client.get(f"{glances_url}/api/4/load", timeout=5.0)
+            load_resp: httpx.Response = await client.get(
+                f"{glances_url}/api/4/load", timeout=5.0
+            )
             if load_resp.status_code == 200:
                 load_data = load_resp.json()
         except Exception as e:
@@ -1323,10 +1395,10 @@ async def collect_history_sample(
 
         # Process list, only when per-process history is on: Glances' point-in-time
         # view (cpu_percent is over its own refresh interval), sanitized below.
-        process_data: list = []
+        process_data: list[Any] = []
         if processes_enabled:
             try:
-                proc_resp = await client.get(
+                proc_resp: httpx.Response = await client.get(
                     f"{glances_url}/api/4/processlist", timeout=10.0
                 )
                 if proc_resp.status_code == 200:
@@ -1335,9 +1407,11 @@ async def collect_history_sample(
                 logger.warning("History: failed to fetch processlist: %s", e)
 
         # Fetch filesystem data for drive usage
-        fs_data: list = []
+        fs_data: list[dict[str, Any]] = []
         try:
-            fs_resp = await client.get(f"{glances_url}/api/4/fs", timeout=5.0)
+            fs_resp: httpx.Response = await client.get(
+                f"{glances_url}/api/4/fs", timeout=5.0
+            )
             if fs_resp.status_code == 200:
                 # De-dupe duplicate-device entries (e.g. PrivateTmp /tmp, /var/tmp
                 # bind mounts mirroring /) so history drives + per-drive I/O labels
@@ -1360,7 +1434,7 @@ async def collect_history_sample(
         "duration_sec": sample_duration,
     }
 
-    def _gb(value: Any) -> float | None:
+    def _gb(value: object) -> float | None:
         """bytes -> GB, preserving None (unavailable) rather than dividing None."""
         value = _num(value)
         return round(value / (1024**3), 2) if value is not None else None
@@ -1372,14 +1446,14 @@ async def collect_history_sample(
     # CPU core spread: min/median/max across cores. Distinguishes "one core pinned"
     # from "all cores evenly loaded" — the total-only "cpu" stat cannot. Omitted
     # when /api/4/percpu is never readable.
-    cpu_cores = aggregate_cpu_cores(percpu_samples)
+    cpu_cores: dict[str, float] | None = aggregate_cpu_cores(percpu_samples)
     if cpu_cores is not None:
         record["cpu_cores"] = cpu_cores
 
     # CPU clocks: min/median/avg/max MHz over every core and sample of the burst,
     # with the hardware range. Omitted on a box without cpufreq.
     if freq_samples:
-        cpu_freq = aggregate_cpu_freq(
+        cpu_freq: dict[str, float | None] | None = aggregate_cpu_freq(
             freq_samples, await asyncio.to_thread(_cpu_freq_limits)
         )
         if cpu_freq is not None:
@@ -1416,17 +1490,18 @@ async def collect_history_sample(
     # them (their `used` differed by a block between two statvfs calls) a
     # last-writer-wins dict labelled the root drive '/tmp' in some records.
     disk_to_mount: dict[str, str] = {}
+    fs: dict[str, Any]
     for fs in fs_data:
         device_name: str = fs.get("device_name", "")
         mnt_point: str = fs.get("mnt_point", "")
         if device_name and mnt_point:
             resolved: str = os.path.realpath(device_name)
             if resolved.startswith("/dev/"):
-                disk = resolved[5:]
-                if disk not in disk_to_mount or len(mnt_point) < len(
-                    disk_to_mount[disk]
+                mounted_disk: str = resolved[5:]
+                if mounted_disk not in disk_to_mount or len(mnt_point) < len(
+                    disk_to_mount[mounted_disk]
                 ):
-                    disk_to_mount[disk] = mnt_point
+                    disk_to_mount[mounted_disk] = mnt_point
     # The whole-box totals count the MOUNTED devices only: Glances' diskio rows are
     # one per block device including partitions and md/dm layers, so summing every
     # row counts a write on an md mirror three times (member, member, md). Without
@@ -1435,22 +1510,25 @@ async def collect_history_sample(
     counted: set[str] = {d for d in seen_disks if d in disk_to_mount} or seen_disks
     # Each device is capped already; the total is their plain sum (a busy pool
     # legitimately exceeds one drive's ceiling).
-    disk_read_samples = [
+    disk_read_samples: list[float] = [
         sum(v[0] for d, v in it.items() if d in counted) for it in disk_iter_samples
     ]
-    disk_write_samples = [
+    disk_write_samples: list[float] = [
         sum(v[1] for d, v in it.items() if d in counted) for it in disk_iter_samples
     ]
     if disk_read_samples or disk_write_samples:
-        record["disk_io"] = {
+        disk_io: dict[str, Any] = {
             "read_mbps": compute_stats(disk_read_samples),
             "write_mbps": compute_stats(disk_write_samples),
         }
+        record["disk_io"] = disk_io
 
         # Per-drive disk I/O (only for mounted filesystems, like live chart)
         drives_io: list[dict[str, Any]] = []
         for disk_name in sorted(seen_disks & disk_to_mount.keys()):
-            samples = [it[disk_name] for it in disk_iter_samples if disk_name in it]
+            samples: list[tuple[float, float]] = [
+                it[disk_name] for it in disk_iter_samples if disk_name in it
+            ]
             drives_io.append(
                 {
                     "name": disk_to_mount[disk_name],  # Use mount point as name
@@ -1459,7 +1537,7 @@ async def collect_history_sample(
                 }
             )
         if drives_io:
-            record["disk_io"]["drives"] = drives_io
+            disk_io["drives"] = drives_io
 
     # The caps this record was collected under, per interface / per drive. Its
     # presence tells clamp_record_rates the totals are already sane sums (older
@@ -1468,7 +1546,7 @@ async def collect_history_sample(
         "network_mbps": MAX_NETWORK_MBPS,
         "disk_io_mbps": MAX_DISK_IO_MBPS,
     }
-    capped = caps.note(disk_to_mount)
+    capped: list[dict[str, Any]] = caps.note(disk_to_mount)
     if capped:
         record["rate_capped"] = capped
         if not live:
@@ -1485,7 +1563,7 @@ async def collect_history_sample(
     if fs_data:
         drives: list[dict[str, Any]] = []
         for fs in fs_data:
-            mnt_point = fs.get("mnt_point")
+            mnt_point = fs.get("mnt_point", "")
             if mnt_point:
                 drives.append(
                     {
@@ -1503,7 +1581,7 @@ async def collect_history_sample(
     # Offloaded: get_gpu_stats() shells out to nvidia-smi (up to ~5s), which would
     # otherwise block the event loop for the whole recording cycle.
     gpu_stats: list[dict[str, Any]] = await asyncio.to_thread(get_gpu_stats)
-    gpus = build_gpu_records(gpu_stats, gpu_data)
+    gpus: list[dict[str, Any]] = build_gpu_records(gpu_stats, gpu_data)
     if gpus:
         record["gpus"] = gpus
 
@@ -1513,20 +1591,22 @@ async def collect_history_sample(
     # Power (point-in-time, watts): the BMC's system draw from the collector
     # snapshot plus each GPU's draw from nvidia-smi.
     power: dict[str, float | None] = {}
+    sensor: dict[str, Any]
     for sensor in temps_data:
         # Only include temperature sensors (exclude battery, fan speed, etc.)
         if sensor.get("type") != "temperature_core":
             continue
         label: str = sensor.get("label", "")
-        value = _round(sensor.get("value"), 1)
+        value: float | None = _round(sensor.get("value"), 1)
         if label and value is not None:
             # Use label as key, handling duplicates by keeping max
-            temps[label] = max(temps[label], value) if label in temps else value
+            previous: float | None = temps.get(label)
+            temps[label] = max(previous, value) if previous is not None else value
     temps.update(gpu_temps(gpu_stats, gpu_data))
     # Chassis sensors from the collector's 60 s sensors snapshot (IPMI and RAPL are
     # root-only, so the OS cannot see them). Only a fresh snapshot counts: a dead
     # collector then leaves gaps in the charts instead of a flat line forever.
-    sensors = await asyncio.to_thread(
+    sensors: dict[str, Any] = await asyncio.to_thread(
         _get_storage_health, SENSORS_PATH, SENSORS_STALE_SEC
     )
     if sensors["status"] == "ok":
@@ -1537,7 +1617,7 @@ async def collect_history_sample(
                 if r.get("value") is not None
             }
         )
-        fans = {
+        fans: dict[str, float] = {
             r["label"]: r["value"]
             for r in sensors.get("fans", [])
             if r.get("value") is not None
@@ -1554,7 +1634,7 @@ async def collect_history_sample(
             }
         )
     # Drive temperatures from the 15-min snapshot (SMART), fresh only, keyed by device.
-    health = await asyncio.to_thread(_get_storage_health)
+    health: dict[str, Any] = await asyncio.to_thread(_get_storage_health)
     if health["status"] == "ok":
         temps.update(
             {
@@ -1567,6 +1647,7 @@ async def collect_history_sample(
         )
     if temps:
         record["temps"] = temps
+    st: dict[str, Any]
     for st in gpu_stats:
         if st.get("index") is not None and st.get("power_draw") is not None:
             power[f"GPU {st['index']}"] = _round(st["power_draw"], 1)
@@ -1617,7 +1698,7 @@ async def collect_history_sample(
     return record
 
 
-_history_write_lock = threading.Lock()
+_history_write_lock: _thread.LockType = threading.Lock()
 
 
 def append_history_record(record: dict[str, Any]) -> None:
@@ -1627,12 +1708,13 @@ def append_history_record(record: dict[str, Any]) -> None:
     worker threads; the lock keeps two records from interleaving into one torn
     line (a record over the 8 KiB text buffer is more than one write()).
     """
-    line = json.dumps(record).encode("utf-8") + b"\n"
+    line: bytes = json.dumps(record).encode("utf-8") + b"\n"
     LOGS_DIR.mkdir(exist_ok=True)
+    f: BinaryIO
     with _history_write_lock, open(HISTORY_FILE, "a+b") as f:
         if f.seek(0, os.SEEK_END):
             f.seek(-1, os.SEEK_END)
-            tail = f.read(1)
+            tail: bytes = f.read(1)
             if not tail:
                 raise OSError("Cannot read history tail")
             # Preserve a failed append's bytes, even an incomplete UTF-8 code
@@ -1654,10 +1736,10 @@ def missing_core_metrics(record: dict[str, Any]) -> list[str]:
     Callers use this to avoid reporting a near-empty record as a healthy one.
     """
     missing: list[str] = []
-    cpu = record.get("cpu")
+    cpu: Any = record.get("cpu")
     if not isinstance(cpu, dict) or cpu.get("avg") is None:
         missing.append("cpu")
-    memory = record.get("memory")
+    memory: Any = record.get("memory")
     if not isinstance(memory, dict) or memory.get("percent") is None:
         missing.append("memory")
     return missing
@@ -1672,7 +1754,7 @@ def _apply_record_health(record: dict[str, Any]) -> None:
     Glances outage. Withholding it lets ``stale`` trip on schedule, and
     ``last_error`` supplies the reason.
     """
-    missing = missing_core_metrics(record)
+    missing: list[str] = missing_core_metrics(record)
     if missing:
         APP.state.history_last_error = f"partial record, missing {missing}"
         logger.warning("History record is partial, missing %s", missing)
@@ -1687,9 +1769,10 @@ async def history_recorder() -> None:
     await asyncio.sleep(APP.state.history_record_interval)
 
     while True:
+        e: Exception
         try:
-            glances_url = APP.state.glances_url
-            record = await collect_history_sample(glances_url)
+            glances_url: str = APP.state.glances_url
+            record: dict[str, Any] = await collect_history_sample(glances_url)
             await asyncio.to_thread(append_history_record, record)
             _apply_record_health(record)
         except Exception as e:
@@ -1712,14 +1795,17 @@ async def wait_for_glances_warm(glances_url: str, timeout: float = 20.0) -> bool
     until the cpu total has changed twice (two refreshes have passed) and is > 0.
     Returns False on timeout (the caller samples anyway).
     """
-    deadline = time.monotonic() + timeout
+    deadline: float = time.monotonic() + timeout
     last: float | None = None
-    changes = 0
+    changes: int = 0
+    client: httpx.AsyncClient
     async with httpx.AsyncClient() as client:
         while time.monotonic() < deadline:
             try:
-                resp = await client.get(f"{glances_url}/api/4/cpu", timeout=5.0)
-                total = (
+                resp: httpx.Response = await client.get(
+                    f"{glances_url}/api/4/cpu", timeout=5.0
+                )
+                total: float | None = (
                     _num(resp.json().get("total")) if resp.status_code == 200 else None
                 )
                 # Per-core warms up separately, on its own first requests.
@@ -1738,13 +1824,14 @@ async def wait_for_glances_warm(glances_url: str, timeout: float = 20.0) -> bool
 
 async def record_initial_sample(glances_url: str) -> None:
     """Record initial history sample on startup (runs in background)."""
+    e: Exception
     try:
         if not await wait_for_glances_warm(glances_url):
             logger.warning(
                 "Glances CPU readings still cold after 20 s; recording anyway"
             )
         logger.info("Recording initial history sample")
-        initial_sample = await collect_history_sample(glances_url)
+        initial_sample: dict[str, Any] = await collect_history_sample(glances_url)
         await asyncio.to_thread(append_history_record, initial_sample)
         _apply_record_health(initial_sample)
     except Exception as e:
@@ -1759,8 +1846,11 @@ GLANCES_MAX_MISSES: Final[int] = (
 
 async def _glances_answers() -> bool:
     try:
+        client: httpx.AsyncClient
         async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{APP.state.glances_url}/api/4/cpu", timeout=5.0)
+            resp: httpx.Response = await client.get(
+                f"{APP.state.glances_url}/api/4/cpu", timeout=5.0
+            )
         return resp.status_code == 200
     except httpx.HTTPError:
         return False
@@ -1777,8 +1867,8 @@ async def check_disconnected_clients() -> None:
             # leave every card 502 and the history partial for good. At most one
             # restart a minute: a Glances that cannot start at all must not be
             # respawned every 5 s forever.
-            glances = APP.state.glances_process
-            why = None
+            glances: subprocess.Popen[bytes] = APP.state.glances_process
+            why: str | None = None
             if glances.poll() is not None:
                 why = f"exited with code {glances.returncode}"
             elif await _glances_answers():
@@ -1799,6 +1889,7 @@ async def check_disconnected_clients() -> None:
             disconnected: list[str] = [
                 ip for ip, ts in client_last_seen.items() if now - ts > CLIENT_TIMEOUT
             ]
+            ip: str
             for ip in disconnected:
                 del client_last_seen[ip]
                 logger.info("Client disconnected: %s", ip)
@@ -1809,7 +1900,7 @@ async def check_disconnected_clients() -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Manage Glances subprocess lifecycle and background tasks."""
     glances_port: int = app.state.glances_port
 
@@ -1817,6 +1908,7 @@ async def lifespan(app: FastAPI):
     # Enforce 0600 on the password hash even if it was created/edited another way
     # (a group- or world-readable .password leaks the PBKDF2 hash for offline attack).
     if PASSWORD_FILE.exists():
+        e: OSError
         try:
             PASSWORD_FILE.chmod(0o600)
         except OSError as e:
@@ -1840,7 +1932,9 @@ async def lifespan(app: FastAPI):
     app.state.history_process_count = DEFAULT_HISTORY_PROCESS_COUNT
 
     # Start background task for client disconnect detection
-    disconnect_task = asyncio.create_task(check_disconnected_clients())
+    disconnect_task: asyncio.Task[None] = asyncio.create_task(
+        check_disconnected_clients()
+    )
 
     # Start background task for history recording
     app.state.history_task = asyncio.create_task(history_recorder())
@@ -1853,13 +1947,14 @@ async def lifespan(app: FastAPI):
     await asyncio.sleep(2)
 
     # Record initial sample in background (non-blocking, last step of startup)
-    initial_sample_task = asyncio.create_task(
+    initial_sample_task: asyncio.Task[None] = asyncio.create_task(
         record_initial_sample(app.state.glances_url)
     )
 
     yield  # Server runs here
 
     # Shutdown (runs when Ctrl+C is pressed)
+    task: asyncio.Task[None]
     for task in [initial_sample_task, disconnect_task, app.state.history_task]:
         task.cancel()
         try:
@@ -1884,11 +1979,20 @@ class _GZipUnlessRange:
     resumed download (curl -C - of /api/history/raw) would splice gzip into the
     file."""
 
-    def __init__(self, app: Any, **kwargs: Any) -> None:
-        self.app = app
-        self.gzip = GZipMiddleware(app, **kwargs)
+    def __init__(
+        self: _GZipUnlessRange,
+        app: ASGIApp,
+        minimum_size: int = 500,
+        compresslevel: int = 9,
+    ) -> None:
+        self.app: ASGIApp = app
+        self.gzip: GZipMiddleware = GZipMiddleware(
+            app, minimum_size=minimum_size, compresslevel=compresslevel
+        )
 
-    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+    async def __call__(
+        self: _GZipUnlessRange, scope: Scope, receive: Receive, send: Send
+    ) -> None:
         if scope["type"] == "http" and any(k == b"range" for k, _ in scope["headers"]):
             await self.app(scope, receive, send)
         else:
@@ -1938,7 +2042,9 @@ APP.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 @APP.middleware("http")
-async def log_connections(request: Request, call_next):
+async def log_connections(
+    request: Request, call_next: RequestResponseEndpoint
+) -> Response:
     """Log client connections (new clients or clients not seen in 30s)."""
     client_ip: str = request.client.host if request.client else "unknown"
     now: float = time.time()
@@ -1968,12 +2074,14 @@ class _RateCaps:
     record nor become a cap-height spike.
     """
 
-    def __init__(self) -> None:
+    def __init__(self: _RateCaps) -> None:
         self.seen: dict[tuple[str, str], int] = {}
         self.hits: dict[tuple[str, str], list[float]] = {}
 
-    def sample(self, bytes_per_sec: Any, cap: float, series: tuple[str, str]) -> float:
-        n = _num(bytes_per_sec)
+    def sample(
+        self: _RateCaps, bytes_per_sec: object, cap: float, series: tuple[str, str]
+    ) -> float:
+        n: float | None = _num(bytes_per_sec)
         if n is None:
             return 0.0
         n /= 1e6
@@ -1982,17 +2090,20 @@ class _RateCaps:
             self.hits.setdefault(series, []).append(n)
         return _clamp_rate(n, cap)
 
-    def note(self, disk_to_mount: dict[str, str]) -> list[dict[str, Any]]:
+    def note(self: _RateCaps, disk_to_mount: dict[str, str]) -> list[dict[str, Any]]:
         """``[{metric, interface | device [+ drive], samples, of, raw_max, cap}]``,
         one entry per series that went over its cap. ``samples`` of ``of`` counts
         that interface's or device's own samples in the burst; ``drive`` is the
         mount point when the device is mounted (as in disk_io.drives)."""
         note: list[dict[str, Any]] = []
+        metric: str
+        name: str
+        raw: list[float]
         for (metric, name), raw in sorted(self.hits.items()):
             entry: dict[str, Any] = {"metric": metric}
             if metric.startswith("network."):
                 entry["interface"] = name
-                cap = MAX_NETWORK_MBPS
+                cap: float = MAX_NETWORK_MBPS
             else:
                 entry["device"] = name
                 if name in disk_to_mount:
@@ -2013,8 +2124,10 @@ def _clamp_stats(stats: Any, cap: float) -> None:
     empty window) and anything that is not a number are left alone."""
     if not isinstance(stats, dict):
         return
+    key: Any
+    value: Any
     for key, value in stats.items():
-        n = _num(value)
+        n: float | None = _num(value)
         if n is not None:
             stats[key] = _clamp_rate(n, cap)
 
@@ -2028,16 +2141,18 @@ def clamp_record_rates(record: dict[str, Any]) -> None:
     """
     if "rate_caps" in record:
         return
-    net = record.get("network")
+    net: Any = record.get("network")
     if isinstance(net, dict):
+        key: str
         for key in ("in_mbps", "out_mbps"):
             _clamp_stats(net.get(key), MAX_NETWORK_MBPS)
-    dio = record.get("disk_io")
+    dio: Any = record.get("disk_io")
     if isinstance(dio, dict):
         for key in ("read_mbps", "write_mbps"):
             _clamp_stats(dio.get(key), MAX_DISK_IO_MBPS)
-        drives = dio.get("drives")
+        drives: Any = dio.get("drives")
         if isinstance(drives, list):
+            drive: Any
             for drive in drives:
                 if isinstance(drive, dict):
                     for key in ("read_mbps", "write_mbps"):
@@ -2077,23 +2192,25 @@ def _read_history(
     don't parse as a dict with a valid timestamp — corruption worth surfacing,
     not silently dropping. Served rates are clamped (clamp_record_rates).
     """
-    cutoff = datetime.now(timezone.utc).timestamp() - (hours * 3600)
+    cutoff: float = datetime.now(timezone.utc).timestamp() - (hours * 3600)
 
     if not HISTORY_FILE.exists():
         return [], 0, False, cutoff
 
+    e: Exception
     try:
+        f: BinaryIO
         with open(HISTORY_FILE, "rb") as f:
-            size = f.seek(0, os.SEEK_END)
-            read_size = initial_read_size
+            size: int = f.seek(0, os.SEEK_END)
+            read_size: int = initial_read_size
             while True:
-                capped = min(read_size, max_bytes)
-                offset = max(0, size - capped)
+                capped: int = min(read_size, max_bytes)
+                offset: int = max(0, size - capped)
                 f.seek(offset)
-                data = f.read()
+                data: bytes = f.read()
                 if offset > 0:
                     # Drop the (likely partial) line the window starts in
-                    nl = data.find(b"\n")
+                    nl: int = data.find(b"\n")
                     data = data[nl + 1 :] if nl != -1 else b""
                 # An unterminated last line is a record still being appended,
                 # not corruption: leave it for the next read.
@@ -2101,7 +2218,8 @@ def _read_history(
 
                 records: list[dict[str, Any]] = []
                 first_ts: float | None = None
-                skipped = 0
+                skipped: int = 0
+                line: bytes
                 for line in data.split(b"\n"):
                     line = line.strip()
                     if not line:
@@ -2118,7 +2236,7 @@ def _read_history(
                         if not isinstance(ts_str, str):
                             raise ValueError("timestamp is not a string")
                         ts_str = ts_str.replace("Z", "+00:00")
-                        ts = datetime.fromisoformat(ts_str).timestamp()
+                        ts: float = datetime.fromisoformat(ts_str).timestamp()
                     except (json.JSONDecodeError, ValueError):
                         skipped += 1
                         continue
@@ -2127,7 +2245,7 @@ def _read_history(
                     if ts >= cutoff and (since is None or ts > since):
                         records.append(record)
 
-                covered = (
+                covered: bool = (
                     offset == 0
                     or (first_ts is not None and first_ts < cutoff)
                     or (
@@ -2135,9 +2253,9 @@ def _read_history(
                     )
                 )
                 # offset > 0 with a maxed window means we can't grow further.
-                hit_cap = offset > 0 and capped >= max_bytes
+                hit_cap: bool = offset > 0 and capped >= max_bytes
                 if covered or hit_cap:
-                    truncated = hit_cap and not covered
+                    truncated: bool = hit_cap and not covered
                     if skipped:
                         logger.warning(
                             "History read: skipped %d malformed lines", skipped
@@ -2165,20 +2283,20 @@ def _recording_health() -> dict[str, Any]:
     sample window (comfortably longer than a normal gap, so it doesn't false-fire
     every cycle). This is what turns a silently-dead recorder into a visible one.
     """
-    last_success = getattr(APP.state, "history_last_success", None)
-    interval = getattr(
+    last_success: str | None = getattr(APP.state, "history_last_success", None)
+    interval: float = getattr(
         APP.state, "history_record_interval", DEFAULT_HISTORY_RECORD_INTERVAL
     )
-    duration = getattr(
+    duration: float = getattr(
         APP.state, "history_sample_duration", DEFAULT_HISTORY_SAMPLE_DURATION
     )
-    stale = False
+    stale: bool = False
     # No success since start: age from the start time, so a recorder that has
     # never worked (Glances dead from boot) still trips stale on schedule.
-    since = last_success or getattr(APP.state, "started_at", None)
+    since: str | None = last_success or getattr(APP.state, "started_at", None)
     if since:
         try:
-            age = (
+            age: float = (
                 datetime.now(timezone.utc).timestamp()
                 - datetime.fromisoformat(str(since).replace("Z", "+00:00")).timestamp()
             )
@@ -2201,10 +2319,10 @@ def _parse_since(since: str | None) -> float | None | Response:
         return None
     # An unencoded "+00:00" pasted into a URL arrives as " 00:00"; put the plus
     # back on the offset only (a space between date and time is valid ISO).
-    text = re.sub(r"(:\d\d(?:\.\d+)?) (\d\d:\d\d)$", r"\1+\2", since.strip())
+    text: str = re.sub(r"(:\d\d(?:\.\d+)?) (\d\d:\d\d)$", r"\1+\2", since.strip())
     text = text.replace("Z", "+00:00")
     try:
-        dt = datetime.fromisoformat(text)
+        dt: datetime = datetime.fromisoformat(text)
     except ValueError:
         return Response(
             content=json.dumps({"error": "since must be an ISO 8601 timestamp"}),
@@ -2227,11 +2345,13 @@ async def get_history(hours: float = 24, since: str | None = None) -> Response:
             carry ``now`` (the server's clock) for the client's next since.
     """
     hours = max(0.1, min(hours, 8760))
-    since_ts = _parse_since(since)
+    since_ts: float | None | Response = _parse_since(since)
     if isinstance(since_ts, Response):
         return since_ts
     async with _history_read_lock:
-        result = await asyncio.to_thread(_read_history, hours, since=since_ts)
+        result: (
+            tuple[list[dict[str, Any]], int, bool, float] | str
+        ) = await asyncio.to_thread(_read_history, hours, since=since_ts)
 
     if isinstance(result, str):
         return Response(
@@ -2240,6 +2360,10 @@ async def get_history(hours: float = 24, since: str | None = None) -> Response:
             media_type="application/json",
         )
 
+    records: list[dict[str, Any]]
+    skipped: int
+    truncated: bool
+    cutoff: float
     records, skipped, truncated, cutoff = result
     # Records embed an `ip` block (LAN/public/Tailscale). Nothing in the UI reads it
     # from history — the IP-Info card uses live /api/ip-info — so don't serve a
@@ -2247,11 +2371,13 @@ async def get_history(hours: float = 24, since: str | None = None) -> Response:
     # /api/history/raw still exposes it for deliberate export. Records are freshly
     # parsed per request, so popping in place touches nothing shared.
     # The heavy per-record fields are served by /api/history/field/<name> on demand.
+    rec: dict[str, Any]
     for rec in records:
         rec.pop("ip", None)
+        name: str
         for name in HISTORY_SIDE_FIELDS:
             rec.pop(name, None)
-    body = {
+    body: dict[str, Any] = {
         "records": records,
         "count": len(records),
         "skipped_lines": skipped,
@@ -2286,26 +2412,32 @@ async def get_history_field(
             media_type="application/json",
         )
     hours = max(0.1, min(hours, 8760))
-    since_ts = _parse_since(since)
+    since_ts: float | None | Response = _parse_since(since)
     if isinstance(since_ts, Response):
         return since_ts
     async with _history_read_lock:
-        result = await asyncio.to_thread(_read_history, hours, since=since_ts)
+        result: (
+            tuple[list[dict[str, Any]], int, bool, float] | str
+        ) = await asyncio.to_thread(_read_history, hours, since=since_ts)
     if isinstance(result, str):
         return Response(
             content=json.dumps({"error": "Failed to read history", "detail": result}),
             status_code=500,
             media_type="application/json",
         )
+    records: list[dict[str, Any]]
+    skipped: int
+    truncated: bool
+    cutoff: float
     records, skipped, truncated, cutoff = result
-    slim = [
+    slim: list[dict[str, Any]] = [
         {
             "timestamp": rec.get("timestamp"),
             **({name: rec[name]} if name in rec else {}),
         }
         for rec in records
     ]
-    body = {
+    body: dict[str, Any] = {
         "field": name,
         "records": slim,
         "count": len(slim),
@@ -2330,9 +2462,12 @@ class _HistoryFileResponse(FileResponse):
     """Keep FileResponse's range support, but bound full exports to their size."""
 
     async def _handle_simple(
-        self, send: Send, send_header_only: bool, send_pathsend: bool
+        self: _HistoryFileResponse,
+        send: Send,
+        send_header_only: bool,
+        send_pathsend: bool,
     ) -> None:
-        remaining = int(self.headers["content-length"])
+        remaining: int = int(self.headers["content-length"])
         await send(
             {
                 "type": "http.response.start",
@@ -2345,9 +2480,10 @@ class _HistoryFileResponse(FileResponse):
             return
         # FileResponse normally reads to EOF (or delegates to pathsend).
         # History keeps growing: read only the bytes advertised at startup.
+        file: anyio.AsyncFile[bytes]
         async with await anyio.open_file(self.path, mode="rb") as file:
             while remaining:
-                chunk = await file.read(min(self.chunk_size, remaining))
+                chunk: bytes = await file.read(min(self.chunk_size, remaining))
                 if not chunk:
                     raise OSError("History file shrank during export")
                 remaining -= len(chunk)
@@ -2379,12 +2515,12 @@ async def get_history_raw(request: Request) -> Response:
     password: str = request.query_params.get("password") or request.headers.get(
         "X-Dashboard-Password", ""
     )
-    denied = await _verify_password_throttled(request, password)
+    denied: Response | None = await _verify_password_throttled(request, password)
     if denied is not None:
         return denied
 
     try:
-        stat_result = await asyncio.to_thread(_history_export_stat)
+        stat_result: os.stat_result = await asyncio.to_thread(_history_export_stat)
     except FileNotFoundError:
         return Response(
             content=json.dumps({"error": "No history file"}),
@@ -2419,15 +2555,18 @@ async def trigger_history_record() -> Response:
             status_code=429,
         )
 
+    e: Exception
     try:
         _last_manual_record_time = now
-        glances_url = APP.state.glances_url
-        record = await collect_history_sample(glances_url)
+        glances_url: str = APP.state.glances_url
+        record: dict[str, Any] = await collect_history_sample(glances_url)
         await asyncio.to_thread(append_history_record, record)
         _apply_record_health(record)
         # Echo without `ip` (see get_history). Build a new dict rather than popping:
         # `record` is the object that was just written and must stay intact.
-        echoed = {key: value for key, value in record.items() if key != "ip"}
+        echoed: dict[str, Any] = {
+            key: value for key, value in record.items() if key != "ip"
+        }
         return Response(
             content=json.dumps({"status": "ok", "record": echoed}),
             media_type="application/json",
@@ -2481,9 +2620,9 @@ async def update_history_settings(request: Request) -> Response:
         )
 
     try:
-        body: dict[str, Any] = await request.json()
+        body: dict[str, Any] | None = await request.json()
     except Exception:
-        body = None  # type: ignore[assignment]
+        body = None
     if not isinstance(body, dict):
         return Response(
             content=json.dumps({"error": "Invalid JSON: expected an object"}),
@@ -2492,16 +2631,16 @@ async def update_history_settings(request: Request) -> Response:
         )
 
     password: str = body.get("password", "")
-    denied = await _verify_password_throttled(request, password)
+    denied: Response | None = await _verify_password_throttled(request, password)
     if denied is not None:
         return denied
 
     # Validate new values
-    record_interval = body.get("record_interval")
-    sample_duration = body.get("sample_duration")
-    sample_count = body.get("sample_count")
-    min_record_interval = body.get("min_record_interval")
-    process_count = body.get("process_count")
+    record_interval: Any = body.get("record_interval")
+    sample_duration: Any = body.get("sample_duration")
+    sample_count: Any = body.get("sample_count")
+    min_record_interval: Any = body.get("min_record_interval")
+    process_count: Any = body.get("process_count")
     errors: list[str] = []
 
     if record_interval is not None:
@@ -2552,7 +2691,7 @@ async def update_history_settings(request: Request) -> Response:
         )
 
     # Apply changes
-    changed = False
+    changed: bool = False
     if (
         record_interval is not None
         and record_interval != APP.state.history_record_interval
@@ -2579,12 +2718,12 @@ async def update_history_settings(request: Request) -> Response:
         APP.state.history_process_count = process_count
         changed = True
 
-    ping_enabled = body.get("ping_enabled")
+    ping_enabled: Any = body.get("ping_enabled")
     if ping_enabled is not None and APP.state.ping_enabled != (ping_enabled is True):
         APP.state.ping_enabled = ping_enabled is True
         changed = True
 
-    processes_enabled = body.get("processes_enabled")
+    processes_enabled: Any = body.get("processes_enabled")
     if processes_enabled is not None and APP.state.history_processes_enabled != (
         processes_enabled is True
     ):
@@ -2637,7 +2776,7 @@ async def ping() -> Response:
             media_type="application/json",
         )
     try:
-        results = await asyncio.wait_for(
+        results: list[float | None] = await asyncio.wait_for(
             asyncio.gather(*(asyncio.to_thread(_run_ping, t) for t in PING_TARGETS)),
             timeout=8,
         )
@@ -2645,7 +2784,9 @@ async def ping() -> Response:
     # Python 3.11 (the declared floor is 3.10), so catch both.
     except (asyncio.TimeoutError, TimeoutError):
         results = [None] * len(PING_TARGETS)
-    targets = {}
+    targets: dict[str, Any] = {}
+    target: str
+    latency: float | None
     for target, latency in zip(PING_TARGETS, results):
         if latency is not None:
             targets[target] = {"latency_ms": round(latency, 2)}
@@ -2665,8 +2806,9 @@ def _get_gpu_info() -> list[dict[str, int | float | str | None]]:
     metric fields stay None so, for example, unavailable MIG utilization does
     not hide the GPU's usable memory totals from the live charts.
     """
+    e: subprocess.TimeoutExpired | OSError
     try:
-        result = subprocess.run(
+        result: subprocess.CompletedProcess[str] = subprocess.run(
             [
                 "nvidia-smi",
                 "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit,driver_version",
@@ -2692,16 +2834,19 @@ def _get_gpu_info() -> list[dict[str, int | float | str | None]]:
     # Get CUDA version from nvidia-smi header
     cuda_version: str = ""
     try:
-        cuda_result = subprocess.run(
+        cuda_result: subprocess.CompletedProcess[str] = subprocess.run(
             ["nvidia-smi"],
             capture_output=True,
             text=True,
             timeout=5,
         )
+        line: str
         for line in cuda_result.stdout.split("\n"):
             if "CUDA Version:" in line:
                 # Extract version like "12.4" from "CUDA Version: 12.4"
-                version_parts = line.split("CUDA Version:")[1].strip().split()
+                version_parts: list[str] = (
+                    line.split("CUDA Version:")[1].strip().split()
+                )
                 cuda_version = version_parts[0] if version_parts else ""
                 break
     except Exception:
@@ -2744,25 +2889,26 @@ def _get_gpu_info() -> list[dict[str, int | float | str | None]]:
 @APP.get("/api/gpu-info")
 async def gpu_info() -> Response:
     """Detailed GPU info from nvidia-smi; [] when it is unavailable."""
-    result = await asyncio.to_thread(_get_gpu_info)
+    result: list[dict[str, float | str | None]] = await asyncio.to_thread(_get_gpu_info)
     return Response(content=json.dumps(result), media_type="application/json")
 
 
 def _get_cpu_info() -> dict[str, Any]:
     """Get detailed CPU info from /proc/cpuinfo (sync, called from thread pool)."""
-    cpuinfo_path = Path("/proc/cpuinfo")
+    cpuinfo_path: Path = Path("/proc/cpuinfo")
     if not cpuinfo_path.exists():
         return {}
 
-    content = cpuinfo_path.read_text()
+    content: str = cpuinfo_path.read_text()
 
     model_name: str = ""
     physical_cores: set[tuple[str, str]] = set()
     logical_cores: int = 0
     cache_size: str = ""
 
+    block: str
     for block in re.split(r"\n\s*\n", content.strip()):
-        fields = {
+        fields: dict[str, str] = {
             key.strip(): value.strip()
             for key, value in (
                 line.split(":", 1) for line in block.splitlines() if ":" in line
@@ -2778,7 +2924,7 @@ def _get_cpu_info() -> dict[str, Any]:
 
     # Try to get L3 cache from sysfs
     l3_cache: str = ""
-    l3_path = Path("/sys/devices/system/cpu/cpu0/cache/index3/size")
+    l3_path: Path = Path("/sys/devices/system/cpu/cpu0/cache/index3/size")
     if l3_path.exists():
         l3_cache = l3_path.read_text().strip()
 
@@ -2794,8 +2940,9 @@ def _get_cpu_info() -> dict[str, Any]:
 @APP.get("/api/cpu-info")
 async def cpu_info() -> Response:
     """Get detailed CPU info from /proc/cpuinfo."""
+    e: Exception
     try:
-        result = await asyncio.to_thread(_get_cpu_info)
+        result: dict[str, Any] = await asyncio.to_thread(_get_cpu_info)
         return Response(content=json.dumps(result), media_type="application/json")
     except Exception as e:
         logger.warning("Failed to read CPU info: %s", e)
@@ -2811,8 +2958,9 @@ def _get_ip_info() -> dict[str, Any]:
     result: dict[str, Any] = {"lan": [], "public": {}, "tailscale": {}}
 
     # --- LAN IPs via `ip -j addr show` ---
+    e: Exception
     try:
-        ip_out = subprocess.run(
+        ip_out: subprocess.CompletedProcess[str] = subprocess.run(
             ["ip", "-j", "addr", "show"],
             capture_output=True,
             text=True,
@@ -2820,12 +2968,14 @@ def _get_ip_info() -> dict[str, Any]:
         )
         if ip_out.returncode == 0:
             interfaces: list[dict[str, Any]] = json.loads(ip_out.stdout)
+            iface: dict[str, Any]
             for iface in interfaces:
                 name: str = iface.get("ifname", "")
                 if name == "lo":
                     continue
                 ipv4_addrs: list[str] = []
                 ipv6_addrs: list[str] = []
+                addr_info: dict[str, Any]
                 for addr_info in iface.get("addr_info", []):
                     family: str = addr_info.get("family", "")
                     local: str = addr_info.get("local", "")
@@ -2851,9 +3001,10 @@ def _get_ip_info() -> dict[str, Any]:
 
     # --- Public IP via external services ---
     try:
+        client: httpx.Client
         with httpx.Client(timeout=3) as client:
             try:
-                resp = client.get("https://api.ipify.org")
+                resp: httpx.Response = client.get("https://api.ipify.org")
                 if resp.status_code == 200 and resp.text.strip():
                     result["public"]["ipv4"] = resp.text.strip()
             except Exception as e:
@@ -2861,7 +3012,7 @@ def _get_ip_info() -> dict[str, Any]:
             try:
                 resp = client.get("https://api64.ipify.org")
                 if resp.status_code == 200 and resp.text.strip():
-                    addr = resp.text.strip()
+                    addr: str = resp.text.strip()
                     # api64 can return IPv4, including when the first lookup failed.
                     result["public"].setdefault("ipv6" if ":" in addr else "ipv4", addr)
             except Exception as e:
@@ -2874,16 +3025,17 @@ def _get_ip_info() -> dict[str, Any]:
 
     # --- Tailscale IP ---
     try:
-        ts_out = subprocess.run(
+        ts_out: subprocess.CompletedProcess[str] = subprocess.run(
             ["tailscale", "ip"],
             capture_output=True,
             text=True,
             timeout=5,
         )
         if ts_out.returncode == 0:
-            lines = [
+            lines: list[str] = [
                 ln.strip() for ln in ts_out.stdout.strip().splitlines() if ln.strip()
             ]
+            line: str
             for line in lines:
                 if ":" in line:
                     result["tailscale"]["ipv6"] = line
@@ -2900,8 +3052,9 @@ def _get_ip_info() -> dict[str, Any]:
 @APP.get("/api/ip-info")
 async def ip_info() -> Response:
     """Get IP addresses: LAN, public, and Tailscale."""
+    e: Exception
     try:
-        result = await asyncio.to_thread(_get_ip_info)
+        result: dict[str, Any] = await asyncio.to_thread(_get_ip_info)
         return Response(content=json.dumps(result), media_type="application/json")
     except Exception as e:
         logger.warning("Failed to get IP info: %s", e)
@@ -2923,12 +3076,13 @@ def _parse_pmon(
     becomes None, which the callers keep apart from 0.
     """
     out: dict[tuple[int, int], tuple[float | None, float | None]] = {}
+    line: str
     for line in stdout.splitlines():
-        parts = line.split()
+        parts: list[str] = line.split()
         if not parts or parts[0].startswith("#") or len(parts) < 5:
             continue
         try:
-            key = (int(parts[0]), int(parts[1]))
+            key: tuple[int, int] = (int(parts[0]), int(parts[1]))
         except ValueError:
             continue
 
@@ -2953,8 +3107,9 @@ def _gpu_process_utilization() -> dict[
     those processes read as None, never as 0. Any failure is a missing column,
     not a missing process list.
     """
+    e: OSError | subprocess.SubprocessError
     try:
-        result = subprocess.run(
+        result: subprocess.CompletedProcess[str] = subprocess.run(
             ["nvidia-smi", "pmon", "-c", "1", "-s", "u"],
             capture_output=True,
             text=True,
@@ -2985,7 +3140,7 @@ def _get_gpu_processes() -> list[dict[str, Any]]:
 
     Returns a list of process dicts on success, or an error dict on failure.
     """
-    result = subprocess.run(
+    result: subprocess.CompletedProcess[str] = subprocess.run(
         [
             "nvidia-smi",
             "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
@@ -3000,7 +3155,7 @@ def _get_gpu_processes() -> list[dict[str, Any]]:
         return []
 
     # Get GPU index mapping from UUID
-    uuid_result = subprocess.run(
+    uuid_result: subprocess.CompletedProcess[str] = subprocess.run(
         ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
         capture_output=True,
         text=True,
@@ -3008,6 +3163,7 @@ def _get_gpu_processes() -> list[dict[str, Any]]:
         timeout=5,
     )
     uuid_to_index: dict[str, int] = {}
+    line: str
     for line in uuid_result.stdout.strip().split("\n"):
         if not line.strip():
             continue
@@ -3018,7 +3174,9 @@ def _get_gpu_processes() -> list[dict[str, Any]]:
             except ValueError:
                 logger.warning("Skipping GPU UUID line with bad index: %s", line)
 
-    util = _gpu_process_utilization()
+    util: dict[tuple[int, int], tuple[float | None, float | None]] = (
+        _gpu_process_utilization()
+    )
 
     processes: list[dict[str, Any]] = []
     for line in result.stdout.strip().split("\n"):
@@ -3026,15 +3184,18 @@ def _get_gpu_processes() -> list[dict[str, Any]]:
             continue
         parts = [p.strip() for p in line.split(",")]
         if len(parts) >= 4:
+            e: ValueError | IndexError
             try:
                 gpu_uuid: str = parts[0]
                 pid: int = int(parts[1])
                 nvidia_name: str = parts[2]
                 # Get sanitized process info from /proc
-                info = get_sanitized_process_info(
+                info: dict[str, str] = get_sanitized_process_info(
                     pid, Path(nvidia_name).name, nvidia_name
                 )
-                gpu_index = uuid_to_index.get(gpu_uuid, 0)
+                gpu_index: int = uuid_to_index.get(gpu_uuid, 0)
+                sm: float | None
+                membw: float | None
                 sm, membw = util.get((gpu_index, pid), (None, None))
                 processes.append(
                     {
@@ -3060,7 +3221,7 @@ def _get_gpu_processes() -> list[dict[str, Any]]:
 async def gpu_processes() -> Response:
     """Get processes using GPU from nvidia-smi."""
     try:
-        result = await asyncio.to_thread(_get_gpu_processes)
+        result: list[dict[str, Any]] = await asyncio.to_thread(_get_gpu_processes)
     except FileNotFoundError:
         logger.debug("nvidia-smi not found for GPU processes")
         return Response(content="[]", media_type="application/json")
@@ -3100,18 +3261,19 @@ async def disk_processes(duration: int = 1) -> Response:
         )
     await _disk_lock.acquire()
 
+    e: Exception
     try:
         # Clamp duration to reasonable range
         duration = max(1, min(duration, 10))
 
         # pidstat -d: disk I/O stats
         # Args: interval (seconds), count (number of samples)
-        result = await asyncio.to_thread(
+        result: subprocess.CompletedProcess[str] = await asyncio.to_thread(
             _run_pidstat, duration=duration, timeout=duration + 5
         )
 
         if result.returncode != 0:
-            error_msg = result.stderr.strip() or f"Exit code {result.returncode}"
+            error_msg: str = result.stderr.strip() or f"Exit code {result.returncode}"
             logger.warning("pidstat failed: %s", error_msg)
             return Response(
                 content=json.dumps({"error": "pidstat failed", "detail": error_msg}),
@@ -3149,7 +3311,7 @@ async def disk_processes(duration: int = 1) -> Response:
                 # Only include processes with actual I/O
                 if read_kbps > 0 or write_kbps > 0:
                     command: str = fields[7] if len(fields) > 7 else "unknown"
-                    info = get_sanitized_process_info(pid, command, "")
+                    info: dict[str, str] = get_sanitized_process_info(pid, command, "")
                     processes[pid] = {
                         "pid": pid,
                         "read_kbps": read_kbps,
@@ -3223,6 +3385,7 @@ async def network_processes(duration: int = 3) -> Response:
         )
     await _nethogs_lock.acquire()
 
+    e: Exception
     try:
         # nethogs requires CAP_NET_ADMIN or root
         # -t: trace mode (stdout instead of ncurses)
@@ -3230,10 +3393,12 @@ async def network_processes(duration: int = 3) -> Response:
         # -d 1: 1 second delay between refreshes
         cycles: int = max(1, min(duration, 60))
         timeout: int = int(cycles * 1.5) + 5
-        result = await asyncio.to_thread(_run_nethogs, cycles=cycles, timeout=timeout)
+        result: subprocess.CompletedProcess[str] = await asyncio.to_thread(
+            _run_nethogs, cycles=cycles, timeout=timeout
+        )
 
         if result.returncode != 0:
-            error_msg = result.stderr.strip() or f"Exit code {result.returncode}"
+            error_msg: str = result.stderr.strip() or f"Exit code {result.returncode}"
             # Log full error to server console
             logger.warning("nethogs failed: %s", error_msg)
             if (
@@ -3278,8 +3443,10 @@ async def network_processes(duration: int = 3) -> Response:
                 # Extract PID from proc_info (format: path/pid/uid)
                 parts: list[str] = proc_info.rsplit("/", 2)
                 if len(parts) >= 3:
-                    pid = int(parts[-2])
-                    program = parts[0].split("/")[-1] if "/" in parts[0] else parts[0]
+                    pid: int = int(parts[-2])
+                    program: str = (
+                        parts[0].split("/")[-1] if "/" in parts[0] else parts[0]
+                    )
                 else:
                     continue
 
@@ -3293,7 +3460,9 @@ async def network_processes(duration: int = 3) -> Response:
                     )
                 else:
                     # Get sanitized process info from /proc
-                    info = get_sanitized_process_info(pid, program, parts[0])
+                    info: dict[str, str] = get_sanitized_process_info(
+                        pid, program, parts[0]
+                    )
                     processes[pid] = {
                         "pid": pid,
                         "name": info["name"],
@@ -3348,18 +3517,23 @@ async def network_processes(duration: int = 3) -> Response:
 async def processlist() -> Response:
     """Get process list from Glances with sanitized display info."""
     glances_url: str = APP.state.glances_url
+    client: httpx.AsyncClient
     async with httpx.AsyncClient() as client:
+        error: httpx.RequestError
         try:
-            resp = await client.get(f"{glances_url}/api/4/processlist", timeout=10.0)
+            resp: httpx.Response = await client.get(
+                f"{glances_url}/api/4/processlist", timeout=10.0
+            )
             if resp.status_code != 200:
                 return Response(content=resp.content, status_code=resp.status_code)
 
             processes: list[dict[str, Any]] = resp.json()
+            proc: dict[str, Any]
             for proc in processes:
                 pid: Any = proc.get("pid")
                 if pid:
                     name: str = proc.get("name", "unknown")
-                    info = get_sanitized_process_info(pid, name)
+                    info: dict[str, str] = get_sanitized_process_info(pid, name)
                     proc["display_name"] = info["name"]
                     proc["display_path"] = info["path"]
                 # Remove cmdline to prevent leaking sensitive data
@@ -3385,13 +3559,16 @@ async def proxy_fs(request: Request) -> Response:
     duplicate-device entries de-duped (e.g. PrivateTmp's /tmp, /var/tmp bind
     mounts that mirror /) so each physical filesystem shows once."""
     glances_url: str = request.app.state.glances_url
+    client: httpx.AsyncClient
     async with httpx.AsyncClient() as client:
+        error: httpx.RequestError
         try:
             resp: httpx.Response = await client.get(
                 f"{glances_url}/api/4/fs", timeout=10.0
             )
             if resp.status_code == 200:
-                data: list = resp.json()
+                data: list[dict[str, Any]] = resp.json()
+                entry: dict[str, Any]
                 for entry in data:
                     device_name: str = entry.get("device_name", "")
                     if device_name:
@@ -3437,18 +3614,22 @@ def _get_mail(path: str = MAIL_SPOOL, limit: int = MAIL_LIMIT) -> dict[str, Any]
     try:
         # create=False: a mistyped path must not create an empty spool. The box is
         # never flushed, so it never writes.
-        box = mailbox.mbox(path, create=False)
+        box: mailbox.mbox = mailbox.mbox(path, create=False)
         try:
-            keys = box.keys()
+            keys: list[str] = box.keys()
             result["count"] = len(keys)
+            key: str
             for key in reversed(keys[-limit:]):
+                e: Exception
                 try:
-                    msg = email.message_from_bytes(
-                        box.get_bytes(key), policy=email.policy.default
+                    msg: email.message.EmailMessage[Any, Any] = (
+                        email.message_from_bytes(
+                            box.get_bytes(key), policy=email.policy.default
+                        )
                     )
                     # With policy.default the header is a DateHeader whose .datetime
                     # is None on garbage; the header itself is None when absent.
-                    d = msg["Date"]
+                    d: Any = msg["Date"]
                     entry: dict[str, Any] = {
                         "date_epoch": (
                             d.datetime.timestamp()
@@ -3482,7 +3663,7 @@ def _get_mail(path: str = MAIL_SPOOL, limit: int = MAIL_LIMIT) -> dict[str, Any]
 @APP.get("/api/mail")
 async def mail() -> Response:
     """Local system mail: count and newest subjects. Always 200; ``status`` says why not."""
-    result = await asyncio.to_thread(_get_mail)
+    result: dict[str, Any] = await asyncio.to_thread(_get_mail)
     return Response(content=json.dumps(result), media_type="application/json")
 
 
@@ -3511,9 +3692,11 @@ def _get_storage_health(
         "age_sec": None,
         "path": path,
     }
+    e: OSError | ValueError
     try:
+        f: BinaryIO
         with open(path, "rb") as f:
-            state = json.load(f)
+            state: Any = json.load(f)
     except FileNotFoundError:
         result["status"] = "missing"
         return result
@@ -3525,7 +3708,7 @@ def _get_storage_health(
         result["status"] = "error"
         result["detail"] = "not a JSON object"
         return result
-    ts = state.get("ts")
+    ts: Any = state.get("ts")
     # json.load accepts NaN/Infinity; int() of those raises, so they are an error.
     if isinstance(ts, (int, float)) and not isinstance(ts, bool) and math.isfinite(ts):
         result["age_sec"] = int(time.time() - ts)
@@ -3542,14 +3725,14 @@ def _get_storage_health(
 @APP.get("/api/storage-health")
 async def storage_health() -> Response:
     """The collector's hardware health snapshot with alarms. Always 200; ``status`` says freshness."""
-    result = await asyncio.to_thread(_get_storage_health)
+    result: dict[str, Any] = await asyncio.to_thread(_get_storage_health)
     return Response(content=json.dumps(result), media_type="application/json")
 
 
 @APP.get("/api/sensors")
 async def sensors_snapshot() -> Response:
     """The 60 s fans / temps / power snapshot. Always 200; ``status`` says freshness."""
-    result = await asyncio.to_thread(
+    result: dict[str, Any] = await asyncio.to_thread(
         _get_storage_health, SENSORS_PATH, SENSORS_STALE_SEC
     )
     return Response(content=json.dumps(result), media_type="application/json")
@@ -3578,7 +3761,7 @@ GLANCES_PROXY_PLUGINS: Final[tuple[str, ...]] = (
 @APP.get("/api/list-endpoints")
 async def list_endpoints() -> Response:
     """Return list of all API endpoints this server implements."""
-    endpoints = [
+    endpoints: list[str] = [
         *(f"/4/{plugin}" for plugin in GLANCES_PROXY_PLUGINS),
         "/cpu-info",
         "/gpu-info",
@@ -3615,8 +3798,10 @@ async def proxy_api(path: str, request: Request) -> Response:
     if not path.startswith("4/") or path[2:] not in GLANCES_PROXY_PLUGINS:
         return Response(status_code=404)
     glances_url: str = request.app.state.glances_url
+    client: httpx.AsyncClient
     async with httpx.AsyncClient() as client:
         url: str = f"{glances_url}/api/{path}"
+        error: httpx.RequestError
         try:
             resp: httpx.Response = await client.request(
                 method=request.method,
@@ -3720,21 +3905,27 @@ _ANSI_16: Final[list[tuple[int, int, int]]] = [
 
 def _ansi_16(r: int, g: int, b: int) -> int:
     """Nearest of the 8 base colours (30-37), bright (90-97) when it's light."""
-    i = min(
+    i: int = min(
         range(8),
         key=lambda k: sum((a - c) ** 2 for a, c in zip((r, g, b), _ANSI_16[k])),
     )
     return (90 if max(r, g, b) > 191 else 30) + i
 
 
-def _paint(text: str, key: str, on: bool | str) -> str:
+ColorDepth: TypeAlias = bool | Literal["24", "256", "16"]
+
+
+def _paint(text: str, key: str, on: ColorDepth) -> str:
     """Colour `text` with TEXT_COLORS[key]. `on` is the colour depth: False for
     none, True or "24" for 24-bit, "256" or "16" for older terminals."""
     if not on or not text:
         return text
-    h = TEXT_COLORS[key].lstrip("#")
+    h: str = TEXT_COLORS[key].lstrip("#")
+    r: int
+    g: int
+    b: int
     r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
-    bold = "1;" if key == "title" else ""
+    bold: str = "1;" if key == "title" else ""
     if on == "256":
         return f"\033[{bold}38;5;{_ansi_256(r, g, b)}m{text}\033[0m"
     if on == "16":
@@ -3742,20 +3933,20 @@ def _paint(text: str, key: str, on: bool | str) -> str:
     return f"\033[{bold}38;2;{r};{g};{b}m{text}\033[0m"
 
 
-def _fmt(value: Any, spec: str = ".1f", none: str = "-") -> str:
-    v = _num(value)
+def _fmt(value: object, spec: str = ".1f", none: str = "-") -> str:
+    v: float | None = _num(value)
     return none if v is None else format(v, spec)
 
 
 def _bar(
-    percent: Any,
+    percent: object,
     unicode: bool,
     key: str = "cpu",
-    color: bool | str = False,
+    color: ColorDepth = False,
     width: int = TEXT_BAR_WIDTH,
 ) -> str:
-    p = _num(percent)
-    filled = 0 if p is None else round(max(0.0, min(p, 100.0)) / 100 * width)
+    p: float | None = _num(percent)
+    filled: int = 0 if p is None else round(max(0.0, min(p, 100.0)) / 100 * width)
     if unicode:
         return _paint("█" * filled, key, color) + _paint(
             "░" * (width - filled), "muted", color
@@ -3764,21 +3955,28 @@ def _bar(
 
 
 def _range_bar(
-    lo: Any,
-    mid: Any,
-    hi: Any,
+    lo: object,
+    mid: object,
+    hi: object,
     unicode: bool,
     key: str,
-    color: bool | str,
+    color: ColorDepth,
     width: int = TEXT_BAR_WIDTH,
 ) -> str:
     """A 0-100 track with min..max filled and the median marked."""
-    vals = [v for v in (_num(lo), _num(mid), _num(hi)) if v is not None]
+    vals: list[float] = [v for v in (_num(lo), _num(mid), _num(hi)) if v is not None]
     if len(vals) < 3:
         return _bar(None, unicode, key, color, width)
+    a: int
+    m: int
+    b: int
     a, m, b = (round(max(0.0, min(v, 100.0)) / 100 * (width - 1)) for v in vals)
+    track: str
+    span: str
+    mark: str
     track, span, mark = ("░", "▬", "◆") if unicode else (" ", "-", "|")
-    cells = []
+    cells: list[str] = []
+    i: int
     for i in range(width):
         if i == m:
             cells.append(_paint(mark, key, color))
@@ -3786,7 +3984,7 @@ def _range_bar(
             cells.append(_paint(span, key, color))
         else:
             cells.append(_paint(track, "muted", color))
-    body = "".join(cells)
+    body: str = "".join(cells)
     return body if unicode else f"[{body}]"
 
 
@@ -3798,13 +3996,13 @@ def _sparkline(
 ) -> str:
     """One character per value on the scale lo..hi (default: the data's own
     min..max); values outside it are clamped."""
-    nums = [v for v in values if v is not None]
+    nums: list[float] = [v for v in values if v is not None]
     if not nums:
         return ""
     lo = min(nums) if lo is None else lo
     hi = max(nums) if hi is None else hi
-    span = (hi - lo) or 1.0
-    top = len(chars) - 1
+    span: float = (hi - lo) or 1.0
+    top: int = len(chars) - 1
     return "".join(
         " " if v is None else chars[round(max(0.0, min(1.0, (v - lo) / span)) * top)]
         for v in values
@@ -3819,23 +4017,23 @@ class _HistRow(NamedTuple):
     values: list[float | None]  # per record (the record's average)
     spec: str  # number format
     key: str  # TEXT_COLORS key
-    threshold: Any  # orange-card threshold, or None
-    scale: str  # "pct" 0-100, "zero" 0..peak, "load" 0..max(cores, peak), "temp"
+    threshold: object  # orange-card threshold, or None
+    scale: Literal["pct", "zero", "load", "temp"]
     lows: list[float | None] | None = None  # per-record burst minimum, when kept
     peaks: list[float | None] | None = None  # per-record burst maximum, when kept
 
-    def bounds(self) -> tuple[float, float]:
+    def bounds(self: _HistRow) -> tuple[float, float]:
         """The sparkline scale: fixed for percentages, from 0 for rates, so a
         72-74% memory wobble doesn't fill the whole height."""
         # Scale to the averages actually drawn, not burst peaks: one 60 MB/s
         # spike would otherwise flatten every other column.
-        top = max([v for v in self.values if v is not None], default=0.0)
+        top: float = max([v for v in self.values if v is not None], default=0.0)
         if self.scale == "pct":
             return 0.0, 100.0
         if self.scale == "load":
             return 0.0, max(float(os.cpu_count() or 1), top)
         if self.scale == "temp":
-            thr = _num(self.threshold) or 60.0
+            thr: float = _num(self.threshold) or 60.0
             return 20.0, max(thr + 10, top)
         return 0.0, max(top, 1.0)
 
@@ -3852,18 +4050,20 @@ def _time_buckets(
     mean of the records inside it. An empty slice repeats the last earlier record
     when that record is at most `hold` seconds old (records are sparser than
     columns), and stays blank across real gaps (box off, recorder down)."""
-    span = (end - start) / width or 1.0
-    sums = [0.0] * width
-    counts = [0] * width
+    span: float = (end - start) / width or 1.0
+    sums: list[float] = [0.0] * width
+    counts: list[int] = [0] * width
+    t: float | None
+    v: float | None
     for t, v in zip(times, values):
         if t is None or v is None or not start <= t <= end:
             continue
-        b = min(width - 1, int((t - start) / span))
+        b: int = min(width - 1, int((t - start) / span))
         sums[b] += v
         counts[b] += 1
     out: list[float | None] = []
     last_v: float | None = None
-    last_t = -math.inf
+    last_t: float = -math.inf
     for b in range(width):
         if counts[b]:
             last_v = sums[b] / counts[b]
@@ -3886,7 +4086,7 @@ def _temps_of(record: dict[str, Any]) -> list[float]:
 
 def _record_time(record: dict[str, Any]) -> datetime | None:
     try:
-        ts = str(record.get("timestamp", "")).replace("Z", "+00:00")
+        ts: str = str(record.get("timestamp", "")).replace("Z", "+00:00")
         return datetime.fromisoformat(ts).astimezone()
     except ValueError:
         return None
@@ -3895,7 +4095,7 @@ def _record_time(record: dict[str, Any]) -> datetime | None:
 def _age(then: datetime | None, now: datetime) -> str:
     if then is None:
         return "?"
-    sec = max(0, int((now - then).total_seconds()))
+    sec: int = max(0, int((now - then).total_seconds()))
     if sec < 120:
         return f"{sec}s ago"
     if sec < 7200:
@@ -3905,6 +4105,7 @@ def _age(then: datetime | None, now: datetime) -> str:
 
 def _get(record: dict[str, Any], *path: str) -> Any:
     cur: Any = record
+    key: str
     for key in path:
         if not isinstance(cur, dict):
             return None
@@ -3913,21 +4114,21 @@ def _get(record: dict[str, Any], *path: str) -> Any:
 
 
 def _gpu_field(record: dict[str, Any], i: int, field: str) -> Any:
-    gpus = record.get("gpus") or []
+    gpus: list[dict[str, Any]] = record.get("gpus") or []
     return gpus[i].get(field) if i < len(gpus) and isinstance(gpus[i], dict) else None
 
 
 def _section(
     name: str,
     unicode: bool,
-    color: bool | str,
+    color: ColorDepth,
     extra: str = "",
     width: int = TEXT_WIDTH,
 ) -> str:
-    dash = "─" if unicode else "-"
-    head = f"{dash * 2} {_paint(name, 'title', color)} "
-    tail = f" {extra}" if extra else ""
-    pad = max(2, width - len(name) - 4 - len(_strip_ansi(tail)))
+    dash: str = "─" if unicode else "-"
+    head: str = f"{dash * 2} {_paint(name, 'title', color)} "
+    tail: str = f" {extra}" if extra else ""
+    pad: int = max(2, width - len(name) - 4 - len(_strip_ansi(tail)))
     return head + _paint(dash * pad, "muted", color) + tail
 
 
@@ -3935,13 +4136,17 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r"\033\[[0-9;]*m", "", text)
 
 
-def _level(value: Any, threshold: Any, key: str) -> str:
+def _level(value: object, threshold: object, key: str) -> str:
     """The value's own colour, or the warning colour at/over the card threshold."""
+    v: float | None
+    t: float | None
     v, t = _num(value), _num(threshold)
     return "warning" if v is not None and t is not None and v >= t else key
 
 
-def _temp_key(value: Any, threshold: Any) -> str:
+def _temp_key(value: object, threshold: object) -> str:
+    v: float | None
+    t: float
     v, t = _num(value), _num(threshold) or 60.0
     if v is None:
         return "muted"
@@ -3952,13 +4157,13 @@ def _render_latest(
     record: dict[str, Any],
     unicode: bool,
     now: datetime,
-    color: bool | str = False,
+    color: ColorDepth = False,
     thresholds: dict[str, Any] | None = None,
     width: int = TEXT_WIDTH,
 ) -> list[tuple[str, str]]:
     """Snapshot lines as (slot, line). The slot names the history sparkline that
     belongs beside the line in two-column mode ("" for none)."""
-    th = thresholds or {}
+    th: dict[str, Any] = thresholds or {}
     lines: list[tuple[str, str]] = []
 
     def add(line: str, slot: str = "") -> None:
@@ -3967,18 +4172,23 @@ def _render_latest(
     def sec(name: str, extra: str = "") -> str:
         return _section(name, unicode, color, extra, width)
 
-    then = _record_time(record)
-    when = then.strftime("%Y-%m-%d %H:%M:%S %Z") if then else "?"
-    deg = "°C" if unicode else " C"
+    then: datetime | None = _record_time(record)
+    when: str = then.strftime("%Y-%m-%d %H:%M:%S %Z") if then else "?"
+    deg: str = "°C" if unicode else " C"
     add(
         sec("Snapshot", f"{when} " + _paint(f"({_age(then, now)})", "muted", color)),
         "@header",
     )
 
     def row(
-        label: str, percent: Any, detail: str, key: str, thr: Any = None, slot: str = ""
+        label: str,
+        percent: object,
+        detail: str,
+        key: str,
+        thr: object = None,
+        slot: str = "",
     ) -> None:
-        pct = _paint(f"{_fmt(percent):>5}%", _level(percent, thr, key), color)
+        pct: str = _paint(f"{_fmt(percent):>5}%", _level(percent, thr, key), color)
         add(
             _paint(f"{label:<10}", key, color)
             + f" {_bar(percent, unicode, key, color)} {pct}  {detail}",
@@ -3988,8 +4198,8 @@ def _render_latest(
     def gb(m: dict[str, Any], used: str = "used_gb", total: str = "total_gb") -> str:
         return _paint(f"{_fmt(m.get(used))} / {_fmt(m.get(total))} GB", "muted", color)
 
-    cpu = record.get("cpu") or {}
-    burst = _num(record.get("duration_sec")) or 0
+    cpu: Any = record.get("cpu") or {}
+    burst: float = _num(record.get("duration_sec")) or 0
     row(
         "CPU",
         cpu.get("avg"),
@@ -3998,8 +4208,11 @@ def _render_latest(
         th.get("cpu_percent"),
         "cpu",
     )
-    spread = record.get("cpu_cores") or {}
+    spread: Any = record.get("cpu_cores") or {}
     if spread:
+        lo: Any
+        med: Any
+        hi: Any
         lo, med, hi = (spread.get(k) for k in ("min", "median", "max"))
         add(
             _paint(f"{'  cores':<10}", "cpu_cores", color)
@@ -4009,10 +4222,10 @@ def _render_latest(
             "cpu_cores",
         )
 
-    load = record.get("load") or {}
-    cores = os.cpu_count() or 1
-    load1 = _num(load.get("min1"))
-    load_pct = None if load1 is None else 100 * load1 / cores
+    load: Any = record.get("load") or {}
+    cores: int = os.cpu_count() or 1
+    load1: float | None = _num(load.get("min1"))
+    load_pct: None | float = None if load1 is None else 100 * load1 / cores
     row(
         "Load",
         load_pct,
@@ -4028,18 +4241,22 @@ def _render_latest(
         "load",
         slot="load",
     )
+    key: str
+    label: str
     for key, label in (("memory", "Memory"), ("swap", "Swap")):
-        m = record.get(key) or {}
+        m: Any = record.get(key) or {}
         row(label, m.get("percent"), gb(m), key, th.get(f"{key}_percent"), key)
 
-    temps = record.get("temps") or {}
-    gpus = record.get("gpus") or []
+    temps: Any = record.get("temps") or {}
+    gpus: list[dict[str, Any]] = record.get("gpus") or []
     if gpus:
         add(sec("GPUs"))
+    i: int
+    gpu: dict[str, Any]
     for i, gpu in enumerate(gpus):
-        idx = gpu.get("index")
-        t = temps.get(f"GPU {idx}")
-        temp = (
+        idx: Any = gpu.get("index")
+        t: Any = temps.get(f"GPU {idx}")
+        temp: str = (
             ""
             if t is None
             else _paint(
@@ -4064,9 +4281,13 @@ def _render_latest(
         )
 
     add(sec("I/O"))
+    up: str
+    down: str
     up, down = ("↑", "↓") if unicode else ("^", "v")
+    net_thr: Any
+    io_thr: Any
     net_thr, io_thr = th.get("network_mbps"), th.get("disk_io_mbps")
-    io = [
+    io: list[tuple[str, str, str, Any, str, Any]] = [
         (
             "Network",
             down,
@@ -4101,11 +4322,12 @@ def _render_latest(
         ),
     ]
 
-    def io_cell(arrow: str, name: str, v: Any, k: str, thr: Any) -> str:
+    def io_cell(arrow: str, name: str, v: object, k: str, thr: object) -> str:
         return _paint(f"{arrow} {name:<5}", k, color) + _paint(
             f"{_fmt(v, '.2f'):>8}", _level(v, thr, k), color
         )
 
+    pair: list[tuple[str, str, str, Any, str, Any]]
     for pair in (io[:2], io[2:]):
         add(
             _paint(f"{pair[0][0]:<10}", pair[0][4], color)
@@ -4115,16 +4337,20 @@ def _render_latest(
             pair[0][4],
         )
 
-    pings = [
+    pings: list[tuple[str, dict[str, Any]]] = [
         (t, p) for t, p in (record.get("ping") or {}).items() if isinstance(p, dict)
     ]
-    cells = []
+    cells: list[str] = []
+    target: Any
+    p: dict[str, Any]
     for i, (target, p) in enumerate(pings):
         key = f"ping_{i % 3}"
+        avg: float | None
+        loss: float
         avg, loss = _num(p.get("avg")), _num(p.get("loss")) or 0.0
         # Target's colour on the marker, the address muted, the measurement in
         # the target's colour (orange over the threshold), so they read apart.
-        dot = (
+        dot: str = (
             _paint("●" if unicode else "*", key, color)
             + " "
             + _paint(target, "muted", color)
@@ -4133,7 +4359,9 @@ def _render_latest(
         if avg is None:
             cells.append(dot + _paint("DOWN", "error", color))
             continue
-        cell = dot + _paint(f"{avg:.1f} ms", _level(avg, th.get("ping_ms"), key), color)
+        cell: str = dot + _paint(
+            f"{avg:.1f} ms", _level(avg, th.get("ping_ms"), key), color
+        )
         if loss > 0:
             cell += _paint(f" {loss * 100:.0f}% loss", "warning", color)
         cells.append(cell)
@@ -4143,10 +4371,10 @@ def _render_latest(
             f"ping:{pings[0][0]}",
         )
 
-    readings = _temps_of(record)
+    readings: list[float] = _temps_of(record)
     if readings:
         add(sec(f"Temperatures ({deg.strip()})", f"{len(readings)} sensors"))
-        thr = th.get("temp_celsius")
+        thr: Any = th.get("temp_celsius")
         add(
             "   ".join(
                 _paint(f"{label} ", "muted", color)
@@ -4161,11 +4389,12 @@ def _render_latest(
             "maxt",
         )
 
-    drives = record.get("drives") or []
+    drives: list[dict[str, Any]] = record.get("drives") or []
     if drives:
         add(sec("Drives"))
+    d: Any
     for d in drives:
-        mount = str(d.get("mount", "?"))
+        mount: str = str(d.get("mount", "?"))
         row(
             mount
             if len(mount) <= 10
@@ -4187,7 +4416,7 @@ TEXT_AUTO_HOURS: Final[tuple[float, float]] = (1.0, 3.0)
 def _text_layout(width: int, view: str, unicode: bool) -> tuple[int, bool, int]:
     """(width, two-column?, column width) for a requested report width."""
     width = max(TEXT_MIN_WIDTH, width)
-    two_col = view == "both" and unicode and width >= TEXT_TWO_COLUMN_WIDTH
+    two_col: bool = view == "both" and unicode and width >= TEXT_TWO_COLUMN_WIDTH
     return width, two_col, (width - 3) // 2 if two_col else width
 
 
@@ -4200,8 +4429,11 @@ def auto_history_hours(
 ) -> float:
     """Default window: as many records as the sparklines have columns, so each
     column is about one record, kept between 1 and 3 hours."""
+    col_w: int
     _, _, col_w = _text_layout(width, view, unicode)
-    span = _spark_field_width(col_w) * max(1.0, record_interval) / 3600
+    span: float = _spark_field_width(col_w) * max(1.0, record_interval) / 3600
+    lo: float
+    hi: float
     lo, hi = TEXT_AUTO_HOURS
     return round(min(hi, max(lo, span)), 2)
 
@@ -4211,7 +4443,7 @@ def _render_history(
     unicode: bool,
     hours: float,
     rows: int,
-    color: bool | str = False,
+    color: ColorDepth = False,
     thresholds: dict[str, Any] | None = None,
     table: bool = False,
     width: int = TEXT_WIDTH,
@@ -4225,9 +4457,9 @@ def _render_history(
     and legend. sparks=False leaves out the sparklines and axis (a requested
     table that wouldn't fit otherwise takes their place).
     """
-    th = thresholds or {}
-    labels = f"{'min':>7} {'mean':>7} {'max':>7}"
-    header = _section(
+    th: dict[str, Any] = thresholds or {}
+    labels: str = f"{'min':>7} {'mean':>7} {'max':>7}"
+    header: str = _section(
         f"History, last {hours:g}h ({len(records)} records)",
         unicode,
         color,
@@ -4236,9 +4468,9 @@ def _render_history(
     )
     if not records:
         return header, [], [_paint("No history records yet.", "muted", color)], []
-    n_gpus = max((len(r.get("gpus") or []) for r in records), default=0)
+    n_gpus: int = max((len(r.get("gpus") or []) for r in records), default=0)
 
-    def series(fn) -> list[float | None]:
+    def series(fn: Callable[[dict[str, Any]], object]) -> list[float | None]:
         return [_num(fn(r)) for r in records]
 
     def avg_min_max(*path: str) -> dict[str, list[float | None]]:
@@ -4295,6 +4527,7 @@ def _render_history(
             "pct",
         ),
     ]
+    i: int
     for i in range(n_gpus):
         columns.append(
             _HistRow(
@@ -4318,6 +4551,11 @@ def _render_history(
                 "pct",
             )
         )
+    slot: str
+    name: str
+    path: tuple[str, str]
+    key: str
+    thr: Any
     for slot, name, path, key, thr in (
         ("net_in", "NetIn", ("network", "in_mbps"), "net_in", th.get("network_mbps")),
         (
@@ -4355,32 +4593,37 @@ def _render_history(
     )
 
     # Sparkline field fills the width so the stats line up under the header labels.
-    field_w = _spark_field_width(width)
-    spark_w = field_w
+    field_w: int = _spark_field_width(width)
+    spark_w: int = field_w
     # Real time axis: the window ends now and spans `hours`.
-    end_dt = now or datetime.now(timezone.utc).astimezone()
-    end = end_dt.timestamp()
-    start = end - hours * 3600
-    rec_times = [t.timestamp() if t else None for t in map(_record_time, records)]
+    end_dt: datetime = now or datetime.now(timezone.utc).astimezone()
+    end: float = end_dt.timestamp()
+    start: float = end - hours * 3600
+    rec_times: list[float | None] = [
+        t.timestamp() if t else None for t in map(_record_time, records)
+    ]
     # Hold a value across empty columns for up to 1.5 record intervals.
-    interval = getattr(
+    interval: float = getattr(
         APP.state, "history_record_interval", DEFAULT_HISTORY_RECORD_INTERVAL
     )
-    hold = 1.5 * max(float(interval), (end - start) / spark_w)
-    chars = _SPARK_CHARS if unicode else _SPARK_ASCII
+    hold: float = 1.5 * max(float(interval), (end - start) / spark_w)
+    chars: str = _SPARK_CHARS if unicode else _SPARK_ASCII
     spark_rows: list[tuple[str, str]] = []
+    row: _HistRow
     for row in columns:
+        vals: list[float | None]
+        spec: str
         slot, name, vals, spec, key, thr = row[:6]
-        nums = [v for v in vals if v is not None]
+        nums: list[float] = [v for v in vals if v is not None]
         # min / max come from the bursts' own extremes when records keep them,
         # so a short spike shows in "max" even though the average hides it.
-        lows = [v for v in (row.lows or []) if v is not None] or nums
-        peaks = [v for v in (row.peaks or []) if v is not None] or nums
+        lows: list[float] = [v for v in (row.lows or []) if v is not None] or nums
+        peaks: list[float] = [v for v in (row.peaks or []) if v is not None] or nums
 
         def cell(v: float, shade: str) -> str:
             return _paint(f"{format(v, spec):>7}", _level(v, thr, shade), color)
 
-        stats = (
+        stats: str = (
             " ".join(
                 cell(v, shade)
                 for v, shade in (
@@ -4392,7 +4635,7 @@ def _render_history(
             if nums
             else _paint(f"{'no data':>{TEXT_STATS_WIDTH}}", "muted", color)
         )
-        spark = _paint(
+        spark: str = _paint(
             f"{_sparkline(_time_buckets(rec_times, vals, start, end, spark_w, hold), chars, *row.bounds()):<{field_w}}",
             key,
             color,
@@ -4402,7 +4645,7 @@ def _render_history(
         )
 
     # Time axis under the sparklines: window start, middle and end (now).
-    fmt = "%m-%d %H:%M" if hours > 20 else "%H:%M"
+    fmt: str = "%m-%d %H:%M" if hours > 20 else "%H:%M"
 
     def label(ts: float) -> str:
         # Resolve local time at each tick: end_dt's fixed offset may be on the
@@ -4410,29 +4653,31 @@ def _render_history(
         return datetime.fromtimestamp(ts).strftime(fmt)
 
     if spark_w >= 3:
-        rule = (
+        rule: str = (
             ("└" + "─" * (spark_w - 2) + "┘")
             if unicode
             else ("+" + "-" * (spark_w - 2) + "+")
         )
     else:
         rule = ("─" if unicode else "-") * spark_w
+    first: str
+    last: str
     first, last = label(start), label(end)
-    ticks = first + last.rjust(max(0, spark_w - len(first)))
-    mid = label((start + end) / 2)
+    ticks: str = first + last.rjust(max(0, spark_w - len(first)))
+    mid: str = label((start + end) / 2)
     if spark_w >= len(first) + len(mid) + len(last) + 4:
-        at = spark_w // 2 - len(mid) // 2
+        at: int = spark_w // 2 - len(mid) // 2
         ticks = ticks[:at] + mid + ticks[at + len(mid) :]
         # A tick on the rule over the middle label's centre.
-        centre = at + len(mid) // 2
+        centre: int = at + len(mid) // 2
         rule = rule[:centre] + ("┬" if unicode else "+") + rule[centre + 1 :]
-    deg = "°C" if unicode else "C"
-    legend = _paint(
+    deg: str = "°C" if unicode else "C"
+    legend: str = _paint(
         f"Blank = no records. Net/Disk MB/s, MaxT = hottest sensor {deg}.",
         "muted",
         color,
     )
-    foot = [
+    foot: list[str] = [
         " " * 8 + _paint(rule, "muted", color),
         " " * 8 + _paint(ticks, "muted", color),
         legend,
@@ -4443,26 +4688,27 @@ def _render_history(
         return header, spark_rows, foot, []
 
     # Evenly sample at most `rows` records, always including the newest.
-    count = len(records)
-    shown = min(rows, count)
-    picks = (
+    count: int = len(records)
+    shown: int = min(rows, count)
+    picks: list[int] = (
         [count - 1]
         if shown == 1
         else [round(k * (count - 1) / (shown - 1)) for k in range(shown)]
     )
-    sep = " │ " if unicode else " | "
-    table_w = 14 + len(sep) + 7 * len(columns) - 1
-    tail = [""] if sparks else []
+    sep: str = " │ " if unicode else " | "
+    table_w: int = 14 + len(sep) + 7 * len(columns) - 1
+    tail: list[str] = [""] if sparks else []
     tail.append(
         f"{'Time':<14}"
         + sep
         + " ".join(_paint(f"{c.name[:6]:>6}", c.key, color) for c in columns)
     )
     tail.append(("─" if unicode else "-") * table_w)
+    idx: int
     for idx in picks:
-        t = _record_time(records[idx])
-        stamp = t.strftime("%m-%d %H:%M:%S") if t else "?"
-        cells = " ".join(
+        t: datetime | None = _record_time(records[idx])
+        stamp: str = t.strftime("%m-%d %H:%M:%S") if t else "?"
+        cells: str = " ".join(
             _paint(f"{_fmt(c.values[idx], c.spec):>6}", "warning", color)
             if _level(c.values[idx], c.threshold, "") == "warning"
             else f"{_fmt(c.values[idx], c.spec):>6}"
@@ -4482,7 +4728,7 @@ def render_text(
     hours: float = 1,
     rows: int = 24,
     title: str = "",
-    color: bool | str = False,
+    color: ColorDepth = False,
     thresholds: dict[str, Any] | None = None,
     table: bool = False,
     live: dict[str, Any] | None = None,
@@ -4494,18 +4740,20 @@ def render_text(
 
     The snapshot is `live` (a fresh sample) when given, else the newest record.
     """
-    unicode = style == "unicode"
+    unicode: bool = style == "unicode"
     now = now or datetime.now(timezone.utc).astimezone()
-    heading = title or socket.gethostname()
-    host = socket.gethostname()
-    sub = "" if heading == host else (f"· {host}" if unicode else f"- {host}")
-    inner = f" {heading} " + _paint(sub, "muted", color) + " "
+    heading: str = title or socket.gethostname()
+    host: str = socket.gethostname()
+    sub: str = "" if heading == host else (f"· {host}" if unicode else f"- {host}")
+    inner: str = f" {heading} " + _paint(sub, "muted", color) + " "
+    two_col: bool
+    col_w: int
     width, two_col, col_w = _text_layout(width, view, unicode)
-    span = width - 2
-    hint = "options and API: /help "
-    fill = max(1, span - len(_strip_ansi(inner)) - len(hint))
+    span: int = width - 2
+    hint: str = "options and API: /help "
+    fill: int = max(1, span - len(_strip_ansi(inner)) - len(hint))
     if unicode:
-        out = [
+        out: list[str] = [
             _paint("╭" + "─" * span + "╮", "cpu", color),
             _paint("│", "cpu", color)
             + _paint(inner[: len(heading) + 2], "title", color)
@@ -4516,7 +4764,7 @@ def render_text(
             _paint("╰" + "─" * span + "╯", "cpu", color),
         ]
     else:
-        title_line = inner.strip()
+        title_line: str = inner.strip()
         out = [
             "=" * width,
             title_line + hint.rstrip().rjust(width - len(_strip_ansi(title_line))),
@@ -4540,12 +4788,18 @@ def render_text(
         # Snapshot on the left, history on the right. Each history row goes
         # beside the snapshot line with its slot when that line is still ahead,
         # else on the next free line; the axis and legend follow.
+        header: str
+        spark_rows: list[tuple[str, str]]
+        foot: list[str]
+        table_lines: list[str]
         header, spark_rows, foot, table_lines = hist
-        index = {slot: i for i, (slot, _) in enumerate(left) if slot}
-        right = [header] + [""] * (len(left) - 1)
-        pos = 1
+        index: dict[str, int] = {slot: i for i, (slot, _) in enumerate(left) if slot}
+        right: list[str] = [header] + [""] * (len(left) - 1)
+        pos: int = 1
+        slot: str
+        line: str
         for slot, line in spark_rows + [("", t) for t in foot]:
-            at = index.get(slot, -1)
+            at: int = index.get(slot, -1)
             at = at if at >= pos else pos
             while at < len(right) and right[at]:
                 at += 1
@@ -4553,8 +4807,10 @@ def render_text(
                 right += [""] * (at - len(right) + 1)
             right[at] = line
             pos = at + 1
-        extra = right[len(left) :]
-        rows_left = [line for _, line in left] + [""] * len(extra)
+        extra: list[str] = right[len(left) :]
+        rows_left: list[str] = [line for _, line in left] + [""] * len(extra)
+        a: str
+        b: str
         for a, b in zip(rows_left, right):
             out.append(a + " " * max(0, col_w - len(_strip_ansi(a))) + "   " + b)
         out += table_lines  # the optional table, full width below
@@ -4702,27 +4958,33 @@ async def text_view(
         )
     hours = max(0.1, min(hours, 8760))
     rows = max(1, min(rows, 500))
-    requested_rows = rows
+    requested_rows: int = rows
     async with _history_read_lock:
-        result = await asyncio.to_thread(_read_history_cached, hours)
+        result: (
+            tuple[list[dict[str, Any]], int, bool, float] | str
+        ) = await asyncio.to_thread(_read_history_cached, hours)
     if isinstance(result, str):
         return Response(
             content=f"Failed to read history: {result}\n",
             status_code=500,
             media_type="text/plain",
         )
+    records: list[dict[str, Any]]
+    _skipped: int
+    _truncated: bool
+    _cutoff: float
     records, _skipped, _truncated, _cutoff = result
     sample: dict[str, Any] | None = None
     if live and view in ("latest", "both"):
+        e: Exception
         try:
             sample = await _live_sample()
         except Exception as e:
             logger.warning("/text: live sample failed, using the newest record: %s", e)
     if style == "simple":
         style, color = "ascii", "off"
-    depth: bool | str = {"on": "24", "256": "256", "16": "16", "off": False}.get(
-        color, "24" if style == "unicode" else False
-    )
+    depths: dict[str, ColorDepth] = {"on": "24", "256": "256", "16": "16", "off": False}
+    depth: ColorDepth = depths.get(color, "24" if style == "unicode" else False)
 
     def render(with_table: bool, sparks: bool = True) -> str:
         return render_text(
@@ -4742,36 +5004,36 @@ async def text_view(
 
     def layout() -> str:
         nonlocal rows, height
-        body = render(table)
+        body: str = render(table)
         if height is not None:
             height = max(5, height)
             if table and body.count("\n") > height:
                 # Asked for the table: shrink it to the rows that fit (at least 3)
                 # before cutting. It shows min(rows, records) rows, so shrink that.
-                shown = min(rows, len(records))
+                shown: int = min(rows, len(records))
                 rows = max(3, shown - (body.count("\n") - height))
                 body = render(True)
                 if body.count("\n") > height:
                     # Still too tall: the table replaces the sparklines, then fills
                     # whatever room that frees.
                     body = render(True, sparks=False)
-                    over = body.count("\n") - height  # negative = spare lines
+                    over: int = body.count("\n") - height  # negative = spare lines
                     rows = max(3, min(requested_rows, min(rows, len(records)) - over))
                     body = render(True, sparks=False)
             body = _fit_height(body, height, depth)
         return body
 
     # A long window takes a second or more to render: keep it off the event loop.
-    body = await asyncio.to_thread(layout)
+    body: str = await asyncio.to_thread(layout)
     return Response(content=body, media_type="text/plain; charset=utf-8")
 
 
-def _fit_height(body: str, height: int, color: bool | str) -> str:
+def _fit_height(body: str, height: int, color: ColorDepth) -> str:
     """Trim a report to `height` lines, noting how many were cut."""
-    lines = body.rstrip("\n").split("\n")
+    lines: list[str] = body.rstrip("\n").split("\n")
     if len(lines) <= height:
         return body
-    cut = len(lines) - (height - 1)
+    cut: int = len(lines) - (height - 1)
     return (
         "\n".join(
             lines[: height - 1]
@@ -4791,11 +5053,11 @@ def _fit_height(body: str, height: int, color: bool | str) -> str:
 # live sample per second and one history parse per new record.
 _LIVE_TTL: Final[float] = 1.0
 _live_cache: dict[str, Any] = {"at": 0.0, "record": None}
-_live_lock = asyncio.Lock()
+_live_lock: asyncio.Lock = asyncio.Lock()
 # One history read at a time: a year-long range over a large file parses up to
 # HISTORY_MAX_TAIL_READ of JSON (hundreds of MB in Python objects); several at
 # once could exhaust a small box. Short and since= reads take milliseconds.
-_history_read_lock = asyncio.Lock()
+_history_read_lock: asyncio.Lock = asyncio.Lock()
 _history_cache: dict[str, Any] = {"key": None, "result": None}
 
 
@@ -4818,13 +5080,18 @@ def _read_history_cached(
     """_read_history, reused until the file changes or a minute passes (the
     window start moves). Callers must not mutate the returned records."""
     try:
-        st = HISTORY_FILE.stat()
-        key = (hours, st.st_mtime_ns, st.st_size, int(time.time() // 60))
+        st: os.stat_result = HISTORY_FILE.stat()
+        key: tuple[float, int, int, int] | None = (
+            hours,
+            st.st_mtime_ns,
+            st.st_size,
+            int(time.time() // 60),
+        )
     except OSError:
         key = None
     if key is not None and _history_cache["key"] == key:
         return _history_cache["result"]
-    result = _read_history(hours)
+    result: tuple[list[dict[str, Any]], int, bool, float] | str = _read_history(hours)
     if key is not None and not isinstance(result, str):
         _history_cache.update(key=key, result=result)
     return result
@@ -4836,9 +5103,9 @@ async def tui_script(request: Request) -> Response:
     curl -fsS http://<host>:8080/tui.py | python3 -
     The copy served has SERVED_URL set to the address it was fetched from, so
     it connects back here with no argument."""
-    source = (Path(__file__).parent / "tui.py").read_text()
-    base = _base_url(request)
-    source = source.replace('SERVED_URL = ""', f"SERVED_URL = {base!r}", 1)
+    source: str = (Path(__file__).parent / "tui.py").read_text()
+    base: str = _base_url(request)
+    source = source.replace('SERVED_URL: str = ""', f"SERVED_URL: str = {base!r}", 1)
     # The usage comments too, so someone who just curls it sees commands that work.
     source = source.replace("http://<host>:8080", base)
     return Response(content=source, media_type="text/x-python; charset=utf-8")
@@ -4853,7 +5120,7 @@ def _base_url(request: Request) -> str:
 async def help_page(request: Request) -> Response:
     """Plain-text guide to /text and the JSON API, with this server's real
     address in the examples so they can be pasted as-is."""
-    body = HELP_TEXT.replace("http://<host>:8080", _base_url(request))
+    body: str = HELP_TEXT.replace("http://<host>:8080", _base_url(request))
     return Response(content=body, media_type="text/plain; charset=utf-8")
 
 
@@ -4887,6 +5154,7 @@ def is_port_available(port: int, host: str = "0.0.0.0") -> bool:
     after a restart because the previous server's client connections are still
     in TIME_WAIT, and systemd then loops on "already in use" with nobody listening.
     """
+    sock: socket.socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -4899,6 +5167,7 @@ def is_port_available(port: int, host: str = "0.0.0.0") -> bool:
 def get_local_ip() -> str | None:
     """Get the local IP address used for LAN communication."""
     try:
+        sock: socket.socket
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             # Connect to external IP (doesn't send data, just determines route)
             sock.connect(("8.8.8.8", 80))
@@ -4935,6 +5204,13 @@ def main(port: int, glances_port: int, host: str = DEFAULT_HOST) -> None:
     uvicorn.run(APP, host=host, port=port, log_level="warning")
 
 
+class Arguments(argparse.Namespace):
+    port: int
+    glances_port: int
+    host: str
+    set_password: bool
+
+
 if __name__ == "__main__":
     parser: argparse.ArgumentParser = argparse.ArgumentParser(
         description="Homelab dashboard server",
@@ -4964,11 +5240,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Set the history settings password and exit",
     )
-    args: argparse.Namespace = parser.parse_args()
+    args: Arguments = parser.parse_args(namespace=Arguments())
 
     if args.set_password:
-        pw = getpass.getpass("Enter new password: ")
-        pw2 = getpass.getpass("Confirm password: ")
+        pw: str = getpass.getpass("Enter new password: ")
+        pw2: str = getpass.getpass("Confirm password: ")
         if pw != pw2:
             print("Passwords do not match.")
             sys.exit(1)

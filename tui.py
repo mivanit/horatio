@@ -48,29 +48,45 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from typing import Literal, TextIO, TypedDict
+
+ColorMode = Literal["on", "256", "16", "off"]
+TextStyle = Literal["unicode", "ascii", "simple"]
+TextView = Literal["both", "latest", "history"]
+
+
+class ViewState(TypedDict):
+    view: int
+    table: bool
+    hours: float | None
+
 
 # Filled in by the server when it serves this file (GET /tui.py), so a
 # downloaded copy already knows where it came from.
-SERVED_URL = ""
-VIEWS = ("both", "latest", "history")
-HOURS_STEPS = (0.5, 1, 2, 3, 6, 12, 24, 48, 168)
-ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+SERVED_URL: str = ""
+VIEWS: tuple[TextView, ...] = ("both", "latest", "history")
+HOURS_STEPS: tuple[float, ...] = (0.5, 1, 2, 3, 6, 12, 24, 48, 168)
+ANSI: re.Pattern[str] = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
-def detect(env: dict, isatty: bool, encoding: str) -> tuple[str, str]:
+def detect(
+    env: dict[str, str], isatty: bool, encoding: str
+) -> tuple[TextStyle, ColorMode]:
     """(style, color) for /text from the environment; pure, so it's testable.
 
     Colour: NO_COLOR > FORCE_COLOR > COLORTERM truecolor > TERM *256color >
     TERM dumb/empty > 16 colours. Unicode needs a UTF-8 locale and not the
     Linux console (its font lacks the block characters).
     """
-    term = env.get("TERM", "").lower()
+    term: str = env.get("TERM", "").lower()
     if not isatty:
         return "simple", "off"
+    color: ColorMode
     if env.get("NO_COLOR"):
         color = "off"
     elif "FORCE_COLOR" in env:
-        color = {"0": "off", "1": "16", "2": "256"}.get(env["FORCE_COLOR"], "on")
+        force_colors: dict[str, ColorMode] = {"0": "off", "1": "16", "2": "256"}
+        color = force_colors.get(env["FORCE_COLOR"], "on")
     elif env.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
         color = "on"
     elif "256color" in term:
@@ -79,8 +95,8 @@ def detect(env: dict, isatty: bool, encoding: str) -> tuple[str, str]:
         color = "off"
     else:
         color = "16"
-    utf8 = encoding.lower().replace("-", "") in ("utf8",)
-    style = "unicode" if utf8 and term != "linux" else "ascii"
+    utf8: bool = encoding.lower().replace("-", "") in ("utf8",)
+    style: TextStyle = "unicode" if utf8 and term != "linux" else "ascii"
     return style, color
 
 
@@ -92,10 +108,11 @@ def default_url(unit: str = "/etc/systemd/system/horatio.service") -> str:
         return os.environ["HORATIO_URL"]
     if SERVED_URL:
         return SERVED_URL
-    port = 8080
+    port: int = 8080
     try:
+        f: TextIO
         with open(unit) as f:
-            m = re.search(r"--port[= ](\d+)", f.read())
+            m: re.Match[str] | None = re.search(r"--port[= ](\d+)", f.read())
         if m:
             port = int(m.group(1))
     except OSError:
@@ -111,22 +128,31 @@ def _has_tty() -> bool:
         return False
 
 
-def build_url(base: str, params: dict) -> str:
-    query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
+def build_url(base: str, params: dict[str, str | float | int | None]) -> str:
+    query: str = urllib.parse.urlencode(
+        {k: v for k, v in params.items() if v is not None}
+    )
     return f"{base.rstrip('/')}/text?{query}"
 
 
 def fetch(url: str, timeout: float = 10.0) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": "horatio-tui"})
+    req: urllib.request.Request = urllib.request.Request(
+        url, headers={"User-Agent": "horatio-tui"}
+    )
+    resp: http.client.HTTPResponse
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", "replace")
 
 
 def clip(line: str, width: int) -> str:
     """Cut a line to `width` visible columns without splitting an escape."""
+    out: list[str]
+    seen: int
+    pos: int
     out, seen, pos = [], 0, 0
+    m: re.Match[str]
     for m in ANSI.finditer(line):
-        text = line[pos : m.start()]
+        text: str = line[pos : m.start()]
         if seen + len(text) >= width:
             out.append(text[: width - seen])
             return "".join(out) + "\x1b[0m"
@@ -144,18 +170,18 @@ class Terminal:
     Keys come from /dev/tty, not stdin: under `curl ... | python3 -` stdin is
     the pipe the script itself arrived on."""
 
-    def __enter__(self) -> Terminal:
+    def __enter__(self: Terminal) -> Terminal:
         import termios
         import tty
 
-        self.fd = os.open("/dev/tty", os.O_RDONLY)
-        self.saved = termios.tcgetattr(self.fd)
+        self.fd: int = os.open("/dev/tty", os.O_RDONLY)
+        self.saved: list[int | list[bytes | int]] = termios.tcgetattr(self.fd)
         tty.setcbreak(self.fd)
         sys.stdout.write("\x1b[?1049h\x1b[?25l")
         sys.stdout.flush()
         return self
 
-    def __exit__(self, *exc) -> None:
+    def __exit__(self: Terminal, *exc: object) -> None:
         import termios
 
         termios.tcsetattr(self.fd, termios.TCSADRAIN, self.saved)
@@ -163,13 +189,14 @@ class Terminal:
         sys.stdout.write("\x1b[?25h\x1b[?1049l")
         sys.stdout.flush()
 
-    def key(self, timeout: float) -> str | None:
+    def key(self: Terminal, timeout: float) -> str | None:
+        ready: list[int]
         ready, _, _ = select.select([self.fd], [], [], max(0.0, timeout))
         return os.read(self.fd, 1).decode(errors="ignore") if ready else None
 
 
 # The bottom bar, nano style: key in reverse video, then what it does.
-KEYS = (
+KEYS: tuple[tuple[str, str], ...] = (
     ("q", "Quit"),
     ("r", "Refresh"),
     ("v", "View"),
@@ -177,15 +204,19 @@ KEYS = (
     ("+", "Longer"),
     ("-", "Shorter"),
 )
-BAR_ROWS = 2  # status line + key list
+BAR_ROWS: int = 2  # status line + key list
 
 
 def key_bar(cols: int, right: str = "") -> str:
     """`q Quit  r Refresh ...` with each key highlighted, cut to fit, and
     `right` (the server) right-aligned when there's room."""
+    out: list[str]
+    used: int
     out, used = [], 0
+    key: str
+    label: str
     for key, label in KEYS:
-        cell = f" {key} {label} "
+        cell: str = f" {key} {label} "
         if used + len(cell) > cols:
             break
         out.append(f"\x1b[7m {key} \x1b[0m{label} ")
@@ -196,8 +227,10 @@ def key_bar(cols: int, right: str = "") -> str:
 
 
 def draw(frame: str, status: str, cols: int, rows: int, host: str = "") -> None:
-    lines = frame.rstrip("\n").split("\n")[: rows - BAR_ROWS]
-    out = ["\x1b[?2026h\x1b[H"]  # synchronized update (ignored where unsupported), home
+    lines: list[str] = frame.rstrip("\n").split("\n")[: rows - BAR_ROWS]
+    out: list[str] = [
+        "\x1b[?2026h\x1b[H"
+    ]  # synchronized update (ignored where unsupported), home
     out += [clip(line, cols) + "\x1b[K\n" for line in lines]
     out.append("\x1b[J")
     out.append(f"\x1b[{rows - 1};1H\x1b[7m{clip(status, cols).ljust(cols)}\x1b[0m")
@@ -206,8 +239,19 @@ def draw(frame: str, status: str, cols: int, rows: int, host: str = "") -> None:
     sys.stdout.flush()
 
 
+class Arguments(argparse.Namespace):
+    url: str | None
+    interval: float
+    color: ColorMode | None
+    style: TextStyle | None
+    hours: float | None
+    once: bool
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser: argparse.ArgumentParser = argparse.ArgumentParser(
+        description=__doc__.split("\n\n")[0]
+    )
     parser.add_argument(
         "url",
         nargs="?",
@@ -228,23 +272,25 @@ def main() -> int:
         "--hours", type=float, help="history window (default: the server's 1-3 h)"
     )
     parser.add_argument("--once", action="store_true", help="print one frame and exit")
-    args = parser.parse_args()
-    args.url = args.url or default_url()
+    args: Arguments = parser.parse_args(namespace=Arguments())
+    base_url: str = args.url or default_url()
 
     try:
         locale.setlocale(locale.LC_ALL, "")
     except locale.Error:
         pass
-    isatty = sys.stdout.isatty() and _has_tty()
-    encoding = sys.stdout.encoding or locale.getpreferredencoding(False)
+    isatty: bool = sys.stdout.isatty() and _has_tty()
+    encoding: str = sys.stdout.encoding or locale.getpreferredencoding(False)
+    style: TextStyle
+    color: ColorMode
     style, color = detect(dict(os.environ), isatty, encoding)
     style, color = args.style or style, args.color or color
-    interval = max(1.0, args.interval)
-    state = {"view": 0, "table": False, "hours": args.hours}
+    interval: float = max(1.0, args.interval)
+    state: ViewState = {"view": 0, "table": False, "hours": args.hours}
 
     def url(cols: int, rows: int | None) -> str:
         return build_url(
-            args.url,
+            base_url,
             {
                 "view": VIEWS[state["view"]],
                 "style": style,
@@ -257,25 +303,33 @@ def main() -> int:
         )
 
     if args.once or not isatty:
+        cols: int
         cols, _ = shutil.get_terminal_size((100, 50))
+        e: OSError | http.client.HTTPException
         try:
             sys.stdout.write(fetch(url(cols, None)))
         except (OSError, http.client.HTTPException) as e:
-            print(f"horatio-tui: {args.url}: {e}", file=sys.stderr)
+            print(f"horatio-tui: {base_url}: {e}", file=sys.stderr)
             return 1
         return 0
 
-    host = urllib.parse.urlsplit(args.url).netloc or args.url
-    resized = [True]
+    host: str = urllib.parse.urlsplit(base_url).netloc or base_url
+    resized: list[bool] = [True]
     signal.signal(signal.SIGWINCH, lambda *_: resized.__setitem__(0, True))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    frame: str
+    error: str
+    fetched: float
+    backoff: float
     frame, error, fetched, backoff = "", "", 0.0, interval
     try:
+        term: Terminal
         with Terminal() as term:
-            next_fetch = 0.0
+            next_fetch: float = 0.0
             while True:
+                rows: int
                 cols, rows = shutil.get_terminal_size()
-                now = time.monotonic()
+                now: float = time.monotonic()
                 if resized[0] or now >= next_fetch:
                     resized[0] = False
                     try:
@@ -284,14 +338,18 @@ def main() -> int:
                     except (OSError, http.client.HTTPException) as e:
                         error, backoff = str(e), min(10.0, backoff * 2)
                     next_fetch = now + backoff
-                age = f"{time.monotonic() - fetched:.0f}s ago" if fetched else "never"
-                hours = f"{state['hours']:g}h" if state["hours"] else "auto window"
-                status = (
+                age: str = (
+                    f"{time.monotonic() - fetched:.0f}s ago" if fetched else "never"
+                )
+                hours: str = f"{state['hours']:g}h" if state["hours"] else "auto window"
+                status: str = (
                     f" {VIEWS[state['view']]}  {hours}  {color}/{style}"
                     f"  updated {age}  {'ERROR: ' + error if error else ''}"
                 )
-                draw(frame or f"connecting to {args.url} ...", status, cols, rows, host)
-                k = term.key(min(0.5, max(0.0, next_fetch - time.monotonic())))
+                draw(frame or f"connecting to {base_url} ...", status, cols, rows, host)
+                k: str | None = term.key(
+                    min(0.5, max(0.0, next_fetch - time.monotonic()))
+                )
                 if not k:
                     continue
                 if k in ("q", "Q", "\x03"):
@@ -301,8 +359,8 @@ def main() -> int:
                 elif k == "t":
                     state["table"] = not state["table"]
                 elif k in "+=-_":
-                    cur = state["hours"] or 2
-                    i = min(
+                    cur: float = state["hours"] or 2
+                    i: int = min(
                         range(len(HOURS_STEPS)), key=lambda j: abs(HOURS_STEPS[j] - cur)
                     )
                     i = min(len(HOURS_STEPS) - 1, i + 1) if k in "+=" else max(0, i - 1)

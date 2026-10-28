@@ -191,9 +191,13 @@ Running `uv run python test.py` directly still records into the checkout's `logs
 [GitHub Actions](.github/workflows/check.yml) runs these Make targets on pushes,
 pull requests, and manual dispatches. Formatting, typing, Linux tests, and native
 Lua tests run independently, so a formatting/type failure does not prevent the
-tests from running. Failures are not suppressed; the existing formatting and
-typing diagnostics must be resolved before every job can pass. Avoid running the
-mutating `format` target concurrently with other targets.
+tests from running. All jobs must pass. Avoid running the mutating `format`
+target concurrently with other targets.
+
+Python functions, variables, and fields have explicit type annotations; use
+`Literal` for fixed sets of values. Ruff checks function annotation coverage and
+`ty` checks type compatibility. Comprehension and lambda bindings are inferred
+from their inputs because Python has no syntax for annotating them inline.
 
 CI uses Ubuntu 24.04, Python 3.13, Node.js 22, `uv.lock`, and pinned action
 revisions. The native Lua job builds the dependencies below and runs the history

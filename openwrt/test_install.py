@@ -9,18 +9,19 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from pathlib import Path
 import pwd
 import re
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
+from pathlib import Path
+from typing import Any
 
-
-ROOT = Path(__file__).resolve().parents[1]
-ASSET = b"// Chart.js test fixture\nwindow.Chart = {};\n"
-ASSET_HASH = hashlib.sha256(ASSET).hexdigest()
-MOCK = r"""#!/usr/bin/env python3
+ROOT: Path = Path(__file__).resolve().parents[1]
+ASSET: bytes = b"// Chart.js test fixture\nwindow.Chart = {};\n"
+ASSET_HASH: str = hashlib.sha256(ASSET).hexdigest()
+MOCK: str = r"""#!/usr/bin/env python3
 import json, os, pathlib, pwd, sys
 name, args = pathlib.Path(sys.argv[0]).name, sys.argv[1:]
 root = pathlib.Path(os.environ["HORATIO_INSTALL_TEST"])
@@ -69,21 +70,26 @@ elif name == "test-uhttpd-service" and event["config"] is None and os.environ["H
 
 
 class InstallerTests(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="horatio-installer-test-")
+    def setUp(self: InstallerTests) -> None:
+        self.temp: tempfile.TemporaryDirectory[str] = tempfile.TemporaryDirectory(
+            prefix="horatio-installer-test-"
+        )
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root: Path = Path(self.temp.name)
         (self.root / "openwrt").mkdir()
         (self.root / "static").mkdir()
-        self.bin = self.root / "bin"
+        self.bin: Path = self.root / "bin"
         self.bin.mkdir()
         (self.root / "crontabs").mkdir()
-        self.cron = self.root / "crontabs" / pwd.getpwuid(os.geteuid()).pw_name
-        self.asset = self.root / "static/chart.umd.min.js"
+        self.cron: Path = self.root / "crontabs" / pwd.getpwuid(os.geteuid()).pw_name
+        self.asset: Path = self.root / "static/chart.umd.min.js"
         (self.root / "asset").write_bytes(ASSET)
-        self.example = {"title": "Example", "ping_targets": [{"address": "8.8.8.8"}]}
+        self.example: dict[str, Any] = {
+            "title": "Example",
+            "ping_targets": [{"address": "8.8.8.8"}],
+        }
         (self.root / "config.example.json").write_text(json.dumps(self.example))
-        script = (ROOT / "openwrt/install.sh").read_text()
+        script: str = (ROOT / "openwrt/install.sh").read_text()
         # Redirect system paths to fixtures. The actual installer control flow,
         # checksum utility, temporary file and mv run.
         script = script.replace("/etc/init.d/uhttpd", "test-uhttpd-service")
@@ -92,11 +98,12 @@ class InstallerTests(unittest.TestCase):
         script = re.sub(
             r'CHARTJS_SHA256="[a-f0-9]+"', f'CHARTJS_SHA256="{ASSET_HASH}"', script
         )
-        self.script = self.root / "openwrt/install.sh"
+        self.script: Path = self.root / "openwrt/install.sh"
         self.script.write_text(script)
-        mock = self.bin / "mock"
+        mock: Path = self.bin / "mock"
         mock.write_text(MOCK)
         mock.chmod(0o755)
+        name: str
         for name in (
             "uci",
             "uhttpd",
@@ -110,8 +117,14 @@ class InstallerTests(unittest.TestCase):
         ):
             (self.bin / name).symlink_to(mock)
 
-    def run_install(self, mode="success", *, extra_env=None, uninstall=False):
-        env = dict(
+    def run_install(
+        self: InstallerTests,
+        mode: str = "success",
+        *,
+        extra_env: dict[str, str] | None = None,
+        uninstall: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        env: dict[str, str] = dict(
             os.environ,
             PATH=f"{self.bin}:{os.environ['PATH']}",
             HORATIO_INSTALL_TEST=str(self.root),
@@ -129,32 +142,34 @@ class InstallerTests(unittest.TestCase):
             timeout=10,
         )
 
-    def events(self, command):
-        path = self.root / "events"
-        entries = (
+    def events(self: InstallerTests, command: str) -> list[dict[str, Any]]:
+        path: Path = self.root / "events"
+        entries: list[dict[str, Any]] = (
             [json.loads(line) for line in path.read_text().splitlines()]
             if path.exists()
             else []
         )
         return [entry for entry in entries if entry["command"] == command]
 
-    def downloads(self):
+    def downloads(self: InstallerTests) -> list[dict[str, Any]]:
         return [
             entry
             for entry in self.events("wget")
             if entry["args"][-1].startswith("https://")
         ]
 
-    def cron_writes(self):
+    def cron_writes(self: InstallerTests) -> list[dict[str, Any]]:
         return [entry for entry in self.events("crontab") if "content" in entry]
 
-    def test_download_failure_is_retried_and_config_precedes_restart(self):
-        failed = self.run_install("failure")
+    def test_download_failure_is_retried_and_config_precedes_restart(
+        self: InstallerTests,
+    ) -> None:
+        failed: subprocess.CompletedProcess[str] = self.run_install("failure")
         self.assertNotEqual(failed.returncode, 0)
         self.assertFalse(self.asset.exists())
         self.assertEqual(list((self.root / "static").glob(".chart.*")), [])
         self.assertEqual(self.events("test-uhttpd-service"), [])
-        recovered = self.run_install()
+        recovered: subprocess.CompletedProcess[str] = self.run_install()
         self.assertEqual(recovered.returncode, 0, recovered.stderr + recovered.stdout)
         self.assertEqual(self.asset.read_bytes(), ASSET)
         self.assertEqual(len(self.downloads()), 2)
@@ -163,47 +178,60 @@ class InstallerTests(unittest.TestCase):
             all(entry["args"][1] != str(self.asset) for entry in self.downloads())
         )
 
-    def test_existing_empty_or_partial_asset_is_repaired(self):
+    def test_existing_empty_or_partial_asset_is_repaired(self: InstallerTests) -> None:
+        old: bytes
         for old in (b"", b"old partial download"):
             with self.subTest(old=old):
                 self.asset.write_bytes(old)
-                result = self.run_install()
+                result: subprocess.CompletedProcess[str] = self.run_install()
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
                 self.assertEqual(self.asset.read_bytes(), ASSET)
 
-    def test_checksum_mismatch_keeps_previous_asset_and_does_not_restart(self):
-        previous = b"previous asset"
+    def test_checksum_mismatch_keeps_previous_asset_and_does_not_restart(
+        self: InstallerTests,
+    ) -> None:
+        previous: bytes = b"previous asset"
         self.asset.write_bytes(previous)
-        result = self.run_install("mismatch")
+        result: subprocess.CompletedProcess[str] = self.run_install("mismatch")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.asset.read_bytes(), previous)
         self.assertEqual(list((self.root / "static").glob(".chart.*")), [])
         self.assertEqual(self.events("test-uhttpd-service"), [])
 
-    def test_valid_asset_and_existing_config_are_preserved(self):
+    def test_valid_asset_and_existing_config_are_preserved(
+        self: InstallerTests,
+    ) -> None:
         self.asset.write_bytes(ASSET)
-        custom = {"title": "My Router", "ping_targets": []}
+        custom: dict[str, Any] = {"title": "My Router", "ping_targets": []}
         (self.root / "config.json").write_text(json.dumps(custom))
-        result = self.run_install("failure")
+        result: subprocess.CompletedProcess[str] = self.run_install("failure")
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertEqual(self.downloads(), [])
         self.assertEqual(self.events("test-uhttpd-service")[0]["config"], custom)
 
-    def test_pins_match_linux_installer(self):
+    def test_pins_match_linux_installer(self: InstallerTests) -> None:
+        key: str
         for key in ("CHARTJS_VERSION", "CHARTJS_SHA256"):
-            pattern = rf'^{key}="([^"]+)"$'
-            router = re.search(
+            pattern: str = rf'^{key}="([^"]+)"$'
+            router: re.Match[str] | None = re.search(
                 pattern, (ROOT / "openwrt/install.sh").read_text(), re.MULTILINE
             )
-            linux = re.search(pattern, (ROOT / "install.sh").read_text(), re.MULTILINE)
-            self.assertIsNotNone(router)
-            self.assertIsNotNone(linux)
+            linux: re.Match[str] | None = re.search(
+                pattern, (ROOT / "install.sh").read_text(), re.MULTILINE
+            )
+            assert router is not None
+            assert linux is not None
             self.assertEqual(router.group(1), linux.group(1))
 
-    def test_lan_ip_override_skips_detection_and_strips_cidr(self):
+    def test_lan_ip_override_skips_detection_and_strips_cidr(
+        self: InstallerTests,
+    ) -> None:
+        address: str
         for address in ("192.168.50.1", "192.168.50.1/24"):
             with self.subTest(address=address):
-                result = self.run_install(extra_env={"LAN_IP": address})
+                result: subprocess.CompletedProcess[str] = self.run_install(
+                    extra_env={"LAN_IP": address}
+                )
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
                 self.assertIn(
                     ["add_list", "uhttpd.dashboard.listen_http=192.168.50.1:8080"],
@@ -219,8 +247,8 @@ class InstallerTests(unittest.TestCase):
                     "http://192.168.50.1:8080/api/4/load",
                 )
 
-    def test_empty_override_uses_detected_lan_ip(self):
-        result = self.run_install(
+    def test_empty_override_uses_detected_lan_ip(self: InstallerTests) -> None:
+        result: subprocess.CompletedProcess[str] = self.run_install(
             extra_env={"LAN_IP": "", "HORATIO_DETECTED_LAN_IP": "192.168.3.1/24"}
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -230,8 +258,12 @@ class InstallerTests(unittest.TestCase):
         )
         self.assertEqual(self.events("ip"), [])
 
-    def test_missing_uci_address_falls_back_to_non_loopback_interface(self):
-        result = self.run_install(extra_env={"HORATIO_DETECTED_LAN_IP": ""})
+    def test_missing_uci_address_falls_back_to_non_loopback_interface(
+        self: InstallerTests,
+    ) -> None:
+        result: subprocess.CompletedProcess[str] = self.run_install(
+            extra_env={"HORATIO_DETECTED_LAN_IP": ""}
+        )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn(
             ["add_list", "uhttpd.dashboard.listen_http=192.168.2.1:8080"],
@@ -239,44 +271,53 @@ class InstallerTests(unittest.TestCase):
         )
         self.assertEqual(len(self.events("ip")), 1)
 
-    def test_only_owned_cron_entries_are_replaced_or_removed(self):
-        unrelated = (
+    def test_only_owned_cron_entries_are_replaced_or_removed(
+        self: InstallerTests,
+    ) -> None:
+        unrelated: str = (
             "0 1 * * * /usr/local/bin/dashboard-history-backup.sh\n"
             "5 1 * * * echo dashboard-history\n"
             "10 1 * * * /backup # dashboard-history-backup\n"
             "15 1 * * * /ordinary-job\n"
         )
-        owned = (
+        owned: str = (
             "0 3,15 * * * /old-job # dashboard-history\n"
             "0 3,15 * * * /duplicate-job # dashboard-history \t\n"
         )
+        uninstall: bool
         for uninstall in (False, True):
             with self.subTest(uninstall=uninstall):
                 self.cron.write_text(unrelated + owned)
                 (self.root / "events").unlink(missing_ok=True)
-                result = self.run_install(uninstall=uninstall)
+                result: subprocess.CompletedProcess[str] = self.run_install(
+                    uninstall=uninstall
+                )
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-                writes = self.cron_writes()
+                writes: list[dict[str, Any]] = self.cron_writes()
                 self.assertEqual(len(writes), 1)
-                final = self.cron.read_text()
+                final: str = self.cron.read_text()
                 self.assertEqual(writes[0]["content"], final)
                 if uninstall:
                     self.assertEqual(final, unrelated)
                 else:
-                    expected = (
+                    expected: str = (
                         "0 3,15 * * * wget -qO /dev/null --post-data='' "
                         "http://192.168.1.1:8080/api/history/record # dashboard-history\n"
                     )
                     self.assertEqual(final, unrelated + expected)
 
-    def test_missing_and_empty_cron_tables_are_supported(self):
+    def test_missing_and_empty_cron_tables_are_supported(self: InstallerTests) -> None:
+        exists: bool
         for exists in (False, True):
+            uninstall: bool
             for uninstall in (False, True):
                 with self.subTest(exists=exists, uninstall=uninstall):
                     self.cron.unlink(missing_ok=True)
                     if exists:
                         self.cron.write_text("")
-                    result = self.run_install(uninstall=uninstall)
+                    result: subprocess.CompletedProcess[str] = self.run_install(
+                        uninstall=uninstall
+                    )
                     self.assertEqual(
                         result.returncode, 0, result.stderr + result.stdout
                     )
@@ -285,12 +326,15 @@ class InstallerTests(unittest.TestCase):
                         0 if uninstall else 1,
                     )
 
-    def test_failed_cron_read_never_replaces_existing_jobs(self):
-        previous = "0 1 * * * /backup\n0 3,15 * * * /record # dashboard-history\n"
+    def test_failed_cron_read_never_replaces_existing_jobs(
+        self: InstallerTests,
+    ) -> None:
+        previous: str = "0 1 * * * /backup\n0 3,15 * * * /record # dashboard-history\n"
+        uninstall: bool
         for uninstall in (False, True):
             with self.subTest(uninstall=uninstall):
                 self.cron.write_text(previous)
-                result = self.run_install(
+                result: subprocess.CompletedProcess[str] = self.run_install(
                     uninstall=uninstall,
                     extra_env={
                         "HORATIO_FAIL_COMMAND": json.dumps(
@@ -303,21 +347,27 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(self.cron_writes(), [])
                 self.assertNotIn("Dashboard removed.", result.stdout)
 
-    def test_broken_cron_symlink_is_not_treated_as_an_empty_table(self):
+    def test_broken_cron_symlink_is_not_treated_as_an_empty_table(
+        self: InstallerTests,
+    ) -> None:
         self.cron.symlink_to(self.root / "missing-table")
-        result = self.run_install()
+        result: subprocess.CompletedProcess[str] = self.run_install()
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(self.cron.is_symlink())
         self.assertEqual(self.cron_writes(), [])
 
-    def test_failed_or_silently_ignored_cron_write_is_reported(self):
-        previous = "0 1 * * * /backup\n0 3,15 * * * /record # dashboard-history\n"
+    def test_failed_or_silently_ignored_cron_write_is_reported(
+        self: InstallerTests,
+    ) -> None:
+        previous: str = "0 1 * * * /backup\n0 3,15 * * * /record # dashboard-history\n"
+        mode: str
         for mode in ("failure", "silent"):
+            uninstall: bool
             for uninstall in (False, True):
                 with self.subTest(mode=mode, uninstall=uninstall):
                     self.cron.write_text(previous)
                     (self.root / "events").unlink(missing_ok=True)
-                    result = self.run_install(
+                    result: subprocess.CompletedProcess[str] = self.run_install(
                         uninstall=uninstall, extra_env={"HORATIO_CRON_WRITE_MODE": mode}
                     )
                     self.assertNotEqual(result.returncode, 0)
@@ -326,8 +376,11 @@ class InstallerTests(unittest.TestCase):
                     self.assertNotIn("Dashboard removed.", result.stdout)
                     self.assertNotIn("Dashboard is running!", result.stdout)
 
-    def test_uninstall_stops_on_uci_or_service_failure_before_removing_cron(self):
-        previous = "0 3,15 * * * /record # dashboard-history\n"
+    def test_uninstall_stops_on_uci_or_service_failure_before_removing_cron(
+        self: InstallerTests,
+    ) -> None:
+        previous: str = "0 3,15 * * * /record # dashboard-history\n"
+        command: list[str]
         for command in (
             ["uci", "show", "uhttpd"],
             ["uci", "delete", "uhttpd.dashboard"],
@@ -336,7 +389,7 @@ class InstallerTests(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self.cron.write_text(previous)
-                result = self.run_install(
+                result: subprocess.CompletedProcess[str] = self.run_install(
                     uninstall=True,
                     extra_env={"HORATIO_FAIL_COMMAND": json.dumps(command)},
                 )
@@ -346,16 +399,18 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(self.cron.read_text(), previous)
                 self.assertEqual(self.cron_writes(), [])
 
-    def test_uninstall_missing_section_is_repeatable_and_preserves_data(self):
-        previous = "0 1 * * * /backup\n"
+    def test_uninstall_missing_section_is_repeatable_and_preserves_data(
+        self: InstallerTests,
+    ) -> None:
+        previous: str = "0 1 * * * /backup\n"
         self.cron.write_text(previous)
-        config = self.root / "config.json"
+        config: Path = self.root / "config.json"
         config.write_text('{"title": "My Router"}\n')
-        history = self.root / "logs/history.jsonl"
+        history: Path = self.root / "logs/history.jsonl"
         history.parent.mkdir()
         history.write_text('{"ts": 42}\n')
         for _ in range(2):
-            result = self.run_install(
+            result: subprocess.CompletedProcess[str] = self.run_install(
                 uninstall=True, extra_env={"HORATIO_SECTION_MISSING": "1"}
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -368,8 +423,8 @@ class InstallerTests(unittest.TestCase):
             [event["args"] for event in self.events("uci")],
         )
 
-    def test_install_reports_cron_service_failure(self):
-        result = self.run_install(
+    def test_install_reports_cron_service_failure(self: InstallerTests) -> None:
+        result: subprocess.CompletedProcess[str] = self.run_install(
             extra_env={
                 "HORATIO_FAIL_COMMAND": json.dumps(["test-cron-service", "restart"]),
             }

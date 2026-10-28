@@ -10,6 +10,8 @@ Usage: uv run python test.py
 from __future__ import annotations
 
 import asyncio
+import email.message
+import http.client
 import json
 import logging
 import os
@@ -20,13 +22,21 @@ import subprocess
 import sys
 import tempfile
 import time
+import unittest.mock
+import urllib.parse
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Literal, TextIO
+from unittest.mock import patch
 
+import h11
 import httpx
+from starlette.requests import Request
+from starlette.types import Message, Scope
 
 # Expected response shapes per endpoint (path -> validator)
-SCHEMAS: dict[str, object] = {
+SCHEMAS: dict[str, Callable[[Any], bool]] = {
     "/api/4/cpu": lambda d: isinstance(d, dict) and "total" in d,
     "/api/4/mem": lambda d: (
         isinstance(d, dict) and {"used", "total", "percent"} <= d.keys()
@@ -126,27 +136,27 @@ SCHEMAS: dict[str, object] = {
     "/config.json": lambda d: isinstance(d, dict),
 }
 
-GREEN = "\033[32m"
-RED = "\033[31m"
-YELLOW = "\033[33m"
-BOLD = "\033[1m"
-RESET = "\033[0m"
+GREEN: str = "\033[32m"
+RED: str = "\033[31m"
+YELLOW: str = "\033[33m"
+BOLD: str = "\033[1m"
+RESET: str = "\033[0m"
 
-passes = 0
-fails = 0
+passes: int = 0
+fails: int = 0
 
 
 def ok(label: str, detail: str = "") -> None:
     global passes
     passes += 1
-    suffix = f"  {detail}" if detail else ""
+    suffix: str = f"  {detail}" if detail else ""
     print(f"  {GREEN}PASS{RESET}  {label}{suffix}")
 
 
 def fail(label: str, detail: str = "") -> None:
     global fails
     fails += 1
-    suffix = f"  {detail}" if detail else ""
+    suffix: str = f"  {detail}" if detail else ""
     print(f"  {RED}FAIL{RESET}  {label}{suffix}")
 
 
@@ -155,7 +165,7 @@ def describe(data: object) -> str:
     if isinstance(data, list):
         return f"list[{len(data)}]"
     if isinstance(data, dict):
-        keys = ", ".join(sorted(data.keys())[:6])
+        keys: str = ", ".join(sorted(data.keys())[:6])
         if len(data.keys()) > 6:
             keys += ", ..."
         return f"dict{{{keys}}}"
@@ -171,19 +181,20 @@ def check(condition: bool, label: str, detail: str = "") -> bool:
 
 
 def free_port() -> int:
+    s: socket.socket
     with socket.socket() as s:
         s.bind(("", 0))
         return s.getsockname()[1]
 
 
 def wait_for_server(base: str, proc: subprocess.Popen, timeout: float = 30) -> bool:
-    deadline = time.monotonic() + timeout
+    deadline: float = time.monotonic() + timeout
     while time.monotonic() < deadline:
         # Check if process exited early (crash)
         if proc.poll() is not None:
             return False
         try:
-            r = httpx.get(f"{base}/", timeout=2)
+            r: httpx.Response = httpx.get(f"{base}/", timeout=2)
             # The dashboard serves static files before its Glances child is
             # ready. Wait for both so a slow cold start does not fail the first
             # several endpoint checks with transient 502 responses.
@@ -201,7 +212,7 @@ def wait_for_server(base: str, proc: subprocess.Popen, timeout: float = 30) -> b
 def _history_line(age_hours: float, pad: int = 0, **fields: object) -> str:
     """Build a history JSONL line with a timestamp age_hours in the past; extra
     keyword arguments become record fields (e.g. a network block)."""
-    ts = datetime.now(timezone.utc) - timedelta(hours=age_hours)
+    ts: datetime = datetime.now(timezone.utc) - timedelta(hours=age_hours)
     record: dict[str, object] = {"timestamp": ts.isoformat(), "cpu": {"avg": 1.0}}
     if pad:
         record["pad"] = "x" * pad
@@ -214,20 +225,25 @@ def test_read_history_unit() -> None:
     print(f"\n{BOLD}_read_history unit tests{RESET}\n")
     import server
 
-    orig_history_file = server.HISTORY_FILE
+    orig_history_file: Path = server.HISTORY_FILE
     try:
+        tmp: str
         with tempfile.TemporaryDirectory() as tmp:
-            hist = Path(tmp) / "history.jsonl"
+            hist: Path = Path(tmp) / "history.jsonl"
             server.HISTORY_FILE = hist
 
             def read(
                 hours: float, initial: int = 1024 * 1024, since: float | None = None
-            ) -> tuple[list[dict], int]:
-                result = server._read_history(
-                    hours, initial_read_size=initial, since=since
+            ) -> tuple[list[dict[str, Any]], int]:
+                result: tuple[list[dict[str, Any]], int, bool, float] | str = (
+                    server._read_history(hours, initial_read_size=initial, since=since)
                 )
                 if isinstance(result, str):
                     raise AssertionError(f"_read_history failed: {result}")
+                records: list[dict[str, Any]]
+                skipped: int
+                _truncated: bool
+                _cutoff: float
                 records, skipped, _truncated, _cutoff = result
                 return records, skipped
 
@@ -243,13 +259,15 @@ def test_read_history_unit() -> None:
                 "".join(_history_line(100 - i) for i in range(10))  # 100h..91h old
                 + "".join(_history_line(5 - i) for i in range(5))  # 5h..1h old
             )
+            records: list[dict[str, Any]]
+            skipped: int
             records, skipped = read(24)
             check(
                 len(records) == 5 and skipped == 0,
                 "old + in-range -> only in-range, none skipped",
                 describe(records),
             )
-            timestamps = [r["timestamp"] for r in records]
+            timestamps: list[Any] = [r["timestamp"] for r in records]
             check(timestamps == sorted(timestamps), "records are chronological")
 
             # 3. Doubling: in-range records extend beyond the initial window
@@ -317,13 +335,14 @@ def test_read_history_unit() -> None:
             )
 
             # 8. Speed: large file of old records, small in-range tail
+            f: TextIO
             with open(hist, "w") as f:
                 f.writelines(_history_line(200, pad=400) for _ in range(100_000))
                 f.writelines(_history_line(23.5 * (144 - i) / 144) for i in range(144))
-            file_mb = hist.stat().st_size / 1e6
-            t0 = time.monotonic()
+            file_mb: float = hist.stat().st_size / 1e6
+            t0: float = time.monotonic()
             records, skipped = read(24)
-            elapsed = time.monotonic() - t0
+            elapsed: float = time.monotonic() - t0
             check(
                 len(records) == 144 and skipped == 0,
                 "large-file tail read returns in-range records",
@@ -340,24 +359,30 @@ def test_read_history_unit() -> None:
             hist.write_text(
                 "".join(_history_line(i * 0.001, pad=500) for i in range(2000))
             )
-            records, skipped, truncated, _ = server._read_history(
-                24, initial_read_size=4096, max_bytes=64 * 1024
+            result: tuple[list[dict[str, Any]], int, bool, float] | str = (
+                server._read_history(24, initial_read_size=4096, max_bytes=64 * 1024)
             )
+            assert not isinstance(result, str), result
+            truncated: bool
+            records, skipped, truncated, _ = result
             check(
                 truncated and len(records) > 0,
                 "byte cap trips truncated=True with partial recent records",
                 f"{len(records)} records, truncated={truncated}",
             )
             # Within-cap read of the same file is not truncated.
-            _, _, truncated_full, _ = server._read_history(
-                24, initial_read_size=1024 * 1024
-            )
+            result = server._read_history(24, initial_read_size=1024 * 1024)
+            assert not isinstance(result, str), result
+            truncated_full: bool
+            _, _, truncated_full, _ = result
             check(not truncated_full, "within-cap read is not truncated")
 
             # 10. cutoff: the window start as epoch seconds, also for a missing file.
             hist.unlink()
-            missing = server._read_history(24)
-            now = datetime.now(timezone.utc).timestamp()
+            missing: tuple[list[dict[str, Any]], int, bool, float] | str = (
+                server._read_history(24)
+            )
+            now: float = datetime.now(timezone.utc).timestamp()
             check(
                 isinstance(missing, tuple)
                 and missing[:3] == ([], 0, False)
@@ -369,12 +394,14 @@ def test_read_history_unit() -> None:
             # 11. since: only records strictly newer than it, covered by the first
             #     window even when the range would need several doublings.
             hist.write_text("".join(_history_line(20 - i, pad=100) for i in range(20)))
+            full: list[dict[str, Any]]
             full, _ = read(24, initial=256)
 
-            def ts_of(r: dict) -> float:
+            def ts_of(r: dict[str, Any]) -> float:
                 return datetime.fromisoformat(r["timestamp"]).timestamp()
 
-            second_newest = ts_of(full[-2])
+            second_newest: float = ts_of(full[-2])
+            newer: list[dict[str, Any]]
             newer, skipped = read(24, initial=256, since=second_newest)
             check(
                 [r["timestamp"] for r in newer] == [full[-1]["timestamp"]]
@@ -389,12 +416,14 @@ def test_read_history_unit() -> None:
                 read(24, since=ts_of(full[-1]) + 3600) == ([], 0),
                 "since in the future -> no records",
             )
+            older: list[dict[str, Any]]
             older, _ = read(24, initial=256, since=now - 48 * 3600)
             check(
                 [r["timestamp"] for r in older] == [r["timestamp"] for r in full],
                 "since older than the cutoff behaves like no since",
             )
             # The record exactly at `since` is held by the client: excluded.
+            exact: list[dict[str, Any]]
             exact, _ = read(24, since=ts_of(full[-3]))
             check(
                 len(exact) == 2, "record at exactly since is excluded", describe(exact)
@@ -403,8 +432,10 @@ def test_read_history_unit() -> None:
             # 12. Reaching `since` covers the read: a byte cap that cannot reach
             #     the 24 h cutoff is not hit (truncated stays False) when the
             #     window already holds a record at or before `since`.
-            res = server._read_history(
-                24, initial_read_size=256, max_bytes=600, since=second_newest
+            res: tuple[list[dict[str, Any]], int, bool, float] | str = (
+                server._read_history(
+                    24, initial_read_size=256, max_bytes=600, since=second_newest
+                )
             )
             assert not isinstance(res, str), res
             check(
@@ -417,8 +448,10 @@ def test_read_history_unit() -> None:
             assert not isinstance(res, str), res
             check(res[2] is True, "the same byte cap without since does truncate")
             # Boundary: the window's first whole line is exactly the `since` record.
-            lines = hist.read_bytes().splitlines(keepends=True)
-            window = len(lines[-1]) + len(lines[-2]) + 10  # 10 bytes of the line before
+            lines: list[bytes] = hist.read_bytes().splitlines(keepends=True)
+            window: int = (
+                len(lines[-1]) + len(lines[-2]) + 10
+            )  # 10 bytes of the line before
             res = server._read_history(
                 24, initial_read_size=window, max_bytes=window, since=second_newest
             )
@@ -445,25 +478,33 @@ def test_read_history_unit() -> None:
 def test_append_history_unit() -> None:
     """Appending after an interrupted write must preserve old and new records."""
     from unittest.mock import mock_open, patch
+
     import server
 
     print(f"\n{BOLD}History append recovery{RESET}\n")
+    tmp: str
     with (
         tempfile.TemporaryDirectory() as tmp,
         patch.object(server, "LOGS_DIR", Path(tmp)),
         patch.object(server, "HISTORY_FILE", Path(tmp) / "history.jsonl"),
     ):
-        hist = server.HISTORY_FILE
-        before = _history_line(2, id="before").encode()
-        complete = _history_line(1, id="complete").encode().rstrip(b"\n")
-        recovered = json.loads(_history_line(0.1, id="recovered"))
-        following = json.loads(_history_line(0, id="following"))
+        hist: Path = server.HISTORY_FILE
+        before: bytes = _history_line(2, id="before").encode()
+        complete: bytes = _history_line(1, id="complete").encode().rstrip(b"\n")
+        recovered: dict[str, Any] = json.loads(_history_line(0.1, id="recovered"))
+        following: dict[str, Any] = json.loads(_history_line(0, id="following"))
 
         def readable_ids() -> tuple[list[str], int]:
-            result = server._read_history(24)
+            result: tuple[list[dict[str, Any]], int, bool, float] | str = (
+                server._read_history(24)
+            )
             assert isinstance(result, tuple), result
             return [row["id"] for row in result[0]], result[1]
 
+        label: str
+        original: None | bytes
+        expected: list[str]
+        skipped: int
         for label, original, expected, skipped in [
             ("missing", None, [], 0),
             ("empty", b"", [], 0),
@@ -478,9 +519,9 @@ def test_append_history_unit() -> None:
                 hist.write_bytes(original)
             server.append_history_record(recovered)
             server.append_history_record(following)
-            prefix = original or b""
-            separator = b"\n" if prefix and not prefix.endswith(b"\n") else b""
-            suffix = b"".join(
+            prefix: bytes = original or b""
+            separator: bytes = b"\n" if prefix and not prefix.endswith(b"\n") else b""
+            suffix: bytes = b"".join(
                 (json.dumps(row) + "\n").encode() for row in (recovered, following)
             )
             check(
@@ -495,7 +536,7 @@ def test_append_history_unit() -> None:
         # A real short write, isolated in a child so the test runner's files and
         # signal disposition are unaffected. Repeat it to cover failed recovery.
         hist.write_bytes(before)
-        short_write = """
+        short_write: str = """
 import errno, resource, signal, sys
 from pathlib import Path
 import server
@@ -512,16 +553,17 @@ except OSError as exc:
 else:
     raise AssertionError("file-size limit did not fail the append")
 """
+        attempt: int
         for attempt in range(2):
-            prior = hist.read_bytes()
-            result = subprocess.run(
+            prior: bytes = hist.read_bytes()
+            result: subprocess.CompletedProcess[str] = subprocess.run(
                 [sys.executable, "-c", short_write, tmp],
                 cwd=Path(__file__).parent,
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
-            partial = hist.read_bytes()
+            partial: bytes = hist.read_bytes()
             check(
                 result.returncode == 0
                 and partial.startswith(prior)
@@ -538,10 +580,11 @@ else:
             "repeated short writes: recovery keeps old and both subsequent records",
         )
 
+        failure: str
         for failure in ("seek", "read", "short-read"):
             prior = hist.read_bytes()
-            opener = mock_open()
-            handle = opener.return_value
+            opener: unittest.mock.MagicMock = mock_open()
+            handle: unittest.mock.MagicMock = opener.return_value
             handle.seek.return_value = len(prior)
             if failure == "short-read":
                 handle.read.return_value = b""
@@ -549,7 +592,7 @@ else:
                 getattr(handle, failure).side_effect = OSError(
                     "injected tail inspection failure"
                 )
-            rejected = False
+            rejected: bool = False
             with patch("server.open", opener, create=True):
                 try:
                     server.append_history_record(recovered)
@@ -575,12 +618,15 @@ else:
 def test_history_export_unit() -> None:
     """A concurrent append must not change an export's bytes or HTTP framing."""
     import gzip
+    from unittest.mock import patch
+
     import h11
     from starlette.requests import Request
-    from unittest.mock import patch
+
     import server
 
     print(f"\n{BOLD}History export during recording{RESET}\n")
+    tmp: str
     with (
         tempfile.TemporaryDirectory() as tmp,
         patch.object(server, "LOGS_DIR", Path(tmp)),
@@ -588,16 +634,25 @@ def test_history_export_unit() -> None:
         patch.object(server, "PASSWORD_FILE", Path(tmp) / "password"),
     ):
         server.PASSWORD_FILE.write_text(server._hash_password("export-test"))
-        original = (
+        original: bytes = (
             _history_line(1, id="existing").encode() * 3000 + b'{"partial":"\xe2\x82'
         )
-        appended = {"timestamp": datetime.now(timezone.utc).isoformat(), "id": "new"}
+        appended: dict[str, str] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "id": "new",
+        }
 
         async def export(
-            label, data, *, method="GET", headers=None, expected=None, status=200
-        ):
+            label: str,
+            data: bytes,
+            *,
+            method: Literal["GET", "HEAD"] = "GET",
+            headers: dict[str, str] | None = None,
+            expected: bytes | None = None,
+            status: int = 200,
+        ) -> None:
             server.HISTORY_FILE.write_bytes(data)
-            scope = {
+            scope: Scope = {
                 "type": "http",
                 "method": method,
                 "path": "/api/history/raw",
@@ -606,20 +661,26 @@ def test_history_export_unit() -> None:
                 "client": ("127.0.0.1", 12345),
                 "extensions": {},
             }
-            response = await server.get_history_raw(Request(scope))
+            response: server.Response = await server.get_history_raw(Request(scope))
+            key: str
+            value: str
             for key, value in (headers or {}).items():
                 if key == "if-range" and value == "match":
                     value = response.headers["etag"]
                 scope["headers"].append((key.encode(), value.encode()))
-            connection = h11.Connection(h11.SERVER)
+            connection: h11.Connection = h11.Connection(h11.SERVER)
             connection.receive_data(
                 f"{method} /api/history/raw HTTP/1.1\r\nHost: local\r\n\r\n".encode()
             )
             connection.next_event()
             connection.next_event()
+            body: list[bytes]
+            response_headers: dict[bytes, bytes]
+            response_status: int | None
+            wrote: bool
             body, response_headers, response_status, wrote = [], {}, None, False
 
-            async def send(message):
+            async def send(message: Message) -> None:
                 nonlocal response_headers, response_status, wrote
                 if message["type"] == "http.response.start":
                     response_headers = dict(message["headers"])
@@ -630,7 +691,7 @@ def test_history_export_unit() -> None:
                         )
                     )
                 else:
-                    chunk = message.get("body", b"")
+                    chunk: bytes = message.get("body", b"")
                     if chunk and not wrote:
                         # Append from a real worker while the download is active.
                         # This also proves the download does not hold the writer lock.
@@ -643,18 +704,20 @@ def test_history_export_unit() -> None:
                     if not message.get("more_body", False):
                         connection.send(h11.EndOfMessage())
 
-            async def receive():
+            async def receive() -> Message:
                 return {"type": "http.request", "body": b"", "more_body": False}
 
             await server._GZipUnlessRange(response, minimum_size=1000, compresslevel=1)(
                 scope, receive, send
             )
-            downloaded = b"".join(body)
+            downloaded: bytes = b"".join(body)
             if response_headers.get(b"content-encoding") == b"gzip":
                 downloaded = gzip.decompress(downloaded)
-            wanted = b"" if method == "HEAD" else data if expected is None else expected
-            separator = b"\n" if data and not data.endswith(b"\n") else b""
-            disk = data + (
+            wanted: bytes = (
+                b"" if method == "HEAD" else data if expected is None else expected
+            )
+            separator: bytes = b"\n" if data and not data.endswith(b"\n") else b""
+            disk: bytes = data + (
                 separator + (json.dumps(appended) + "\n").encode() if wrote else b""
             )
             check(
@@ -664,7 +727,7 @@ def test_history_export_unit() -> None:
                 f"{label}: exact export, valid HTTP framing, history bytes preserved",
             )
 
-        async def run():
+        async def run() -> None:
             await export("full export with torn UTF-8 tail", original)
             await export("gzip export", original, headers={"accept-encoding": "gzip"})
             await export(
@@ -740,8 +803,8 @@ def test_rate_clamp_unit() -> None:
     check(server._clamp_rate(1e9, 10.0) == 10.0, "_clamp_rate caps")
     check(server._clamp_rate(4.5, 10.0) == 4.5, "_clamp_rate passes sane values")
 
-    rc = server._RateCaps()
-    vals = [
+    rc: server._RateCaps = server._RateCaps()
+    vals: list[float] = [
         rc.sample(v * 1e6, 10.0, ("network.in_mbps", "eth0"))
         for v in (4.0, 50.0, -1.0, 99.0)
     ]
@@ -750,7 +813,7 @@ def test_rate_clamp_unit() -> None:
         "_RateCaps.sample: bytes/s -> MB/s, clamps without dropping",
         str(vals),
     )
-    odd = [
+    odd: list[float] = [
         rc.sample(v, 10.0, ("network.in_mbps", "eth0"))
         for v in (float("inf"), float("nan"), "x", None, True)
     ]
@@ -767,7 +830,10 @@ def test_rate_clamp_unit() -> None:
     )
 
     # _parse_since: encoded, unencoded '+', Z, naive (= UTC), space separator, junk.
-    ref = datetime(2026, 10, 23, 12, 0, 0, 500000, tzinfo=timezone.utc).timestamp()
+    ref: float = datetime(
+        2026, 10, 23, 12, 0, 0, 500000, tzinfo=timezone.utc
+    ).timestamp()
+    text: str
     for text in (
         "2026-10-23T12:00:00.5+00:00",
         "2026-10-23T12:00:00.5 00:00",
@@ -780,29 +846,33 @@ def test_rate_clamp_unit() -> None:
         server._parse_since(None) is None and server._parse_since("") is None,
         "_parse_since absent -> None",
     )
-    bad = server._parse_since("garbage")
+    bad: float | None | server.Response = server._parse_since("garbage")
     check(getattr(bad, "status_code", None) == 400, "_parse_since junk -> 400")
 
     # Caps pinned here so the expectations don't depend on this box's config.json.
-    orig_caps = (server.MAX_NETWORK_MBPS, server.MAX_DISK_IO_MBPS)
+    orig_caps: tuple[float, float] = (server.MAX_NETWORK_MBPS, server.MAX_DISK_IO_MBPS)
     server.MAX_NETWORK_MBPS, server.MAX_DISK_IO_MBPS = 1250.0, 15000.0
     try:
-        _rate_clamp_record_checks(server)
-        _collect_sample_cap_checks(server)
+        _rate_clamp_record_checks()
+        _collect_sample_cap_checks()
     finally:
         server.MAX_NETWORK_MBPS, server.MAX_DISK_IO_MBPS = orig_caps
 
 
-def _rate_clamp_record_checks(server: object) -> None:
+def _rate_clamp_record_checks() -> None:
     """clamp_record_rates and the read path, at the default caps."""
+    import server
+
+    net_cap: float
+    dio_cap: float
     net_cap, dio_cap = 1250.0, 15000.0
-    spike = {"avg": 1e9, "min": -5.0, "max": 1e12}
-    clamped = {"avg": net_cap, "min": 0.0, "max": net_cap}
-    dclamped = {"avg": dio_cap, "min": 0.0, "max": dio_cap}
+    spike: dict[str, float] = {"avg": 1e9, "min": -5.0, "max": 1e12}
+    clamped: dict[str, float] = {"avg": net_cap, "min": 0.0, "max": net_cap}
+    dclamped: dict[str, float] = {"avg": dio_cap, "min": 0.0, "max": dio_cap}
 
     # A record from before per-device capping (no rate_caps): only totals exist,
     # so the totals are clamped, both directions.
-    legacy: dict = {
+    legacy: dict[str, Any] = {
         "network": {"in_mbps": dict(spike), "out_mbps": dict(spike)},
         "disk_io": {
             "read_mbps": dict(spike),
@@ -831,7 +901,7 @@ def _rate_clamp_record_checks(server: object) -> None:
         and legacy["disk_io"]["write_mbps"] == dclamped,
         "legacy record: disk read and write totals clamped",
     )
-    drives = legacy["disk_io"]["drives"]
+    drives: list[Any] = legacy["disk_io"]["drives"]
     check(
         drives[0]["read_mbps"] == dclamped
         and drives[0]["write_mbps"] == dclamped
@@ -844,8 +914,8 @@ def _rate_clamp_record_checks(server: object) -> None:
 
     # A per-device-capped record (rate_caps): totals are sums that may rightly
     # exceed one cap, so they are left alone; drives are still clamped.
-    big = {"avg": 3000.0, "min": 2000.0, "max": 4000.0}
-    new: dict = {
+    big: dict[str, float] = {"avg": 3000.0, "min": 2000.0, "max": 4000.0}
+    new: dict[str, Any] = {
         "rate_caps": {"network_mbps": net_cap, "disk_io_mbps": dio_cap},
         "network": {"in_mbps": dict(big), "out_mbps": dict(big)},
         "disk_io": {
@@ -873,10 +943,11 @@ def _rate_clamp_record_checks(server: object) -> None:
     ok("clamp_record_rates tolerates missing/odd blocks")
 
     # The read path serves clamped values for legacy records and never rewrites.
-    orig_history_file = server.HISTORY_FILE
+    orig_history_file: Path = server.HISTORY_FILE
     try:
+        tmp: str
         with tempfile.TemporaryDirectory() as tmp:
-            hist = Path(tmp) / "history.jsonl"
+            hist: Path = Path(tmp) / "history.jsonl"
             server.HISTORY_FILE = hist
             hist.write_text(
                 _history_line(
@@ -891,9 +962,11 @@ def _rate_clamp_record_checks(server: object) -> None:
                     },
                 )
             )
-            result = server._read_history(24)
+            result: tuple[list[dict[str, Any]], int, bool, float] | str = (
+                server._read_history(24)
+            )
             assert not isinstance(result, str), result
-            served = result[0][0]
+            served: dict[str, Any] = result[0][0]
             check(
                 served["network"]["in_mbps"]["avg"] == net_cap
                 and served["network"]["out_mbps"]["max"] == 0.9
@@ -902,7 +975,7 @@ def _rate_clamp_record_checks(server: object) -> None:
                 "_read_history serves clamped legacy rates, sane values untouched",
                 describe(served),
             )
-            raw = json.loads(hist.read_text())
+            raw: dict[str, Any] = json.loads(hist.read_text())
             check(
                 raw["network"]["in_mbps"]["avg"] == 1e9,
                 "reading never rewrites the file",
@@ -911,31 +984,38 @@ def _rate_clamp_record_checks(server: object) -> None:
         server.HISTORY_FILE = orig_history_file
 
 
-def _collect_sample_cap_checks(server: object) -> None:
+def _collect_sample_cap_checks() -> None:
     """collect_history_sample against a fake Glances: each interface and each
     drive is capped on its own (a spike counts as the cap, never dropped),
     totals are uncapped sums, bad rates are ignored without losing the record,
     and the record lists what hit a cap; the log line is for recorded samples
     only. Caps are lowered so the numbers are easy to read."""
+    import server
+
     server.MAX_NETWORK_MBPS, server.MAX_DISK_IO_MBPS = 100.0, 200.0
-    M = 1e6  # MB/s -> bytes/s
-    calls = {"network": 0, "diskio": 0}
+    M: float = 1e6  # MB/s -> bytes/s
+    calls: dict[str, int] = {"network": 0, "diskio": 0}
     # Per sample (3 samples), MB/s. eth0 spikes in (sample 2) and out (sample 3);
     # docker0 carries steady traffic that also crossed eth0, so the in total of
     # sample 2 (100 + 80) rightly exceeds the 100 cap and is not capped; wlan0
     # reports Infinity and a string, which are ignored.
+    eth0_in: list[float]
+    eth0_out: list[float]
     eth0_in, eth0_out = [1, 5e6, 2], [1, 1, 3e6]
-    docker_in = [80, 80, 80]
-    wlan0_in = [float("inf"), "x", 1]
+    docker_in: list[int] = [80, 80, 80]
+    wlan0_in: list[float | str] = [float("inf"), "x", 1]
+    sda1_read: list[float]
+    sda1_write: list[float]
     sda1_read, sda1_write = [1, 9e8, 1], [0, 0, 7e8]
-    sdb_read = [150, 150, 150]  # mounted: total read in sample 2 = 200 + 150
+    sdb_read: list[int] = [150, 150, 150]  # mounted: total read in sample 2 = 200 + 150
 
     def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
+        path: str = request.url.path
         if path == "/api/4/network":
-            i = calls["network"] % 3
+            i: int = calls["network"] % 3
             calls["network"] += 1
-            body = json.dumps(
+            wlan_rate: float | str = wlan0_in[i]
+            body: str = json.dumps(
                 [
                     {
                         "interface_name": "eth0",
@@ -949,9 +1029,9 @@ def _collect_sample_cap_checks(server: object) -> None:
                     },
                     {
                         "interface_name": "wlan0",
-                        "bytes_recv_rate_per_sec": wlan0_in[i] * M
-                        if isinstance(wlan0_in[i], (int, float))
-                        else wlan0_in[i],
+                        "bytes_recv_rate_per_sec": wlan_rate * M
+                        if isinstance(wlan_rate, (int, float))
+                        else wlan_rate,
                         "bytes_sent_rate_per_sec": None,
                     },
                     {
@@ -967,7 +1047,7 @@ def _collect_sample_cap_checks(server: object) -> None:
         if path == "/api/4/diskio":
             i = calls["diskio"] % 3
             calls["diskio"] += 1
-            rows = [
+            rows: list[dict[str, str | float]] = [
                 {
                     "disk_name": "sda1",
                     "read_bytes_rate_per_sec": sda1_read[i] * M,
@@ -1017,53 +1097,60 @@ def _collect_sample_cap_checks(server: object) -> None:
             return httpx.Response(200, json={"total": 5.0})
         return httpx.Response(404, json={})
 
-    orig_client = server.httpx.AsyncClient
-    orig = {n: getattr(server, n) for n in ("get_gpu_stats", "_get_ip_info")}
-    state_keys = (
+    state_keys: tuple[str, ...] = (
         "history_sample_duration",
         "history_sample_count",
         "history_processes_enabled",
         "history_process_count",
         "ping_enabled",
     )
-    orig_state = {k: getattr(server.APP.state, k, None) for k in state_keys}
+    orig_state: dict[str, Any] = {
+        k: getattr(server.APP.state, k, None) for k in state_keys
+    }
 
-    class FakeClient(orig_client):  # type: ignore[misc, valid-type]
-        def __init__(self, *a: object, **k: object) -> None:
+    class FakeClient(httpx.AsyncClient):
+        def __init__(self: FakeClient, **k: Any) -> None:
             k["transport"] = httpx.MockTransport(handler)
-            super().__init__(*a, **k)
+            super().__init__(**k)
 
     class Capture(logging.Handler):
-        def __init__(self) -> None:
+        def __init__(self: Capture) -> None:
             super().__init__(logging.WARNING)
             self.messages: list[str] = []
 
-        def emit(self, record: logging.LogRecord) -> None:
+        def emit(self: Capture, record: logging.LogRecord) -> None:
             self.messages.append(record.getMessage())
 
-    cap_log = Capture()
+    cap_log: Capture = Capture()
     server.logger.addHandler(cap_log)
-    try:
-        server.httpx.AsyncClient = FakeClient
-        server.get_gpu_stats = lambda: []
-        server._get_ip_info = lambda: {}
-        for k, v in zip(state_keys, (0, 3, False, 10, False)):
-            setattr(server.APP.state, k, v)
-        rec = asyncio.run(server.collect_history_sample("http://glances.invalid"))
-        recorded_log = [m for m in cap_log.messages if m.startswith("Rate cap hit")]
-        cap_log.messages.clear()
-        calls.update(network=1, diskio=1)  # the live sample is the spiky one
-        live = asyncio.run(
-            server.collect_history_sample("http://glances.invalid", live=True)
-        )
-        live_log = [m for m in cap_log.messages if m.startswith("Rate cap hit")]
-    finally:
-        server.logger.removeHandler(cap_log)
-        server.httpx.AsyncClient = orig_client
-        for n, f in orig.items():
-            setattr(server, n, f)
-        for k, v in orig_state.items():
-            setattr(server.APP.state, k, v)
+    with (
+        patch.object(server.httpx, "AsyncClient", FakeClient),
+        patch.object(server, "get_gpu_stats", return_value=[]),
+        patch.object(server, "_get_ip_info", return_value={}),
+    ):
+        try:
+            k: str
+            v: Any
+            for k, v in zip(state_keys, (0, 3, False, 10, False)):
+                setattr(server.APP.state, k, v)
+            rec: dict[str, Any] = asyncio.run(
+                server.collect_history_sample("http://glances.invalid")
+            )
+            recorded_log: list[str] = [
+                m for m in cap_log.messages if m.startswith("Rate cap hit")
+            ]
+            cap_log.messages.clear()
+            calls.update(network=1, diskio=1)  # the live sample is the spiky one
+            live: dict[str, Any] = asyncio.run(
+                server.collect_history_sample("http://glances.invalid", live=True)
+            )
+            live_log: list[str] = [
+                m for m in cap_log.messages if m.startswith("Rate cap hit")
+            ]
+        finally:
+            server.logger.removeHandler(cap_log)
+            for k, v in orig_state.items():
+                setattr(server.APP.state, k, v)
 
     # in totals: 1+80+0, 100+80+0, 2+80+1  (eth0 capped; wlan0 bad values -> 0)
     check(
@@ -1077,7 +1164,9 @@ def _collect_sample_cap_checks(server: object) -> None:
         "network out capped per interface too",
         describe(rec.get("network", {}).get("out_mbps")),
     )
-    drives = {d["name"]: d for d in rec.get("disk_io", {}).get("drives", [])}
+    drives: dict[str, dict[str, Any]] = {
+        d["name"]: d for d in rec.get("disk_io", {}).get("drives", [])
+    }
     check(
         drives.get("/", {}).get("read_mbps", {}).get("max") == 200.0
         and drives.get("/", {}).get("write_mbps", {}).get("max") == 200.0
@@ -1095,7 +1184,7 @@ def _collect_sample_cap_checks(server: object) -> None:
         "record notes the caps it was taken under (rate_caps)",
         describe(rec.get("rate_caps")),
     )
-    expected = [
+    expected: list[dict[str, str | float]] = [
         {
             "metric": "disk_io.read_mbps",
             "device": "md0",
@@ -1158,7 +1247,7 @@ def _collect_sample_cap_checks(server: object) -> None:
         str(recorded_log),
     )
     check(
-        live.get("rate_capped") and not live_log,
+        bool(live.get("rate_capped")) and not live_log,
         "live (/text) samples note caps but never log",
         f"capped={live.get('rate_capped')} log={live_log}",
     )
@@ -1168,7 +1257,7 @@ def test_history_fetch_js() -> None:
     """The browser's history cache (static/app.js fetchHistoryData and helpers),
     run in node against a scripted safeFetch."""
     print(f"\n{BOLD}history fetch (app.js, node) unit tests{RESET}\n")
-    node = shutil.which("node")
+    node: str | None = shutil.which("node")
     if not node:
         # A silent skip would read as a pass; opt out explicitly instead.
         if os.environ.get("HORATIO_SKIP_NODE") == "1":
@@ -1181,20 +1270,21 @@ def test_history_fetch_js() -> None:
                 "node not installed (set HORATIO_SKIP_NODE=1 to skip)",
             )
         return
-    src = (Path(__file__).parent / "static" / "app.js").read_text()
-    cfg_src = (Path(__file__).parent / "static" / "config.js").read_text()
+    src: str = (Path(__file__).parent / "static" / "app.js").read_text()
+    cfg_src: str = (Path(__file__).parent / "static" / "config.js").read_text()
 
     def between(text: str, start: str, end: str) -> str:
         # The test slices app.js / config.js by these markers; a renamed one is
         # a test failure that names it, not a crash of the whole suite.
-        a = text.find(start)
-        b = text.find(end, a + 1)
+        a: int = text.find(start)
+        b: int = text.find(end, a + 1)
         if a < 0 or b < 0:
             raise LookupError(f"marker not found: {start if a < 0 else end!r}")
         return text[a:b]
 
+    e: LookupError
     try:
-        harness = (
+        harness: str = (
             r"""
 const assert = require('assert');
 let defaultHistoryHours = 24;
@@ -1530,11 +1620,14 @@ const card = (hours) => {
     except LookupError as e:
         fail("history fetch JS tests", str(e))
         return
+    f: tempfile._TemporaryFileWrapper[str]
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
         f.write(harness)
-        script = f.name
+        script: str = f.name
     try:
-        r = subprocess.run([node, script], capture_output=True, text=True, timeout=30)
+        r: subprocess.CompletedProcess[str] = subprocess.run(
+            [node, script], capture_output=True, text=True, timeout=30
+        )
         check(
             r.returncode == 0 and r.stdout.strip() == "OK",
             "history cache (top-up on reopen, order, server clock, skipped, no clock, gap, "
@@ -1553,11 +1646,9 @@ def test_auth_throttle_unit() -> None:
     attempts before the KDF, so only AUTH_MAX_FAILS guesses reach it, one at a
     time, and the rest get 429 at once."""
     print(f"\n{BOLD}Unit: password lockout under a burst{RESET}\n")
-    import types
-
     import server
 
-    running = {"now": 0, "max": 0, "calls": 0}
+    running: dict[str, int] = {"now": 0, "max": 0, "calls": 0}
 
     def slow_wrong(password: str) -> bool:
         running["now"] += 1
@@ -1567,34 +1658,36 @@ def test_auth_throttle_unit() -> None:
         running["now"] -= 1
         return password == "right"
 
-    orig = server._verify_password
-    server._verify_password = slow_wrong
     server._auth_failures.clear()
-    req = types.SimpleNamespace(client=types.SimpleNamespace(host="198.51.100.7"))
+    req: Request = Request({"type": "http", "client": ("198.51.100.7", 12345)})
 
-    async def burst() -> list:
+    async def burst() -> list[server.Response | None]:
         return await asyncio.gather(
             *(server._verify_password_throttled(req, "wrong") for _ in range(20))
         )
 
     try:
-        codes = sorted(r.status_code for r in asyncio.run(burst()))
-        n = server.AUTH_MAX_FAILS
-        check(
-            codes == [403] * n + [429] * (20 - n)
-            and running["calls"] == n
-            and running["max"] == 1,
-            f"20 concurrent wrong guesses: {n} checked (one at a time), the rest locked out",
-            f"codes={codes} kdf_calls={running['calls']} max_concurrent={running['max']}",
-        )
-        server._auth_failures.clear()
-        ok_resp = asyncio.run(server._verify_password_throttled(req, "right"))
-        check(
-            ok_resp is None and req.client.host not in server._auth_failures,
-            "a correct password passes and clears the streak",
-        )
+        with patch.object(server, "_verify_password", slow_wrong):
+            replies: list[server.Response | None] = asyncio.run(burst())
+            assert all(reply is not None for reply in replies)
+            codes: list[int] = sorted(r.status_code for r in replies if r is not None)
+            n: int = server.AUTH_MAX_FAILS
+            check(
+                codes == [403] * n + [429] * (20 - n)
+                and running["calls"] == n
+                and running["max"] == 1,
+                f"20 concurrent wrong guesses: {n} checked (one at a time), the rest locked out",
+                f"codes={codes} kdf_calls={running['calls']} max_concurrent={running['max']}",
+            )
+            server._auth_failures.clear()
+            ok_resp: server.Response | None = asyncio.run(
+                server._verify_password_throttled(req, "right")
+            )
+            check(
+                ok_resp is None and "198.51.100.7" not in server._auth_failures,
+                "a correct password passes and clears the streak",
+            )
     finally:
-        server._verify_password = orig
         server._auth_failures.clear()
 
 
@@ -1604,16 +1697,18 @@ def test_subprocess_decoding_unit() -> None:
     print(f"\n{BOLD}Unit: non-UTF-8 subprocess output{RESET}\n")
     import server
 
-    orig_path = os.environ.get("PATH", "")
+    orig_path: str = os.environ.get("PATH", "")
+    tmp: str
     with tempfile.TemporaryDirectory() as tmp:
-        fake = Path(tmp) / "pidstat"
+        fake: Path = Path(tmp) / "pidstat"
         fake.write_text(
             "#!/bin/sh\nprintf 'Average:  1000  4242  12.00  3.00  0.00  caf\\303\\n'\n"
         )
         fake.chmod(0o755)
         os.environ["PATH"] = f"{tmp}{os.pathsep}{orig_path}"
+        e: Exception
         try:
-            out = server._run_pidstat(1, 5).stdout
+            out: str = server._run_pidstat(1, 5).stdout
             check(
                 "caf�" in out,
                 "_run_pidstat: invalid UTF-8 replaced, not raised",
@@ -1628,10 +1723,11 @@ def test_subprocess_decoding_unit() -> None:
 def test_gpu_info_partial_unit() -> None:
     """Unsupported nvidia-smi fields must not hide usable GPU metadata."""
     from unittest.mock import patch
+
     import server
 
     print(f"\n{BOLD}partial GPU information unit tests{RESET}\n")
-    output = (
+    output: str = (
         "0, NVIDIA H100 80GB HBM3, [N/A], 87, 81559, 30, 141, 700, 580.65.06\n"
         "1, NVIDIA Virtual GPU, 0, N/A, 8192, [Not Supported], nan, inf, 580.65.06\n"
         "bad, invalid index, 0, 0, 8192, 30, 0, 100, 580.65.06\n"
@@ -1644,7 +1740,7 @@ def test_gpu_info_partial_unit() -> None:
             subprocess.CompletedProcess([], 0, "CUDA Version: 13.0\n", ""),
         ],
     ):
-        gpus = server._get_gpu_info()
+        gpus: list[dict[str, float | str | None]] = server._get_gpu_info()
     check(
         [g["index"] for g in gpus] == [0, 1],
         "GPU info: unavailable metrics preserve rows; invalid index is skipped",
@@ -1684,13 +1780,17 @@ def test_gpu_info_partial_unit() -> None:
 def test_gpu_stats_compatibility_unit() -> None:
     """An unsupported optional counter must not discard basic GPU readings."""
     from unittest.mock import patch
+
     import server
 
     print(f"\n{BOLD}GPU query compatibility unit tests{RESET}\n")
-    basic = "0, 0, 4096, 24576, 53, 123, 86"
-    modern = subprocess.CompletedProcess([], 0, basic + ", 2500000, 1000000\n", "")
+    basic: str = "0, 0, 4096, 24576, 53, 123, 86"
+    modern: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
+        [], 0, basic + ", 2500000, 1000000\n", ""
+    )
+    run: unittest.mock.MagicMock | unittest.mock.AsyncMock
     with patch.object(server.subprocess, "run", return_value=modern) as run:
-        gpus = server.get_gpu_stats()
+        gpus: list[dict[str, Any]] = server.get_gpu_stats()
     check(
         run.call_count == 1
         and len(gpus) == 1
@@ -1700,15 +1800,19 @@ def test_gpu_stats_compatibility_unit() -> None:
     )
 
     # Different CLI versions can put the invalid-field diagnostic on either stream.
+    counter: str
+    stream: str
     for counter, stream in (("sw", "stderr"), ("hw", "stdout")):
-        error = f'Field "clocks_event_reasons_counters.{counter}_thermal_slowdown" is not a valid field to query.\n'
-        rejected = subprocess.CompletedProcess(
+        error: str = f'Field "clocks_event_reasons_counters.{counter}_thermal_slowdown" is not a valid field to query.\n'
+        rejected: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
             [],
             2,
             error if stream == "stdout" else "",
             error if stream == "stderr" else "",
         )
-        fallback = subprocess.CompletedProcess([], 0, basic + "\n", "")
+        fallback: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
+            [], 0, basic + "\n", ""
+        )
         with patch.object(
             server.subprocess, "run", side_effect=[rejected, fallback]
         ) as run:
@@ -1729,6 +1833,8 @@ def test_gpu_stats_compatibility_unit() -> None:
             f"GPU stats: unsupported {counter} counter on {stream} preserves basic readings",
         )
 
+    label: str
+    failure: subprocess.CompletedProcess[str]
     for label, failure in (
         ("driver error", subprocess.CompletedProcess([], 9, "", "driver not loaded")),
         (
@@ -1748,6 +1854,7 @@ def test_gpu_stats_compatibility_unit() -> None:
     check(gpus == [] and run.call_count == 1, "GPU stats: timeout does not retry")
 
     failure = subprocess.CompletedProcess([], 9, "", "fallback driver failure")
+    warning: unittest.mock.MagicMock | unittest.mock.AsyncMock
     with (
         patch.object(server.subprocess, "run", side_effect=[rejected, failure]) as run,
         patch.object(server.logger, "warning") as warning,
@@ -1764,17 +1871,24 @@ def test_gpu_stats_compatibility_unit() -> None:
 def test_system_info_unit() -> None:
     """CPU topology and address-family fallbacks, without hardware or network."""
     from unittest.mock import patch
+
     import server
 
     print(f"\n{BOLD}System information unit tests{RESET}\n")
     # Core IDs repeat across sockets and SMT siblings; field order is arbitrary.
-    multi = "\n\n".join(
+    multi: str = "\n\n".join(
         f"processor : {i}\ncore id : {(i % 4) // 2}\nphysical id : {i // 4}\n"
         "model name : Fixture CPU\ncache size : 32768 KB"
         for i in range(8)
     )
-    no_socket = "\n\n".join(f"processor : {i}\ncore id : {i // 2}" for i in range(4))
-    no_topology = "processor : 0\n\nprocessor : 1\n"
+    no_socket: str = "\n\n".join(
+        f"processor : {i}\ncore id : {i // 2}" for i in range(4)
+    )
+    no_topology: str = "processor : 0\n\nprocessor : 1\n"
+    label: str
+    cpuinfo: str
+    physical: int
+    logical: int
     for label, cpuinfo, physical, logical in (
         ("multiple sockets with SMT", multi, 4, 8),
         ("missing socket IDs", no_socket, 2, 4),
@@ -1784,7 +1898,7 @@ def test_system_info_unit() -> None:
             patch.object(server.Path, "exists", return_value=True),
             patch.object(server.Path, "read_text", side_effect=[cpuinfo, "32M\n"]),
         ):
-            info = server._get_cpu_info()
+            info: dict[str, Any] = server._get_cpu_info()
         check(
             info["physical_cores"] == physical
             and info["logical_cores"] == logical
@@ -1797,6 +1911,9 @@ def test_system_info_unit() -> None:
             describe(info),
         )
 
+    first: httpx.ConnectTimeout | str
+    second: str | httpx.ConnectTimeout
+    expected: dict[str, str]
     for label, first, second, expected in (
         (
             "IPv4 fallback after first provider fails",
@@ -1823,6 +1940,7 @@ def test_system_info_unit() -> None:
             {"error": "lookup failed"},
         ),
     ):
+        client: unittest.mock.MagicMock | unittest.mock.AsyncMock
         with (
             patch.object(
                 server.subprocess,
@@ -1848,8 +1966,8 @@ def test_null_metrics_unit() -> None:
     print(f"\n{BOLD}null-metric unit tests{RESET}\n")
     import server
 
-    inf = float("inf")
-    nan = float("nan")
+    inf: float = float("inf")
+    nan: float = float("nan")
 
     # _num: numbers pass through; None/str/bool/non-finite -> None
     check(server._num(3.5) == 3.5, "_num(3.5) -> 3.5")
@@ -1921,7 +2039,7 @@ def test_null_metrics_unit() -> None:
     )
 
     # _parse_gpu_stats: real line + one with [N/A] fields (field -> None, row kept)
-    stats = server._parse_gpu_stats(
+    stats: list[dict[str, Any]] = server._parse_gpu_stats(
         "0, 42, 1024, 24576, 50, 120.5\n1, [N/A], [N/A], 24576, [N/A], [N/A]"
     )
     check(
@@ -1966,7 +2084,7 @@ def test_null_metrics_unit() -> None:
         describe(stats),
     )
     # ... and into the history: counters in seconds, "GPU N mem" only when readable
-    recs = server.build_gpu_records(stats, [])
+    recs: list[dict[str, Any]] = server.build_gpu_records(stats, [])
     check(
         recs[0]["throttle_sw_thermal_s"] is None
         and recs[0]["throttle_hw_thermal_s"] == 0.0
@@ -1984,7 +2102,7 @@ def test_null_metrics_unit() -> None:
 
     # build_gpu_records: nvidia-smi with all metric fields [N/A] (P40-via-nvidia
     # edge) -> full record, fields None, no crash, JSON-safe.
-    na_stats = [
+    na_stats: list[dict[str, int | None]] = [
         {
             "index": 0,
             "util_percent": None,
@@ -2062,7 +2180,7 @@ def test_null_metrics_unit() -> None:
     )
 
     # aggregate_ping: loss fraction + stats; full outage -> null stats, loss 1.0
-    pings = server.aggregate_ping(
+    pings: dict[str, Any] = server.aggregate_ping(
         {"8.8.8.8": [], "1.1.1.1": [10.0, 20.0], "9.9.9.9": [30.0, 30.0, 30.0]},
         {"8.8.8.8": 5, "1.1.1.1": 5, "9.9.9.9": 5},
     )
@@ -2091,7 +2209,7 @@ def test_gpu_processes_unit() -> None:
     print(f"\n{BOLD}Unit: GPU processes (fake nvidia-smi){RESET}\n")
     import server
 
-    script = r"""#!/bin/sh
+    script: str = r"""#!/bin/sh
 case "$*" in
   "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory --format=csv,noheader,nounits")
     printf 'GPU-aaa, 4242, /usr/bin/burn, 100\nGPU-bbb, 4242, /usr/bin/burn, 200\nGPU-aaa, 5151, /opt/caf\303\251, 50\n' ;;
@@ -2106,19 +2224,21 @@ case "$*" in
   *) exit 1 ;;
 esac
 """
-    orig_path = os.environ.get("PATH", "")
+    orig_path: str = os.environ.get("PATH", "")
+    tmp: str
     with tempfile.TemporaryDirectory() as tmp:
-        fake = Path(tmp) / "nvidia-smi"
+        fake: Path = Path(tmp) / "nvidia-smi"
         fake.write_text(script)
         fake.chmod(0o755)
         os.environ["PATH"] = f"{tmp}{os.pathsep}{orig_path}"
         try:
+            e: Exception
             try:
-                rows = server._get_gpu_processes()
+                rows: list[dict[str, Any]] = server._get_gpu_processes()
             except Exception as e:  # the decode bug raised here
                 fail("_get_gpu_processes with a non-UTF-8 pmon command name", repr(e))
                 return
-            got = {
+            got: dict[tuple[Any, Any], tuple[Any, ...]] = {
                 (r["gpu_index"], r["pid"]): (
                     r["gpu_memory_mib"],
                     r["gpu_util_percent"],
@@ -2138,9 +2258,9 @@ esac
                 repr(got),
             )
             os.environ["FAKE_PMON_SLEEP"] = "5"
-            t0 = time.monotonic()
+            t0: float = time.monotonic()
             rows = server._get_gpu_processes()
-            elapsed = time.monotonic() - t0
+            elapsed: float = time.monotonic() - t0
             check(
                 len(rows) == 3
                 and all(r["gpu_util_percent"] is None for r in rows)
@@ -2158,7 +2278,7 @@ def test_process_history_unit() -> None:
     print(f"\n{BOLD}Unit: per-process history and CPU clocks{RESET}\n")
     import server
 
-    def proc(pid: int, cpu: float, rss: int, name: str = "x") -> dict:
+    def proc(pid: int, cpu: float, rss: int, name: str = "x") -> dict[str, Any]:
         return {
             "pid": pid,
             "name": name,
@@ -2171,8 +2291,8 @@ def test_process_history_unit() -> None:
 
     # pids above the kernel's pid_max ceiling (2**22) can never exist, so the
     # sanitizer falls back to Glances' name and /proc yields no ppid/create_time.
-    P = 2**31 - 100
-    procs = [
+    P: int = 2**31 - 100
+    procs: list[Any] = [
         proc(P + 1, 50.0, 10 << 20, "hog"),
         proc(P + 2, 1.0, 900 << 20, "fat"),
         proc(P + 3, 0.5, 1 << 20, "idle"),
@@ -2181,7 +2301,7 @@ def test_process_history_unit() -> None:
         {"pid": True, "cpu_percent": 99},
         "junk",
     ]
-    gpu = [
+    gpu: list[dict[str, float | str] | dict[str, float | str | None]] = [
         {
             "pid": P + 3,
             "gpu_index": 1,
@@ -2204,8 +2324,8 @@ def test_process_history_unit() -> None:
             "gpu_util_percent": None,
         },
     ]
-    rows = server.build_process_records(procs, gpu, 2)
-    by_pid = {r["pid"]: r for r in rows}
+    rows: list[dict[str, Any]] = server.build_process_records(procs, gpu, 2)
+    by_pid: dict[int, dict[str, Any]] = {r["pid"]: r for r in rows}
     check(
         [r["pid"] for r in rows] == [P + 1, P + 4, P + 2, P + 3, P + 99]
         and by_pid[P + 1]["name"] == "hog"
@@ -2225,7 +2345,7 @@ def test_process_history_unit() -> None:
         "build_process_records: top-2 cpu + top-2 rss + GPU holders, sorted, GPU-only last",
         describe(rows),
     )
-    ghosts = {
+    ghosts: dict[int, dict[str, Any]] = {
         r["pid"]: r
         for r in server.build_process_records(
             [proc(P + 96, 1.0, 1 << 20, "listed")],
@@ -2267,25 +2387,27 @@ def test_process_history_unit() -> None:
         and server.build_process_records(procs[:1], [], 5)[0]["pid"] == P + 1,
         "build_process_records: empty and single",
     )
-    nomem = {r["pid"]: r for r in server.build_process_records(procs, [], 5)}[P + 5]
+    nomem: dict[str, Any] = {
+        r["pid"]: r for r in server.build_process_records(procs, [], 5)
+    }[P + 5]
     check(
         "rss_mb" not in nomem and nomem["cpu_percent"] == 0.0,
         "build_process_records: missing memory_info -> no rss_mb key, cpu 0.0 kept",
         describe(nomem),
     )
     # disk rates from Glances' cumulative io_counters; zero / unreadable -> no key
-    busy = proc(P + 6, 2.0, 1 << 20, "cp")
+    busy: dict[str, Any] = proc(P + 6, 2.0, 1 << 20, "cp")
     busy.update(
         {
             "io_counters": [10 * 1024 * 1024, 4 * 1024 * 1024, 0, 4 * 1024 * 1024, 1],
             "time_since_update": 5.0,
         }
     )
-    quiet = proc(P + 7, 1.0, 1 << 20, "idle")
+    quiet: dict[str, Any] = proc(P + 7, 1.0, 1 << 20, "idle")
     quiet.update({"io_counters": [5, 5, 5, 5, 1], "time_since_update": 5.0})
-    nodata = proc(P + 8, 1.0, 1 << 20, "noio")
+    nodata: dict[str, Any] = proc(P + 8, 1.0, 1 << 20, "noio")
     nodata.update({"io_counters": [0, 0, 0, 0, 0], "time_since_update": 5.0})
-    io = {
+    io: dict[int, dict[str, Any]] = {
         r["pid"]: r for r in server.build_process_records([busy, quiet, nodata], [], 5)
     }
     check(
@@ -2297,7 +2419,7 @@ def test_process_history_unit() -> None:
         "build_process_records: disk KB/s from io_counters, zero and unreadable omitted",
         describe([io[P + 6], io[P + 7], io[P + 8]]),
     )
-    pm = server._parse_pmon(
+    pm: dict[tuple[int, int], tuple[float | None, float | None]] = server._parse_pmon(
         "# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command \n"
         "# Idx           #    C/G      %      %      %      %      %      %    name \n"
         "    0    1498409     C     97     75      -      -      -      -    python3        \n"
@@ -2315,7 +2437,7 @@ def test_process_history_unit() -> None:
         "_parse_pmon: (gpu, pid) -> (sm, mem), '-' -> None, headers and junk skipped",
         repr(pm),
     )
-    f = server.aggregate_cpu_freq(
+    f: dict[str, float | None] | None = server.aggregate_cpu_freq(
         [1200.0, 3600.0, None, 2400.0, "x"], {"min_mhz": 1200.0, "max_mhz": 3600.0}
     )
     check(
@@ -2336,7 +2458,9 @@ def test_process_history_unit() -> None:
         and server.aggregate_cpu_freq([None]) is None,
         "aggregate_cpu_freq: nothing readable -> None",
     )
-    me = server.build_process_records([proc(os.getpid(), 1.0, 1 << 20, "me")], [], 1)[0]
+    me: dict[str, Any] = server.build_process_records(
+        [proc(os.getpid(), 1.0, 1 << 20, "me")], [], 1
+    )[0]
     check(
         me.get("ppid") == os.getppid()
         and isinstance(me.get("create_time"), float)
@@ -2349,11 +2473,12 @@ def test_process_history_unit() -> None:
 def test_history_process_sources_unit() -> None:
     """A missing Glances process list must not discard available GPU processes."""
     from unittest.mock import Mock, patch
+
     import server
 
     print(f"\n{BOLD}History process source recovery unit tests{RESET}\n")
-    pid = 2**31 - 1  # cannot be a live process on Linux
-    gpu_rows = [
+    pid: int = 2**31 - 1  # cannot be a live process on Linux
+    gpu_rows: list[dict[str, int | str]] = [
         {
             "pid": pid,
             "name": "trainer",
@@ -2362,7 +2487,7 @@ def test_history_process_sources_unit() -> None:
             "gpu_util_percent": 90,
         }
     ]
-    cpu_rows = [
+    cpu_rows: list[dict[str, Any]] = [
         {
             "pid": pid,
             "name": "trainer",
@@ -2370,7 +2495,7 @@ def test_history_process_sources_unit() -> None:
             "memory_info": {"rss": 1024**2},
         }
     ]
-    responses = {
+    responses: dict[str, Any] = {
         "cpu": {"total": 20},
         "percpu": [{"total": 20}],
         "network": [],
@@ -2382,26 +2507,29 @@ def test_history_process_sources_unit() -> None:
         "load": {},
         "fs": [],
     }
-    requests = []
+    requests: list[str] = []
 
     class Client:
-        async def __aenter__(self):
+        async def __aenter__(self: Client) -> Client:
             return self
 
-        async def __aexit__(self, *args):
+        async def __aexit__(self: Client, *args: object) -> None:
             pass
 
-        async def get(self, url, **kwargs):
-            name = url.rsplit("/", 1)[1]
+        async def get(self: Client, url: str, **kwargs: Any) -> httpx.Response:
+            name: str = url.rsplit("/", 1)[1]
             requests.append(name)
-            return (
+            response: httpx.Response | None = (
                 process_reply
                 if name == "processlist"
                 else httpx.Response(200, json=responses[name])
             )
+            assert response is not None
+            return response
 
-    async def run():
+    async def run() -> None:
         nonlocal process_reply
+        gpu: unittest.mock.MagicMock | unittest.mock.AsyncMock
         with (
             patch.multiple(
                 server.APP.state,
@@ -2422,6 +2550,9 @@ def test_history_process_sources_unit() -> None:
             ),
             patch.object(server, "_get_gpu_processes", return_value=gpu_rows) as gpu,
         ):
+            label: str
+            status: int
+            data: list[Any] | dict[str, Any]
             for label, status, data in (
                 ("failed", 500, []),
                 ("empty", 200, []),
@@ -2429,8 +2560,10 @@ def test_history_process_sources_unit() -> None:
             ):
                 process_reply = httpx.Response(status, json=data)
                 gpu.reset_mock()
-                record = await server.collect_history_sample("http://fixture")
-                rows = record.get("processes", [])
+                record: dict[str, Any] = await server.collect_history_sample(
+                    "http://fixture"
+                )
+                rows: list[dict[str, Any]] = record.get("processes", [])
                 check(
                     gpu.call_count == 1
                     and len(rows) == 1
@@ -2467,7 +2600,7 @@ def test_history_process_sources_unit() -> None:
                 "History: missing NVIDIA keeps Glances process rows",
             )
 
-    process_reply = None
+    process_reply: httpx.Response | None = None
     asyncio.run(run())
 
 
@@ -2481,12 +2614,12 @@ def test_dedupe_fs_unit() -> None:
     print(f"\n{BOLD}fs-dedup unit tests{RESET}\n")
     import server
 
-    def _mounts(entries: list[dict]) -> list[str]:
+    def _mounts(entries: list[dict[str, Any]]) -> list[str]:
         return [e["mnt_point"] for e in server._dedupe_fs_by_device(entries)]
 
     # Phantom PrivateTmp mounts: same device + size + used as / -> only / kept,
     # even though /tmp is listed first (shortest, non-empty mount wins).
-    phantom = [
+    phantom: list[dict[str, str | int]] = [
         {"device_name": "/dev/dm-0", "mnt_point": "/tmp", "size": 200, "used": 148},
         {"device_name": "/dev/dm-0", "mnt_point": "/", "size": 200, "used": 148},
         {"device_name": "/dev/dm-0", "mnt_point": "/var/tmp", "size": 200, "used": 148},
@@ -2498,7 +2631,7 @@ def test_dedupe_fs_unit() -> None:
     )
 
     # Distinct devices -> all kept, original order preserved.
-    distinct = [
+    distinct: list[dict[str, str | int]] = [
         {"device_name": "/dev/dm-0", "mnt_point": "/", "size": 200, "used": 148},
         {"device_name": "/dev/sda2", "mnt_point": "/boot", "size": 2, "used": 1},
         {
@@ -2515,7 +2648,7 @@ def test_dedupe_fs_unit() -> None:
     )
 
     # Same device but different `used` -> NOT the same fs, both kept (over-collapse guard).
-    subvol = [
+    subvol: list[dict[str, str | int]] = [
         {"device_name": "/dev/dm-1", "mnt_point": "/data/a", "size": 500, "used": 100},
         {"device_name": "/dev/dm-1", "mnt_point": "/data/b", "size": 500, "used": 200},
     ]
@@ -2527,8 +2660,8 @@ def test_dedupe_fs_unit() -> None:
 
     # Same device, `used` a few blocks apart (a busy root fs statvfs'd twice, for
     # '/' and PrivateTmp's '/tmp'): within 0.1% of size it is one fs, '/' wins.
-    GB = 1024**3
-    jitter = [
+    GB: int = 1024**3
+    jitter: list[dict[str, str | int]] = [
         {
             "device_name": "/dev/nvme0n1p2",
             "mnt_point": "/tmp",
@@ -2549,7 +2682,9 @@ def test_dedupe_fs_unit() -> None:
     )
 
     # Empty device_name -> always kept (nothing to dedupe against).
-    no_dev = [{"device_name": "", "mnt_point": "/weird", "size": 1, "used": 0}]
+    no_dev: list[dict[str, str | int]] = [
+        {"device_name": "", "mnt_point": "/weird", "size": 1, "used": 0}
+    ]
     check(
         _mounts(no_dev) == ["/weird"],
         "dedupe: entry with empty device_name kept as-is",
@@ -2557,7 +2692,7 @@ def test_dedupe_fs_unit() -> None:
     )
 
     # Blank mount_point sharing a device/size/used with / -> / wins, blank dropped.
-    blank = [
+    blank: list[dict[str, str | int]] = [
         {"device_name": "/dev/dm-0", "mnt_point": "", "size": 200, "used": 148},
         {"device_name": "/dev/dm-0", "mnt_point": "/", "size": 200, "used": 148},
     ]
@@ -2575,11 +2710,11 @@ def test_mail_and_health_unit() -> None:
 
     import server
 
-    subject_utf8 = base64.b64encode("SMART error ✓ <b>&\"'".encode()).decode()
+    subject_utf8: str = base64.b64encode("SMART error ✓ <b>&\"'".encode()).decode()
     # postfix-shaped mbox: From_ line, headers, blank line, body, blank separator line.
     # Body lines starting with "From " are quoted as ">From " (mboxo), which is what
     # postfix local(8) writes and what the stdlib mailbox reader relies on.
-    fixture = (
+    fixture: str = (
         "From root@box  Mon Sep 14 08:00:00 2026\n"
         "Date: Mon, 14 Sep 2026 08:00:00 -0400\nFrom: root <root@box>\nTo: root\n"
         "Subject: cron output\n\n>From here quoted\n>From also quoted\n\n"
@@ -2591,11 +2726,13 @@ def test_mail_and_health_unit() -> None:
         "From root@box  Sun Sep 20 23:45:00 2026\n"
         "Date: not a date at all\nFrom: root <root@box>\nTo: root\nSubject: bad date\n\nbody\n\n"
     )
+    tmp: str
     with tempfile.TemporaryDirectory() as tmp:
-        spool = os.path.join(tmp, "spool")
+        spool: str = os.path.join(tmp, "spool")
+        f: TextIO
         with open(spool, "w", encoding="utf-8") as f:
             f.write(fixture)
-        m = server._get_mail(spool)
+        m: dict[str, Any] = server._get_mail(spool)
         check(
             m["status"] == "ok" and m["count"] == 4,
             "mail: fixture spool counts 4",
@@ -2629,19 +2766,16 @@ def test_mail_and_health_unit() -> None:
         # One unparseable message must neither vanish nor take the card down: it
         # stays in the list as a red "unreadable" row. The stdlib parser is
         # lenient (the bad/missing dates above don't raise), so force a raise.
-        real_mfb = server.email.message_from_bytes
+        real_mfb: Callable[..., email.message.Message] = server.email.message_from_bytes
 
-        def boom(data, *a, **k):
+        def boom(data: bytes | bytearray, *a: Any, **k: Any) -> email.message.Message:
             if b"smartd says hi" in data:  # the SMART-error message's body
                 raise ValueError("simulated unparseable message")
             return real_mfb(data, *a, **k)
 
-        server.email.message_from_bytes = boom
-        try:
-            mp = server._get_mail(spool)
-        finally:
-            server.email.message_from_bytes = real_mfb
-        bad = [x for x in mp["messages"] if x.get("error")]
+        with patch.object(server.email, "message_from_bytes", boom):
+            mp: dict[str, Any] = server._get_mail(spool)
+        bad: list[Any] = [x for x in mp["messages"] if x.get("error")]
         check(
             mp["status"] == "ok"
             and mp["count"] == 4
@@ -2653,7 +2787,7 @@ def test_mail_and_health_unit() -> None:
             "mail: an unparseable message is a red row (unreadable=1), the rest still show",
             describe(mp),
         )
-        state = os.path.join(tmp, "state.json")
+        state: str = os.path.join(tmp, "state.json")
         check(
             server._get_storage_health(state)["status"] == "missing",
             "health: missing snapshot is 'missing'",
@@ -2662,7 +2796,7 @@ def test_mail_and_health_unit() -> None:
             json.dump(
                 {"ts": time.time() - 60, "alarms": ["md0: DEGRADED"], "drives": []}, f
             )
-        h = server._get_storage_health(state)
+        h: dict[str, Any] = server._get_storage_health(state)
         check(
             h["status"] == "ok"
             and h["alarms"] == ["md0: DEGRADED"]
@@ -2684,7 +2818,7 @@ def test_mail_and_health_unit() -> None:
         )
         with open(state, "w") as f:
             f.write("{not json")
-        e = server._get_storage_health(state)
+        e: dict[str, Any] = server._get_storage_health(state)
         check(
             e["status"] == "error" and e["detail"] == "JSONDecodeError",
             "health: corrupt snapshot is 'error' with the exception name",
@@ -2703,8 +2837,8 @@ def test_text_view_unit() -> None:
     print(f"\n{BOLD}render_text unit tests{RESET}\n")
     import server
 
-    now = datetime.now(timezone.utc)
-    recs = [
+    now: datetime = datetime.now(timezone.utc)
+    recs: list[dict[str, Any]] = [
         {
             "timestamp": (now - timedelta(minutes=10 * (3 - k))).isoformat(),
             "cpu": {"avg": 10.0 * k, "max": 50.0},
@@ -2716,7 +2850,7 @@ def test_text_view_unit() -> None:
         for k in range(4)
     ]
     recs[1] = {"timestamp": recs[1]["timestamp"]}  # a record missing every metric
-    ascii_out = server.render_text(recs, style="ascii", title="box")
+    ascii_out: str = server.render_text(recs, style="ascii", title="box")
     check(ascii_out.isascii(), "ascii output is 7-bit")
     check(
         "GPU 0" in ascii_out and "  memory" in ascii_out and "DOWN" in ascii_out,
@@ -2725,43 +2859,51 @@ def test_text_view_unit() -> None:
     check(
         ascii_out.count("\n") > 10 and "History" in ascii_out, "history table rendered"
     )
-    uni = server.render_text(recs, style="unicode", view="latest", title="box")
+    uni: str = server.render_text(recs, style="unicode", view="latest", title="box")
     check(
         "█" in uni and "History" not in uni, "unicode latest-only has bars, no history"
     )
-    hist = server.render_text(recs, style="ascii", view="history", rows=2, table=True)
+    hist: str = server.render_text(
+        recs, style="ascii", view="history", rows=2, table=True
+    )
     check(
         "Snapshot" not in hist and hist.count(" | ") == 3,
         "history-only, rows capped",
         repr(hist.count(" | ")),
     )
-    newest_stamp = server._record_time(recs[-1]).strftime("%m-%d %H:%M:%S")
-    one = server.render_text(recs, style="ascii", view="history", rows=1, table=True)
-    one_rows = [line for line in one.splitlines() if " | " in line][1:]
+    newest_time: datetime | None = server._record_time(recs[-1])
+    assert newest_time is not None
+    newest_stamp: str = newest_time.strftime("%m-%d %H:%M:%S")
+    one: str = server.render_text(
+        recs, style="ascii", view="history", rows=1, table=True
+    )
+    one_rows: list[str] = [line for line in one.splitlines() if " | " in line][1:]
     check(
         len(one_rows) == 1 and one_rows[0].startswith(newest_stamp),
         "a one-row history table shows the newest record",
     )
-    roomy = server.render_text(recs, style="ascii", view="history", rows=24, table=True)
-    roomy_rows = [line for line in roomy.splitlines() if " | " in line][1:]
+    roomy: str = server.render_text(
+        recs, style="ascii", view="history", rows=24, table=True
+    )
+    roomy_rows: list[str] = [line for line in roomy.splitlines() if " | " in line][1:]
     check(
         len(roomy_rows) == len(recs) and roomy_rows[-1].startswith(newest_stamp),
         "a history table with spare rows includes every record",
     )
     check("No history records" in server.render_text([]), "empty history")
-    colored = server.render_text(recs, style="unicode", color=True)
+    colored: str = server.render_text(recs, style="unicode", color=True)
     check("\033[38;2;59;130;246m" in colored, "colour mode uses the frontend CPU blue")
     check("\033[" not in uni, "no escapes unless colour is on")
     check(
         " | " not in server.render_text(recs, style="ascii"), "no table unless table=1"
     )
-    wide = server.render_text(recs, width=180)
+    wide: str = server.render_text(recs, width=180)
     check(
         max(len(server._strip_ansi(x)) for x in wide.splitlines()) <= 180
         and any("Snapshot" in x and "History" in x for x in wide.splitlines()),
         "width=180 puts snapshot and history side by side within the width",
     )
-    narrow = server.render_text(recs, width=80)
+    narrow: str = server.render_text(recs, width=80)
     check(
         max(len(x) for x in narrow.splitlines()) <= 80,
         "width=80 stays within 80 columns",
@@ -2783,14 +2925,17 @@ def test_text_view_unit() -> None:
     )
     # Use the host's local timezone just as the real /text route does. The
     # timezone attached by astimezone() has only the offset at that instant.
-    old_tz = os.environ.get("TZ")
+    old_tz: str | None = os.environ.get("TZ")
     try:
         os.environ["TZ"] = "America/New_York"
         time.tzset()
+        utc_end: datetime
+        expected_start: str
         for utc_end, expected_start in [
             (datetime(2026, 3, 8, 16, tzinfo=timezone.utc), "23:00"),
             (datetime(2026, 11, 1, 17, tzinfo=timezone.utc), "01:00"),
         ]:
+            foot: list[str]
             _, _, foot, _ = server._render_history(
                 recs,
                 False,
@@ -2799,7 +2944,7 @@ def test_text_view_unit() -> None:
                 False,
                 now=utc_end.astimezone(),
             )
-            ticks = foot[1].strip()
+            ticks: str = foot[1].strip()
             check(
                 ticks.startswith(expected_start) and ticks.endswith("12:00"),
                 f"history time axis crosses DST correctly ({utc_end:%Y-%m-%d})",
@@ -2819,7 +2964,7 @@ def test_tui_unit() -> None:
     import server
     import tui
 
-    tty = {"TERM": "xterm-256color"}
+    tty: dict[str, str] = {"TERM": "xterm-256color"}
     check(
         tui.detect(tty, True, "UTF-8") == ("unicode", "256"),
         "xterm-256color + UTF-8 -> unicode, 256",
@@ -2846,14 +2991,16 @@ def test_tui_unit() -> None:
         "dumb + C locale -> ascii, off",
     )
     check(tui.detect(tty, False, "UTF-8") == ("simple", "off"), "not a tty -> simple")
-    red = "\033[31mabcdef\033[0m"
+    red: str = "\033[31mabcdef\033[0m"
     check(
         tui.clip(red, 3) == "\033[31mabc\033[0m",
         "clip keeps escapes whole",
         repr(tui.clip(red, 3)),
     )
     check(tui.clip("abc", 10) == "abc", "clip leaves short lines alone")
-    url = tui.build_url("http://h:8080/", {"view": "both", "hours": None, "width": 120})
+    url: str = tui.build_url(
+        "http://h:8080/", {"view": "both", "hours": None, "width": 120}
+    )
     check(
         url == "http://h:8080/text?view=both&width=120",
         "build_url drops unset params",
@@ -2869,8 +3016,8 @@ def test_tui_unit() -> None:
         or server._paint("x", "error", "16").startswith("\033[9"),
         "16-colour depth",
     )
-    tall = "\n".join(str(i) for i in range(50)) + "\n"
-    fit = server._fit_height(tall, 10, False)
+    tall: str = "\n".join(str(i) for i in range(50)) + "\n"
+    fit: str = server._fit_height(tall, 10, False)
     check(
         fit.count("\n") == 10 and "41 more lines" in fit,
         "height fit trims and says how much",
@@ -2881,6 +3028,8 @@ def test_tui_unit() -> None:
 def test_regression_suites() -> None:
     """Focused suites with their own subprocess/DOM/installer fixtures."""
     print(f"\n{BOLD}Failure and recovery regression suites{RESET}\n")
+    label: str
+    command: list[str]
     for label, command in [
         (
             "process argument privacy",
@@ -2906,15 +3055,16 @@ def test_regression_suites() -> None:
                 "  SKIP  browser recovery tests (HORATIO_SKIP_NODE=1, node not installed)"
             )
             continue
+        exc: OSError | subprocess.TimeoutExpired
         try:
-            result = subprocess.run(
+            result: subprocess.CompletedProcess[str] = subprocess.run(
                 command,
                 cwd=Path(__file__).parent,
                 capture_output=True,
                 text=True,
                 timeout=60,
             )
-            detail = (
+            detail: str = (
                 (result.stdout + result.stderr).strip()[-2000:]
                 if result.returncode
                 else ""
@@ -2945,15 +3095,15 @@ def main() -> int:
     test_text_view_unit()
     test_tui_unit()
     test_regression_suites()
-    port = free_port()
-    glances_port = free_port()
-    base = f"http://127.0.0.1:{port}"
+    port: int = free_port()
+    glances_port: int = free_port()
+    base: str = f"http://127.0.0.1:{port}"
 
     print(f"\n{BOLD}Starting server on :{port} (Glances :{glances_port}){RESET}\n")
-    log_path = Path(__file__).parent / "logs" / "test-server.log"
+    log_path: Path = Path(__file__).parent / "logs" / "test-server.log"
     log_path.parent.mkdir(exist_ok=True)
-    log_file = open(log_path, "w")
-    proc = subprocess.Popen(
+    log_file: TextIO = open(log_path, "w")
+    proc: subprocess.Popen[bytes] = subprocess.Popen(
         [
             sys.executable,
             "server.py",
@@ -2974,8 +3124,9 @@ def main() -> int:
             # Show last lines of server output for diagnosis
             log_file.flush()
             try:
-                tail = log_path.read_text().strip().split("\n")[-20:]
+                tail: list[str] = log_path.read_text().strip().split("\n")[-20:]
                 print(f"\n  {BOLD}Server output (last {len(tail)} lines):{RESET}")
+                line: str
                 for line in tail:
                     print(f"    {line}")
             except OSError:
@@ -2988,8 +3139,8 @@ def main() -> int:
 
         # "/" and "/config.json" are dedicated routes; the last entry is the only
         # thing exercising the /static mount that serves the whole UI.
-        static_endpoints = ["/", "/config.json", "/static/app.js"]
-        glances_endpoints = [
+        static_endpoints: list[str] = ["/", "/config.json", "/static/app.js"]
+        glances_endpoints: list[str] = [
             "/api/4/cpu",
             "/api/4/mem",
             "/api/4/memswap",
@@ -3000,8 +3151,8 @@ def main() -> int:
             "/api/4/load",
         ]
         # gpu may 404 if no GPU — treat as optional
-        optional_endpoints = ["/api/4/gpu"]
-        custom_endpoints = [
+        optional_endpoints: list[str] = ["/api/4/gpu"]
+        custom_endpoints: list[str] = [
             "/api/history",
             "/api/history/field/temps",
             "/api/history/field/processes",
@@ -3016,22 +3167,24 @@ def main() -> int:
         ]
         # gpu-info needs nvidia-smi — optional
         # disk/network-processes need pidstat/nethogs — optional
-        optional_custom = [
+        optional_custom: list[str] = [
             "/api/gpu-info",
             "/api/gpu-processes",
             "/api/disk-processes",
             "/api/network-processes",
         ]
 
+        path: str
         for path in static_endpoints + glances_endpoints + custom_endpoints:
+            e: Exception
             try:
-                r = httpx.get(f"{base}{path}", timeout=10)
+                r: httpx.Response = httpx.get(f"{base}{path}", timeout=10)
                 if check(
                     r.status_code == 200, f"GET {path}", f"status={r.status_code}"
                 ):
-                    validator = SCHEMAS.get(path)
+                    validator: Callable[[Any], bool] | None = SCHEMAS.get(path)
                     if validator:
-                        data = r.json()
+                        data: Any = r.json()
                         check(validator(data), f"  format {path}", describe(data))
             except Exception as e:
                 fail(f"GET {path}", str(e))
@@ -3066,7 +3219,8 @@ def main() -> int:
         import http.client
         from urllib.parse import urlsplit
 
-        host = urlsplit(base)
+        host: urllib.parse.SplitResult = urlsplit(base)
+        assert host.hostname is not None
         # Glances decodes again: double-encoded and ../-prefixed spellings too.
         for path in (
             "/api/4/x/../processlist",
@@ -3080,15 +3234,18 @@ def main() -> int:
             "/api/4/config",
         ):
             try:
-                conn = http.client.HTTPConnection(host.hostname, host.port, timeout=10)
+                conn: http.client.HTTPConnection = http.client.HTTPConnection(
+                    host.hostname, host.port, timeout=10
+                )
                 conn.request("GET", path)
-                status = conn.getresponse().status
+                status: int = conn.getresponse().status
                 conn.close()
                 check(status == 404, f"GET {path} (raw) is 404", f"status={status}")
             except Exception as e:
                 fail(f"GET {path} (raw)", str(e))
 
         # ── console text view ───────────────────────────────────────
+        want_color: bool
         for path, want_color in (
             ("/text", True),
             ("/text?style=simple", False),
@@ -3118,6 +3275,14 @@ def main() -> int:
             r.status_code == 200 and "def detect(" in r.text,
             "GET /tui.py serves the client",
         )
+        if r.status_code == 200:
+            served_tui: dict[str, Any] = {"__name__": "served_tui"}
+            exec(compile(r.text, "<served tui.py>", "exec"), served_tui)
+            with patch.dict(os.environ, {"HORATIO_URL": ""}):
+                check(
+                    served_tui["default_url"]() == base,
+                    "downloaded TUI defaults to the server that served it",
+                )
         r = httpx.get(f"{base}/help", timeout=10)
         check(
             r.status_code == 200 and "/text" in r.text and "/api/history" in r.text,
@@ -3134,9 +3299,11 @@ def main() -> int:
         print(f"\n{BOLD}Endpoint listing{RESET}\n")
         try:
             r = httpx.get(f"{base}/api/list-endpoints", timeout=10)
-            advertised = r.json().get("endpoints", []) if r.status_code == 200 else []
+            advertised: list[str] = (
+                r.json().get("endpoints", []) if r.status_code == 200 else []
+            )
             for path in custom_endpoints:
-                short = path.removeprefix("/api")
+                short: str = path.removeprefix("/api")
                 check(
                     short in advertised, f"GET /api/list-endpoints advertises {short}"
                 )
@@ -3148,8 +3315,8 @@ def main() -> int:
 
         try:
             r = httpx.post(f"{base}/api/history/record", timeout=30)
-            record_ok = check(r.status_code == 200, "POST /api/history/record")
-            record_data: dict = r.json() if record_ok else {}
+            record_ok: bool = check(r.status_code == 200, "POST /api/history/record")
+            record_data: dict[str, Any] = r.json() if record_ok else {}
         except Exception as e:
             fail("POST /api/history/record", str(e))
             record_data = {}
@@ -3158,7 +3325,7 @@ def main() -> int:
         try:
             r = httpx.get(f"{base}/api/history?hours=24", timeout=30)
             if check(r.status_code == 200, "GET /api/history"):
-                h = r.json()
+                h: dict[str, Any] = r.json()
                 check(
                     "raw_count" not in h and "max_points" not in h,
                     "history response has no downsampling keys (raw_count/max_points)",
@@ -3185,13 +3352,13 @@ def main() -> int:
         try:
             h = httpx.get(f"{base}/api/history?hours=24", timeout=30).json()
             check("cutoff" in h, "history response carries cutoff")
-            newest = max(
+            newest: Any = max(
                 (r["timestamp"] for r in h.get("records", [])),
                 key=lambda t: datetime.fromisoformat(t.replace("Z", "+00:00")),
                 default=None,
             )
             if newest:
-                newest_ts = datetime.fromisoformat(
+                newest_ts: float = datetime.fromisoformat(
                     newest.replace("Z", "+00:00")
                 ).timestamp()
                 r = httpx.get(
@@ -3199,7 +3366,7 @@ def main() -> int:
                     params={"hours": 24, "since": newest},
                     timeout=30,
                 )
-                d = r.json()
+                d: dict[str, Any] = r.json()
                 # The background initial sample can land between the two reads, so
                 # the contract is "strictly newer", not "nothing".
                 check(
@@ -3308,8 +3475,8 @@ def main() -> int:
         except Exception as e:
             fail("GET /api/history/raw", str(e))
 
-        record: dict = record_data.get("record", {})
-        drives_io: list = []
+        record: dict[str, Any] = record_data.get("record", {})
+        drives_io: list[dict[str, Any]] = []
 
         if record:
             check("cpu" in record, "history has cpu")
@@ -3321,9 +3488,10 @@ def main() -> int:
             check("ip" not in record, "POST record echo strips ip")
 
             # Verify disk_io stats structure (avg/min/max)
-            dio = record.get("disk_io", {})
+            dio: dict[str, Any] = record.get("disk_io", {})
+            key: str
             for key in ("read_mbps", "write_mbps"):
-                stats = dio.get(key, {})
+                stats: dict[str, float | None] = dio.get(key, {})
                 check(
                     isinstance(stats, dict) and {"avg", "min", "max"} <= stats.keys(),
                     f"disk_io.{key} has avg/min/max",
@@ -3332,7 +3500,7 @@ def main() -> int:
             # CPU core spread is optional (present only when /api/4/percpu is
             # readable); when present it must be an ordered min<=median<=max.
             if "cpu_cores" in record:
-                cc = record["cpu_cores"]
+                cc: dict[str, Any] = record["cpu_cores"]
                 check(
                     isinstance(cc, dict)
                     and {"min", "median", "max"} <= cc.keys()
@@ -3343,7 +3511,7 @@ def main() -> int:
 
             # CPU clocks are optional (cpufreq sysfs); when present, ordered and in MHz.
             if "cpu_freq" in record:
-                cf = record["cpu_freq"]
+                cf: dict[str, Any] | None = record["cpu_freq"]
                 check(
                     isinstance(cf, dict)
                     and {"min", "median", "avg", "max"} <= cf.keys()
@@ -3356,8 +3524,10 @@ def main() -> int:
             # Per-process history: the key is there exactly when the setting is on
             # (off unless this box's config.json enables it).
             try:
-                hs = httpx.get(f"{base}/api/history/settings", timeout=10).json()
-                on = hs.get("processes_enabled") is True
+                hs: dict[str, Any] = httpx.get(
+                    f"{base}/api/history/settings", timeout=10
+                ).json()
+                on: bool = hs.get("processes_enabled") is True
                 check(
                     ("processes" in record) == on
                     and (
@@ -3375,7 +3545,7 @@ def main() -> int:
             # Verify per-drive stats structure
             drives_io = dio.get("drives", [])
             for d in drives_io:
-                name = d.get("name", "?")
+                name: str = d.get("name", "?")
                 for key in ("read_mbps", "write_mbps"):
                     stats = d.get(key, {})
                     check(
@@ -3388,21 +3558,26 @@ def main() -> int:
             # Served rates obey the configured caps (the box's config.json may
             # set its own; defaults otherwise).
             try:
-                cfg = httpx.get(f"{base}/config.json", timeout=10).json()
-                lims = cfg.get("limits") if isinstance(cfg.get("limits"), dict) else {}
+                cfg: dict[str, Any] = httpx.get(
+                    f"{base}/config.json", timeout=10
+                ).json()
+                configured_limits: Any = cfg.get("limits")
+                lims: dict[str, Any] = (
+                    configured_limits if isinstance(configured_limits, dict) else {}
+                )
 
                 def cap_of(key: str, default: float) -> float:
                     # The server's _cfg_num rules: a number in [1, 1e9], else default.
-                    v = lims.get(key, default)
-                    ok_ = (
+                    v: Any = lims.get(key, default)
+                    ok_: bool = (
                         isinstance(v, (int, float))
                         and not isinstance(v, bool)
                         and 1 <= v <= 1e9
                     )
                     return float(v) if ok_ else default
 
-                dio_cap = cap_of("disk_io_mbps", 15000.0)
-                first_hist = (
+                dio_cap: float = cap_of("disk_io_mbps", 15000.0)
+                first_hist: dict[str, Any] = (
                     httpx.get(f"{base}/api/history?hours=24", timeout=30)
                     .json()
                     .get("records")
@@ -3411,16 +3586,20 @@ def main() -> int:
 
                 def within(stats: object, cap: float) -> bool:
                     return isinstance(stats, dict) and all(
-                        v is None or 0 <= v <= cap for v in stats.values()
+                        v is None or (isinstance(v, (int, float)) and 0 <= v <= cap)
+                        for v in stats.values()
                     )
 
+                label: str
+                rec_: dict[str, Any]
                 for label, rec_ in (("echo", record), ("history", first_hist)):
-                    net = rec_.get("network", {})
-                    dio_ = rec_.get("disk_io", {})
+                    net: dict[str, Any] = rec_.get("network", {})
+                    dio_: dict[str, Any] = rec_.get("disk_io", {})
 
                     def nonneg(stats: object) -> bool:
                         return isinstance(stats, dict) and all(
-                            v is None or v >= 0 for v in stats.values()
+                            v is None or (isinstance(v, (int, float)) and v >= 0)
+                            for v in stats.values()
                         )
 
                     # Each drive is capped; totals are uncapped sums (non-negative).
@@ -3453,10 +3632,12 @@ def main() -> int:
         print(f"\n{BOLD}Live / history consistency{RESET}\n")
 
         try:
-            fs_resp = httpx.get(f"{base}/api/4/fs", timeout=10)
-            diskio_resp = httpx.get(f"{base}/api/4/diskio", timeout=10)
-            fs_data: list = fs_resp.json() if fs_resp.status_code == 200 else []
-            diskio_data: list = (
+            fs_resp: httpx.Response = httpx.get(f"{base}/api/4/fs", timeout=10)
+            diskio_resp: httpx.Response = httpx.get(f"{base}/api/4/diskio", timeout=10)
+            fs_data: list[dict[str, Any]] = (
+                fs_resp.json() if fs_resp.status_code == 200 else []
+            )
+            diskio_data: list[dict[str, Any]] = (
                 diskio_resp.json() if diskio_resp.status_code == 200 else []
             )
         except Exception as e:
@@ -3465,19 +3646,22 @@ def main() -> int:
 
         # Build the same mapping the dashboard uses
         device_to_mount: dict[str, str] = {}
+        fs: dict[str, Any]
         for fs in fs_data:
             dev: str = fs.get("device_name", "")
             mnt: str = fs.get("mnt_point", "")
             if dev and mnt and dev.startswith("/dev/"):
                 device_to_mount[dev[5:]] = mnt
 
-        diskio_names = {d.get("disk_name") for d in diskio_data if d.get("disk_name")}
+        diskio_names: set[str] = {
+            d["disk_name"] for d in diskio_data if d.get("disk_name")
+        }
 
         # Drives that are both in fs and diskio should appear in history
-        expected_mounts = {
+        expected_mounts: set[str] = {
             device_to_mount[name] for name in device_to_mount if name in diskio_names
         }
-        history_drive_names = {d.get("name") for d in drives_io}
+        history_drive_names: set[str | None] = {d.get("name") for d in drives_io}
 
         if expected_mounts:
             check(
@@ -3493,10 +3677,12 @@ def main() -> int:
         # close to what we'd compute from live bytes / 1e6 (same conversion).
         # We can't compare exact values (different time windows), but we can
         # verify the order of magnitude is the same (not off by 1024/1000).
+        drive_hist: dict[str, Any]
         for drive_hist in drives_io:
             name = drive_hist.get("name", "?")
             # Find the diskio device for this mount
-            dev_name = None
+            dev_name: str | None = None
+            dname: str
             for dname, mnt in device_to_mount.items():
                 if mnt == name:
                     dev_name = dname
@@ -3504,16 +3690,16 @@ def main() -> int:
             if dev_name is None:
                 continue
 
-            live_disk = next(
+            live_disk: dict[str, Any] | None = next(
                 (d for d in diskio_data if d.get("disk_name") == dev_name), None
             )
             if live_disk is None:
                 continue
 
-            live_read = (live_disk.get("read_bytes_rate_per_sec") or 0) / 1e6
-            hist_read_avg = drive_hist.get("read_mbps", {}).get("avg", 0)
-            live_write = (live_disk.get("write_bytes_rate_per_sec") or 0) / 1e6
-            hist_write_avg = drive_hist.get("write_mbps", {}).get("avg", 0)
+            live_read: float = (live_disk.get("read_bytes_rate_per_sec") or 0) / 1e6
+            hist_read_avg: float = drive_hist.get("read_mbps", {}).get("avg", 0)
+            live_write: float = (live_disk.get("write_bytes_rate_per_sec") or 0) / 1e6
+            hist_write_avg: float = drive_hist.get("write_mbps", {}).get("avg", 0)
 
             # Both should be non-negative
             check(
@@ -3529,7 +3715,7 @@ def main() -> int:
 
         # ── Summary ─────────────────────────────────────────────────
         print(f"\n{BOLD}{'─' * 40}{RESET}")
-        total = passes + fails
+        total: int = passes + fails
         if fails == 0:
             print(f"{GREEN}{BOLD}All {total} checks passed{RESET}\n")
         else:
@@ -3540,7 +3726,7 @@ def main() -> int:
         log_file.close()
         # Kill the entire process group (server + Glances child)
         try:
-            pgid = os.getpgid(proc.pid)
+            pgid: int = os.getpgid(proc.pid)
             os.killpg(pgid, signal.SIGTERM)
             try:
                 proc.wait(timeout=5)
