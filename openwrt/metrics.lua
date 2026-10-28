@@ -347,15 +347,16 @@ end
 ------------------------------------------------------------------------
 
 function M.fs()
-    -- `-k -T` (1-KiB blocks + fs type) is portable across BusyBox and GNU df; the
+    -- `-P -k -T` (one row per filesystem, 1-KiB blocks, fs type) works with
+    -- BusyBox and GNU df; -P keeps long device names on the same line. The
     -- GNU-only `-B1` (raw bytes) isn't supported by OpenWrt's default BusyBox df,
     -- so it silently produced nothing there. We convert KiB -> bytes below.
-    local output = run_cmd_timeout(5, "df -k -T")
+    local output = run_cmd_timeout(5, "df -P -k -T")
     -- Empty output means df failed/timed out or is missing (io.popen gives us no
     -- exit status here, and empty stdout reads back as ""); surface it to the
     -- server log instead of returning a silently-blank Drive Usage card.
     if not output or output:match("^%s*$") then
-        io.stderr:write("metrics: `df -k -T` produced no output — Drive Usage unavailable\n")
+        io.stderr:write("metrics: `df -P -k -T` produced no output — Drive Usage unavailable\n")
         return {}
     end
 

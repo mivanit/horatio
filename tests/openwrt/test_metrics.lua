@@ -1,4 +1,4 @@
--- CPU topology and public IP fixtures; no native modules, network or file writes.
+-- CPU, filesystem and public IP fixtures; no native modules, network or file writes.
 -- Usage: lua5.1 tests/openwrt/test_metrics.lua
 local script_dir = (arg and arg[0] or ""):match("(.*)[/\\][^/\\]*$") or "."
 script_dir = script_dir .. "/../../openwrt"
@@ -83,6 +83,31 @@ check(cpu.physical_cores == 2 and cpu.logical_cores == 2 and cpu.model == "ARM C
 files["/proc/cpuinfo"] = nil
 cpu = metrics.cpu_info()
 check(cpu.physical_cores == 1 and cpu.logical_cores == 1, "missing cpuinfo keeps safe defaults")
+
+-- BusyBox wraps long device names unless -P requests one row per filesystem.
+-- Preserve the real output shapes for both commands so removing -P fails here.
+local df_header = "Filesystem           Type       1024-blocks Used Available Capacity Mounted on\n"
+local other_drives = "/dev/mmcblk0p1        ext4        1048576 262144 786432 25% /\n"
+    .. "tmpfs                tmpfs       524288 0 524288 0% /tmp\n"
+replies = {
+    ["df -k -T"] = df_header
+        .. "/dev/mapper/encrypted-storage\n"
+        .. "                     ext4        8388608 4194304 4194304 50% /mnt/data\n"
+        .. other_drives,
+    ["df -P -k -T"] = df_header
+        .. "/dev/mapper/encrypted-storage ext4 8388608 4194304 4194304 50% /mnt/data\n"
+        .. other_drives,
+    ["readlink -f '/dev/mapper/encrypted-storage'"] = "/dev/dm-0\n",
+    ["readlink -f '/dev/mmcblk0p1'"] = "/dev/mmcblk0p1\n",
+}
+local drives = metrics.fs()
+check(#drives == 2, "long and short device names survive df parsing; tmpfs stays excluded")
+check(drives[1].device_name == "/dev/dm-0" and drives[1].mnt_point == "/mnt/data"
+    and drives[1].size == 8589934592 and drives[1].used == 4294967296
+    and drives[1].percent == 50,
+    "long device retains identity, mount and exact 8 GiB capacity")
+check(drives[2].device_name == "/dev/mmcblk0p1" and drives[2].mnt_point == "/",
+    "short device parsing is unchanged")
 
 local function public_ip(first, dual)
     files[cache_path] = nil
