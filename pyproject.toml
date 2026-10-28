@@ -25,6 +25,7 @@ constraint-dependencies = [
 
 [dependency-groups]
 dev = [
+    "pytest>=9",
     "ruff",
     "ty",
 ]
@@ -33,3 +34,8 @@ dev = [
 extend-select = ["ANN", "I"]
 # JSON payloads and mock forwarding still need dynamic types.
 ignore = ["ANN401"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit", "tests/integration", "tests/installers", "tests/collector", "tests/frontend"]
+addopts = "--import-mode=importlib --strict-markers -ra"
+markers = ["integration: real dashboard and Glances HTTP tests"]

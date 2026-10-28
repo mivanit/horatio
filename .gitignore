@@ -9,3 +9,4 @@ nginx/*.services
 !nginx/example.services
 __pycache__/
 *.pyc
+.pytest_cache/

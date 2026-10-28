@@ -154,7 +154,8 @@ again, don't put this on anything besides a trusted LAN!
 ```
 horatio/
 ├── server.py                    # FastAPI server + Glances subprocess + history recorder
-├── test.py                      # Integration tests (starts its own server)
+├── tests/                       # pytest suites, browser fixtures, and native Lua checks
+├── scripts/                     # development helpers (native Lua/Nixio build)
 ├── index.html, static/          # Frontend: app.js (polling, cards, history), config.js, charts.js, util.js, style.css
 ├── config.example.json          # -> config.json (per machine, gitignored)
 ├── horatio.service              # systemd unit template (path and user rendered by install.sh)
@@ -168,25 +169,43 @@ horatio/
 
 ## Development
 
-Node.js 18+ is required for the browser tests run by `test.py`, including
-the request timeout tests against a temporary localhost HTTP server.
+The test suite uses pytest. Node.js 18+ is required for the browser fixtures;
+the live integration tests start the real dashboard and Glances on localhost.
 
 ```bash
 uv sync --locked
 make format         # Ruff fixes and formatting (changes Python files)
 make check-format   # Ruff lint and formatting checks
 make typing         # ty type checking
-make test-linux     # Python/Glances integration + JS, installer, collector fixtures
+make test           # Linux pytest suite (same as make test-linux)
+make check          # formatting, typing, and Linux tests; the default target
 make test-openwrt   # native Lua tests; requires Lua 5.1 and Nixio
-make test           # both test suites; missing dependencies fail explicitly
-make check          # formatting, typing, and all tests (also the default target)
+make test-all       # Linux and native Lua suites
+make check-all      # formatting, typing, and both suites
 ```
 
-The Linux suite requires Node.js and Git in addition to the Python dependencies.
-`make test-linux` copies current tracked and nonignored untracked source into a
-temporary directory, creates a fresh config from `config.example.json`, and runs
-the suite there. It preserves the checkout's config, password, and history.
-Running `uv run python test.py` directly still records into the checkout's `logs/`.
+Tests are grouped by responsibility:
+
+- `tests/unit/`: history recovery, metrics, privacy, authentication, and text/TUI rendering.
+- `tests/integration/`: HTTP contracts against a real dashboard and Glances.
+- `tests/installers/` and `tests/collector/`: isolated service and hardware fixtures.
+- `tests/frontend/`: Node.js fixtures for browser behavior and history caching.
+- `tests/openwrt/`: native Lua checks, including history under UTC and America/New_York.
+
+Pytest fixtures copy application code and `config.example.json` into temporary
+directories before importing the server or starting it. Config, passwords, and
+history from the checkout are never copied or changed. This isolation also
+applies when invoking pytest directly; no snapshot wrapper is needed.
+
+```bash
+uv run --locked pytest tests/unit -q           # unit tests only
+uv run --locked pytest -m 'not integration'   # omit the live HTTP server
+make test PYTEST_ARGS='-k history -v'          # select tests by name
+```
+
+The default suite does not require Lua. `make test-openwrt` and `make check-all`
+fail explicitly if native dependencies are unavailable; they never silently
+skip the OpenWrt checks. CI runs both suites in separate jobs.
 
 [GitHub Actions](.github/workflows/check.yml) runs these Make targets on pushes,
 pull requests, and manual dispatches. Formatting, typing, Linux tests, and native
@@ -234,11 +253,23 @@ make test-openwrt               # history runs under UTC and America/New_York
 LUA_CPATH='/path/to/nixio/?.so;;' make test-openwrt LUA=/path/to/lua5.1
 ```
 
+To build the same pinned Lua/Nixio dependencies used in CI without installing
+system-wide modules (requires a C toolchain, Make, libcrypt development headers,
+`curl`, Git, and `tar`):
+
+```sh
+sh scripts/setup-lua-tests.sh /tmp/horatio-native-lua
+LUA_CPATH='/tmp/horatio-native-lua/luci/libs/luci-lib-nixio/src/?.so;;' \
+  make test-openwrt LUA=/tmp/horatio-native-lua/lua-5.1.5/src/lua
+```
+
+Use a fresh build directory when running the setup script again.
+
 The tests use temporary files, forked contenders, and injected I/O failures;
 they do not touch recorded history or the host's service configuration.
 They require Lua 5.1, native Nixio, gzip, and timezone data. On an OpenWrt box
-without GNU Make, run `lua openwrt/test_handler.lua`,
-`lua openwrt/test_metrics.lua`, and `lua openwrt/test_history.lua` directly.
+without GNU Make, run `lua tests/openwrt/test_handler.lua`,
+`lua tests/openwrt/test_metrics.lua`, and `lua tests/openwrt/test_history.lua` directly.
 
 The appropriate environment depends on the claim being tested:
 

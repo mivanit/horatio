@@ -1,6 +1,6 @@
 """Exercise nginx installation and recovery using isolated files and services.
 
-Run with python3 nginx/test_install.py; no privileges, network or nginx required.
+Run with uv run pytest tests/installers/test_nginx.py; no privileges, network or nginx required.
 """
 
 from __future__ import annotations
@@ -9,13 +9,13 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
-import unittest
-import unittest.mock
 from pathlib import Path
 from typing import Any, Literal, TextIO
 
-ROOT: Path = Path(__file__).resolve().parents[1]
+import pytest
+
+from tests.support import ROOT
+
 MOCK: str = r"""#!/usr/bin/python3
 import json, os, pathlib, subprocess, sys
 root = pathlib.Path(os.environ["HORATIO_NGINX_TEST_ROOT"])
@@ -152,13 +152,14 @@ elif name == "rm":
 """
 
 
-class InstallerTests(unittest.TestCase):
-    def setUp(self: InstallerTests) -> None:
-        temp: tempfile.TemporaryDirectory[str] = tempfile.TemporaryDirectory(
-            prefix="horatio-nginx-test-"
-        )
-        self.addCleanup(temp.cleanup)
-        self.root: Path = Path(temp.name)
+class TestNginxInstaller:
+    @pytest.fixture(autouse=True)
+    def setup(self: TestNginxInstaller, tmp_path: Path) -> None:
+        self.prepare_root(tmp_path)
+
+    def prepare_root(self: TestNginxInstaller, root: Path) -> None:
+        self.root: Path = root
+        root.mkdir(parents=True, exist_ok=True)
         self.bin: Path = self.root / "bin"
         self.bin.mkdir()
         self.nginx: Path = self.root / "etc/nginx"
@@ -224,7 +225,7 @@ class InstallerTests(unittest.TestCase):
         )
         (self.root / "uci.json").write_text(self.original_uci)
 
-    def prepare_uninstall(self: InstallerTests) -> None:
+    def prepare_uninstall(self: TestNginxInstaller) -> None:
         self.prepare("openwrt")
         self.conf.write_text("# generated configuration\n# proxy_pass\n")
         self.runtime_conf.parent.mkdir(parents=True)
@@ -286,7 +287,7 @@ http {
         (self.root / "uci.json").write_text(self.original_uci)
 
     def run_uninstall(
-        self: InstallerTests, failure: str = "", **env: str
+        self: TestNginxInstaller, failure: str = "", **env: str
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["/bin/sh", str(self.script), str(self.services), "--uninstall"],
@@ -299,17 +300,17 @@ http {
         )
 
     def test_uninstall_releases_ports_disables_nginx_and_preserves_extra_content(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare_uninstall()
         asset: Path = self.index.parent / "custom-logo.svg"
         asset.write_text("keep this user asset")
         result: subprocess.CompletedProcess[str] = self.run_uninstall()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(self.conf.exists())
-        self.assertFalse(self.index.exists())
-        self.assertEqual(asset.read_text(), "keep this user asset")
-        self.assertEqual((self.root / "nginx-enabled").read_text(), "0")
+        assert result.returncode == 0, result.stderr
+        assert not self.conf.exists()
+        assert not self.index.exists()
+        assert asset.read_text() == "keep this user asset"
+        assert (self.root / "nginx-enabled").read_text() == "0"
         events: list[dict[str, Any]] = self.events()
         stop: int = next(
             i
@@ -321,44 +322,44 @@ http {
             for i, e in enumerate(events)
             if e["command"] == "uhttpd-service" and e["args"] == ["restart"]
         )
-        self.assertLess(stop, restart)
-        self.assertFalse(
-            any(
+        assert stop < restart
+        assert not any(
+            (
                 e["command"] == "nginx-service"
                 and e["args"] in (["start"], ["restart"])
                 for e in events
             )
         )
-        self.assertEqual(
-            json.loads((self.root / "uci.json").read_text())["uhttpd.main.listen_http"],
-            "0.0.0.0:80",
+        assert (
+            json.loads((self.root / "uci.json").read_text())["uhttpd.main.listen_http"]
+            == "0.0.0.0:80"
         )
-        self.assertEqual(list((self.root / "www/luci").iterdir()), [])
-        self.assertEqual(list(self.nginx.glob(".horatio-*")), [])
+        assert list((self.root / "www/luci").iterdir()) == []
+        assert list(self.nginx.glob(".horatio-*")) == []
 
     def test_uninstall_failed_port_handoff_restores_files_uci_and_nginx(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare_uninstall()
         config: bytes
         index: bytes
         config, index = self.conf.read_bytes(), self.index.read_bytes()
         result: subprocess.CompletedProcess[str] = self.run_uninstall("luci-probe")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("did not serve its verification file", result.stderr)
-        self.assertEqual(self.conf.read_bytes(), config)
-        self.assertEqual(self.index.read_bytes(), index)
-        self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
-        self.assertEqual((self.root / "nginx-enabled").read_text(), "1")
+        assert result.returncode != 0
+        assert "did not serve its verification file" in result.stderr
+        assert self.conf.read_bytes() == config
+        assert self.index.read_bytes() == index
+        assert (self.root / "uci.json").read_text() == self.original_uci
+        assert (self.root / "nginx-enabled").read_text() == "1"
         state: dict[str, bool] = json.loads(
             (self.root / "nginx-service-state.json").read_text()
         )
-        self.assertTrue(state["running"])
-        self.assertEqual(list((self.root / "www/luci").iterdir()), [])
-        self.assertEqual(list(self.nginx.glob(".horatio-*")), [])
+        assert state["running"]
+        assert list((self.root / "www/luci").iterdir()) == []
+        assert list(self.nginx.glob(".horatio-*")) == []
 
     def test_uninstall_failed_deferred_removal_restores_original_files(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare_uninstall()
         config: bytes
@@ -367,53 +368,57 @@ http {
         (self.bin / "rm").unlink()
         (self.bin / "rm").symlink_to(self.mock)
         result: subprocess.CompletedProcess[str] = self.run_uninstall("remove-index")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("injected index removal failure", result.stderr)
-        self.assertEqual(self.conf.read_bytes(), config)
-        self.assertEqual(self.index.read_bytes(), index)
-        self.assertEqual(self.conf.stat().st_mode & 0o777, 0o640)
-        self.assertEqual(self.index.stat().st_mode & 0o777, 0o600)
-        self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
-        self.assertEqual((self.root / "nginx-enabled").read_text(), "1")
-        self.assertTrue(
-            json.loads((self.root / "nginx-service-state.json").read_text())["running"]
-        )
-        self.assertEqual(list(self.nginx.glob(".horatio-*")), [])
+        assert result.returncode != 0
+        assert "injected index removal failure" in result.stderr
+        assert self.conf.read_bytes() == config
+        assert self.index.read_bytes() == index
+        assert self.conf.stat().st_mode & 511 == 416
+        assert self.index.stat().st_mode & 511 == 384
+        assert (self.root / "uci.json").read_text() == self.original_uci
+        assert (self.root / "nginx-enabled").read_text() == "1"
+        assert json.loads((self.root / "nginx-service-state.json").read_text())[
+            "running"
+        ]
+        assert list(self.nginx.glob(".horatio-*")) == []
 
     def test_uninstall_failed_handoff_preserves_disabled_stopped_state(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare_uninstall()
         result: subprocess.CompletedProcess[str] = self.run_uninstall(
             "luci-probe", HORATIO_WAS_RUNNING="0", HORATIO_WAS_ENABLED="0"
         )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual((self.root / "nginx-enabled").read_text(), "0")
-        self.assertFalse(
-            any(
+        assert result.returncode != 0
+        assert (self.root / "nginx-enabled").read_text() == "0"
+        assert not any(
+            (
                 e["command"] == "nginx-service" and e["args"] == ["start"]
                 for e in self.events()
             )
         )
-        self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
-        self.assertTrue(self.conf.is_file() and self.index.is_file())
+        assert (self.root / "uci.json").read_text() == self.original_uci
+        assert self.conf.is_file() and self.index.is_file()
 
-    def test_uninstall_failed_recovery_retains_backups(self: InstallerTests) -> None:
+    def test_uninstall_failed_recovery_retains_backups(
+        self: TestNginxInstaller,
+    ) -> None:
         self.prepare_uninstall()
         result: subprocess.CompletedProcess[str] = self.run_uninstall(
             "luci-probe", HORATIO_FAIL_RESTORE="uhttpd"
         )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("recovery was incomplete", result.stderr)
+        assert result.returncode != 0
+        assert "recovery was incomplete" in result.stderr
         backups: list[Path] = list(self.nginx.glob(".horatio-*"))
-        self.assertEqual(len(backups), 1)
-        self.assertEqual((backups[0] / "config").read_bytes(), self.conf.read_bytes())
-        self.assertEqual((backups[0] / "index").read_bytes(), self.index.read_bytes())
-        self.assertEqual((backups[0] / "uhttpd").read_text(), self.original_uci)
-        self.assertEqual(list((self.root / "www/luci").iterdir()), [])
+        assert len(backups) == 1
+        assert (backups[0] / "config").read_bytes() == self.conf.read_bytes()
+        assert (backups[0] / "index").read_bytes() == self.index.read_bytes()
+        assert (backups[0] / "uhttpd").read_text() == self.original_uci
+        assert list((self.root / "www/luci").iterdir()) == []
 
     def test_uninstall_unknown_setups_refused_before_any_mutation(
-        self: InstallerTests,
+        self: TestNginxInstaller,
+        subtests: pytest.Subtests,
+        tmp_path: Path,
     ) -> None:
         kind: str
         for kind in (
@@ -427,59 +432,56 @@ http {
             "module",
             "restrict",
         ):
-            with self.subTest(kind=kind):
-                case: InstallerTests = InstallerTests()
-                case.setUp()
-                try:
-                    case.prepare_uninstall()
-                    data: dict[str, str] = json.loads(
-                        (case.root / "nginx-uci.json").read_text()
+            with subtests.test(kind=kind):
+                case: TestNginxInstaller = TestNginxInstaller()
+                case.prepare_root(tmp_path / kind)
+                case.prepare_uninstall()
+                data: dict[str, str] = json.loads(
+                    (case.root / "nginx-uci.json").read_text()
+                )
+                env: dict[str, str] = {}
+                if kind == "manual":
+                    env["HORATIO_UCI_ENABLED"] = "false"
+                elif kind == "server":
+                    data["nginx.custom"] = "server"
+                elif kind == "root":
+                    data["nginx._lan.root"] = "/www/custom"
+                elif kind == "listen":
+                    data["nginx._lan.listen"] = "8443 ssl"
+                elif kind in ("locations", "conf"):
+                    (case.nginx / "conf.d" / ("custom." + kind)).write_text(
+                        "# keep custom site\n"
                     )
-                    env: dict[str, str] = {}
-                    if kind == "manual":
-                        env["HORATIO_UCI_ENABLED"] = "false"
-                    elif kind == "server":
-                        data["nginx.custom"] = "server"
-                    elif kind == "root":
-                        data["nginx._lan.root"] = "/www/custom"
-                    elif kind == "listen":
-                        data["nginx._lan.listen"] = "8443 ssl"
-                    elif kind in ("locations", "conf"):
-                        (case.nginx / "conf.d" / ("custom." + kind)).write_text(
-                            "# keep custom site\n"
-                        )
-                    elif kind == "template":
-                        f: TextIO
-                        with (case.nginx / "uci.conf.template").open("a") as f:
-                            f.write("# custom include\ninclude custom.conf;\n")
-                    elif kind == "module":
-                        (case.nginx / "module.d/custom.module").write_text(
-                            "include custom.conf;\n"
-                        )
-                    elif kind == "restrict":
-                        (case.nginx / "restrict_locally").write_text(
-                            "location /custom { proxy_pass http://localhost:9000; }\n"
-                        )
-                    (case.root / "nginx-uci.json").write_text(json.dumps(data))
-                    config: bytes
-                    index: bytes
-                    config, index = case.conf.read_bytes(), case.index.read_bytes()
-                    result: subprocess.CompletedProcess[str] = case.run_uninstall(**env)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("no files or services were changed", result.stderr)
-                    self.assertEqual(case.conf.read_bytes(), config)
-                    self.assertEqual(case.index.read_bytes(), index)
-                    self.assertEqual(
-                        (case.root / "uci.json").read_text(), case.original_uci
+                elif kind == "template":
+                    f: TextIO
+                    with (case.nginx / "uci.conf.template").open("a") as f:
+                        f.write("# custom include\ninclude custom.conf;\n")
+                elif kind == "module":
+                    (case.nginx / "module.d/custom.module").write_text(
+                        "include custom.conf;\n"
                     )
-                    self.assertFalse(
-                        any(e["command"].endswith("-service") for e in case.events())
+                elif kind == "restrict":
+                    (case.nginx / "restrict_locally").write_text(
+                        "location /custom { proxy_pass http://localhost:9000; }\n"
                     )
-                    self.assertEqual(list(case.nginx.glob(".horatio-*")), [])
-                finally:
-                    case.doCleanups()
+                (case.root / "nginx-uci.json").write_text(json.dumps(data))
+                config: bytes
+                index: bytes
+                config, index = case.conf.read_bytes(), case.index.read_bytes()
+                result: subprocess.CompletedProcess[str] = case.run_uninstall(**env)
+                assert result.returncode != 0
+                assert "no files or services were changed" in result.stderr
+                assert case.conf.read_bytes() == config
+                assert case.index.read_bytes() == index
+                assert (case.root / "uci.json").read_text() == case.original_uci
+                assert not any(
+                    (e["command"].endswith("-service") for e in case.events())
+                )
+                assert list(case.nginx.glob(".horatio-*")) == []
 
-    def test_uninstall_accepts_stock_ipv4_only_routing(self: InstallerTests) -> None:
+    def test_uninstall_accepts_stock_ipv4_only_routing(
+        self: TestNginxInstaller,
+    ) -> None:
         self.prepare_uninstall()
         path: Path = self.root / "nginx-uci.json"
         data: dict[str, str] = json.loads(path.read_text())
@@ -487,21 +489,21 @@ http {
         data["nginx._redirect2ssl.listen"] = "80"
         path.write_text(json.dumps(data))
         result: subprocess.CompletedProcess[str] = self.run_uninstall()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(self.index.parent.exists())
+        assert result.returncode == 0, result.stderr
+        assert not self.index.parent.exists()
 
     def test_uninstall_invalid_probe_home_does_not_stop_services(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare_uninstall()
         (self.root / "www/luci").rmdir()
         result: subprocess.CompletedProcess[str] = self.run_uninstall()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("not a directory", result.stderr)
-        self.assertTrue(self.conf.is_file() and self.index.is_file())
-        self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
-        self.assertFalse(
-            any(
+        assert result.returncode != 0
+        assert "not a directory" in result.stderr
+        assert self.conf.is_file() and self.index.is_file()
+        assert (self.root / "uci.json").read_text() == self.original_uci
+        assert not any(
+            (
                 e["command"].endswith("-service")
                 and e["args"] not in (["running"], ["enabled"])
                 for e in self.events()
@@ -509,7 +511,7 @@ http {
         )
 
     def prepare(
-        self: InstallerTests,
+        self: TestNginxInstaller,
         platform: Literal["ubuntu", "openwrt"] = "ubuntu",
         *,
         nginx: bool = True,
@@ -543,7 +545,7 @@ http {
         self.default.symlink_to("../sites-available/default")
 
     def run_install(
-        self: InstallerTests, failure: str = "", **env: str
+        self: TestNginxInstaller, failure: str = "", **env: str
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["/bin/sh", str(self.script), str(self.services)],
@@ -553,7 +555,7 @@ http {
             timeout=10,
         )
 
-    def events(self: InstallerTests) -> list[dict[str, Any]]:
+    def events(self: TestNginxInstaller) -> list[dict[str, Any]]:
         path: Path = self.root / "events"
         return (
             [json.loads(line) for line in path.read_text().splitlines()]
@@ -561,17 +563,17 @@ http {
             else []
         )
 
-    def assert_restored(self: InstallerTests) -> None:
-        self.assertEqual(self.conf.read_text(), "# previous working config\n")
-        self.assertEqual(self.conf.stat().st_mode & 0o777, 0o640)
-        self.assertEqual(self.index.read_text(), "previous index\n")
-        self.assertEqual(self.index.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(os.readlink(self.default), "../sites-available/default")
-        self.assertEqual(self.default_target.read_text(), "# distribution default\n")
-        self.assertEqual(list(self.nginx.glob(".horatio-*")), [])
+    def assert_restored(self: TestNginxInstaller) -> None:
+        assert self.conf.read_text() == "# previous working config\n"
+        assert self.conf.stat().st_mode & 511 == 416
+        assert self.index.read_text() == "previous index\n"
+        assert self.index.stat().st_mode & 511 == 384
+        assert os.readlink(self.default) == "../sites-available/default"
+        assert self.default_target.read_text() == "# distribution default\n"
+        assert list(self.nginx.glob(".horatio-*")) == []
 
     def test_ubuntu_uninstall_preserves_extra_content_and_symlink_targets(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare()
         config_target: Path
@@ -587,30 +589,30 @@ http {
         asset: Path = self.index.parent / "custom-logo.svg"
         asset.write_text("keep this user asset")
         result: subprocess.CompletedProcess[str] = self.run_uninstall()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(self.conf.is_symlink())
-        self.assertFalse(self.index.is_symlink())
-        self.assertEqual(config_target.read_text(), "# previous working config\n")
-        self.assertEqual(index_target.read_text(), "previous index\n")
-        self.assertEqual(asset.read_text(), "keep this user asset")
-        self.assertTrue(self.default.is_symlink())
-        self.assertEqual(list(self.nginx.glob(".horatio-*")), [])
+        assert result.returncode == 0, result.stderr
+        assert not self.conf.is_symlink()
+        assert not self.index.is_symlink()
+        assert config_target.read_text() == "# previous working config\n"
+        assert index_target.read_text() == "previous index\n"
+        assert asset.read_text() == "keep this user asset"
+        assert self.default.is_symlink()
+        assert list(self.nginx.glob(".horatio-*")) == []
 
     def test_ubuntu_uninstall_validation_failure_restores_files_before_reload(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare()
         result: subprocess.CompletedProcess[str] = self.run_uninstall("validate")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("Done.", result.stdout)
-        self.assertIn("invalid port", result.stderr)
+        assert result.returncode != 0
+        assert "Done." not in result.stdout
+        assert "invalid port" in result.stderr
         self.assert_restored()
-        self.assertFalse(
-            any(e["args"] == ["reload-or-restart", "nginx"] for e in self.events())
+        assert not any(
+            (e["args"] == ["reload-or-restart", "nginx"] for e in self.events())
         )
 
     def test_ubuntu_uninstall_reload_failure_restores_symlinks_and_reloads_original(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare()
         config_target: Path
@@ -624,108 +626,98 @@ http {
         self.conf.symlink_to(config_target)
         self.index.symlink_to(index_target)
         result: subprocess.CompletedProcess[str] = self.run_uninstall("reload")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("Done.", result.stdout)
+        assert result.returncode != 0
+        assert "Done." not in result.stdout
         self.assert_restored()
-        self.assertTrue(self.conf.is_symlink())
-        self.assertTrue(self.index.is_symlink())
-        self.assertEqual(config_target.read_text(), "# previous working config\n")
-        self.assertEqual(index_target.read_text(), "previous index\n")
-        self.assertEqual(
-            sum(e["args"] == ["reload-or-restart", "nginx"] for e in self.events()), 2
+        assert self.conf.is_symlink()
+        assert self.index.is_symlink()
+        assert config_target.read_text() == "# previous working config\n"
+        assert index_target.read_text() == "previous index\n"
+        assert (
+            sum((e["args"] == ["reload-or-restart", "nginx"] for e in self.events()))
+            == 2
         )
 
     def test_ubuntu_uninstall_failure_restores_originally_stopped_service(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare()
         result: subprocess.CompletedProcess[str] = self.run_uninstall(
             "reload", HORATIO_WAS_RUNNING="0"
         )
-        self.assertNotEqual(result.returncode, 0)
+        assert result.returncode != 0
         self.assert_restored()
         calls: list[list[str]] = [
             e["args"] for e in self.events() if e["command"] == "systemctl"
         ]
-        self.assertEqual(
-            calls,
-            [
-                ["is-active", "--quiet", "nginx"],
-                ["reload-or-restart", "nginx"],
-                ["stop", "nginx"],
-            ],
-        )
+        assert calls == [
+            ["is-active", "--quiet", "nginx"],
+            ["reload-or-restart", "nginx"],
+            ["stop", "nginx"],
+        ]
 
     def test_ubuntu_uninstall_removal_failures_restore_files_and_modes(
-        self: InstallerTests,
+        self: TestNginxInstaller,
+        subtests: pytest.Subtests,
+        tmp_path: Path,
     ) -> None:
         failure: str
         for failure in ("remove-config", "remove-index"):
-            with self.subTest(failure=failure):
-                case: InstallerTests = InstallerTests()
-                case.setUp()
-                try:
-                    case.prepare()
-                    (case.bin / "rm").unlink()
-                    (case.bin / "rm").symlink_to(case.mock)
-                    result: subprocess.CompletedProcess[str] = case.run_uninstall(
-                        failure
-                    )
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertNotIn("Done.", result.stdout)
-                    self.assertIn("removal failure", result.stderr)
-                    case.assert_restored()
-                    reloads: list[dict[str, Any]] = sum(
-                        e["args"] == ["reload-or-restart", "nginx"]
-                        for e in case.events()
-                    )
-                    self.assertEqual(reloads, 2 if failure == "remove-index" else 0)
-                finally:
-                    case.doCleanups()
+            with subtests.test(failure=failure):
+                case: TestNginxInstaller = TestNginxInstaller()
+                case.prepare_root(tmp_path / failure)
+                case.prepare()
+                (case.bin / "rm").unlink()
+                (case.bin / "rm").symlink_to(case.mock)
+                result: subprocess.CompletedProcess[str] = case.run_uninstall(failure)
+                assert result.returncode != 0
+                assert "Done." not in result.stdout
+                assert "removal failure" in result.stderr
+                case.assert_restored()
+                reloads: int = sum(
+                    e["args"] == ["reload-or-restart", "nginx"] for e in case.events()
+                )
+                assert reloads == (2 if failure == "remove-index" else 0)
 
     def test_ubuntu_uninstall_incomplete_recovery_retains_backups(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare()
         self.script.write_text(self.script.read_text().replace("nginx -t\n", "false\n"))
         (self.bin / "mv").unlink()
         (self.bin / "mv").symlink_to(self.mock)
         result: subprocess.CompletedProcess[str] = self.run_uninstall("restore")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("recovery was incomplete", result.stderr)
+        assert result.returncode != 0
+        assert "recovery was incomplete" in result.stderr
         backups: list[Path] = list(self.nginx.glob(".horatio-*"))
-        self.assertEqual(len(backups), 1)
-        self.assertIn(str(backups[0]), result.stderr)
-        self.assertEqual(
-            (backups[0] / "config").read_text(), "# previous working config\n"
-        )
-        self.assertEqual((backups[0] / "index").read_text(), "previous index\n")
-        self.assertFalse(self.conf.exists())
-        self.assertEqual(self.index.read_text(), "previous index\n")
+        assert len(backups) == 1
+        assert str(backups[0]) in result.stderr
+        assert (backups[0] / "config").read_text() == "# previous working config\n"
+        assert (backups[0] / "index").read_text() == "previous index\n"
+        assert not self.conf.exists()
+        assert self.index.read_text() == "previous index\n"
 
     def test_ubuntu_uninstall_requires_nginx_before_removing_files(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare(nginx=False)
         result: subprocess.CompletedProcess[str] = self.run_uninstall()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("nginx is unavailable", result.stderr)
+        assert result.returncode != 0
+        assert "nginx is unavailable" in result.stderr
         self.assert_restored()
-        self.assertEqual(self.events(), [])
+        assert self.events() == []
 
     def test_rejected_config_restores_files_and_default_symlink(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare()
         result: subprocess.CompletedProcess[str] = self.run_install("validate")
-        self.assertNotEqual(result.returncode, 0)
+        assert result.returncode != 0
         self.assert_restored()
-        self.assertFalse(
-            any(e["args"][0] == "reload-or-restart" for e in self.events())
-        )
+        assert not any((e["args"][0] == "reload-or-restart" for e in self.events()))
 
     def test_failed_reload_restores_symlinks_without_changing_their_targets(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare()
         config_target: Path
@@ -739,72 +731,72 @@ http {
         self.conf.symlink_to(config_target)
         self.index.symlink_to(index_target)
         result: subprocess.CompletedProcess[str] = self.run_install("reload")
-        self.assertNotEqual(result.returncode, 0)
+        assert result.returncode != 0
         self.assert_restored()
-        self.assertTrue(self.conf.is_symlink())
-        self.assertTrue(self.index.is_symlink())
-        self.assertEqual(config_target.read_text(), "# previous working config\n")
-        self.assertEqual(index_target.read_text(), "previous index\n")
+        assert self.conf.is_symlink()
+        assert self.index.is_symlink()
+        assert config_target.read_text() == "# previous working config\n"
+        assert index_target.read_text() == "previous index\n"
         reloads: list[dict[str, Any]] = [
             e for e in self.events() if e["args"] == ["reload-or-restart", "nginx"]
         ]
-        self.assertEqual(len(reloads), 2)
+        assert len(reloads) == 2
 
     def test_success_removes_recovery_files_and_publishes_both_outputs(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare()
         result: subprocess.CompletedProcess[str] = self.run_install()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("proxy_pass http://127.0.0.1:8080", self.conf.read_text())
-        self.assertIn("http://dashboard.example.internal", self.index.read_text())
-        self.assertFalse(self.default.exists())
-        self.assertTrue(self.default_target.exists())
-        self.assertEqual(list(self.nginx.glob(".horatio-*")), [])
+        assert result.returncode == 0, result.stderr
+        assert "proxy_pass http://127.0.0.1:8080" in self.conf.read_text()
+        assert "http://dashboard.example.internal" in self.index.read_text()
+        assert not self.default.exists()
+        assert self.default_target.exists()
+        assert list(self.nginx.glob(".horatio-*")) == []
 
     def test_apk_installs_nginx_before_validating_or_changing_luci(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare("openwrt", nginx=False)
         result: subprocess.CompletedProcess[str] = self.run_install()
-        self.assertEqual(result.returncode, 0, result.stderr)
+        assert result.returncode == 0, result.stderr
         events: list[dict[str, Any]] = self.events()
         commands: list[str] = [e["command"] for e in events]
-        self.assertEqual(events[0], {"command": "apk", "args": ["add", "nginx"]})
+        assert events[0] == {"command": "apk", "args": ["add", "nginx"]}
         first_uci_write: int = next(
             i
             for i, e in enumerate(events)
             if e["command"] == "uci" and e["args"][0] == "set"
         )
-        self.assertLess(commands.index("nginx"), first_uci_write)
-        self.assertLess(commands.index("nginx"), commands.index("uhttpd-service"))
-        self.assertEqual(
-            json.loads((self.root / "uci.json").read_text())["uhttpd.main.listen_http"],
-            "127.0.0.1:8081",
+        assert commands.index("nginx") < first_uci_write
+        assert commands.index("nginx") < commands.index("uhttpd-service")
+        assert (
+            json.loads((self.root / "uci.json").read_text())["uhttpd.main.listen_http"]
+            == "127.0.0.1:8081"
         )
 
     def test_domain_named_default_keeps_its_generated_configuration(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare()
         self.services.write_text("# domain: default\ndashboard 8080\n")
         result: subprocess.CompletedProcess[str] = self.run_install()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(self.default.is_symlink())
-        self.assertIn("server_name dashboard.default;", self.default.read_text())
-        self.assertEqual(self.default_target.read_text(), "# distribution default\n")
+        assert result.returncode == 0, result.stderr
+        assert not self.default.is_symlink()
+        assert "server_name dashboard.default;" in self.default.read_text()
+        assert self.default_target.read_text() == "# distribution default\n"
 
     def test_openwrt_bootstraps_missing_runtime_config_before_validation(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare("openwrt")
-        self.assertTrue((self.nginx / "uci.conf").is_symlink())
-        self.assertFalse(self.runtime_conf.exists())
+        assert (self.nginx / "uci.conf").is_symlink()
+        assert not self.runtime_conf.exists()
         result: subprocess.CompletedProcess[str] = self.run_install(
             HORATIO_WAS_RUNNING="0"
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(self.runtime_conf.is_file())
+        assert result.returncode == 0, result.stderr
+        assert self.runtime_conf.is_file()
         events: list[dict[str, Any]] = self.events()
         generation: int = next(
             i for i, e in enumerate(events) if e["command"] == "nginx-util"
@@ -812,14 +804,12 @@ http {
         validation: int = next(
             i for i, e in enumerate(events) if e["command"] == "nginx"
         )
-        self.assertLess(generation, validation)
-        self.assertEqual(
-            events[validation]["args"], ["-t", "-c", str(self.nginx / "uci.conf")]
-        )
-        self.assertFalse(any(e["args"] == ["start"] for e in events[:validation]))
+        assert generation < validation
+        assert events[validation]["args"] == ["-t", "-c", str(self.nginx / "uci.conf")]
+        assert not any((e["args"] == ["start"] for e in events[:validation]))
 
     def test_openwrt_manual_mode_does_not_validate_stale_generated_config(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare("openwrt")
         self.runtime_conf.parent.mkdir(parents=True)
@@ -827,228 +817,212 @@ http {
         result: subprocess.CompletedProcess[str] = self.run_install(
             HORATIO_UCI_ENABLED="false"
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        assert result.returncode == 0, result.stderr
         validations: list[list[str]] = [
             e["args"] for e in self.events() if e["command"] == "nginx"
         ]
-        self.assertEqual(validations, [["-t", "-c", str(self.nginx / "nginx.conf")]])
+        assert validations == [["-t", "-c", str(self.nginx / "nginx.conf")]]
 
     def test_openwrt_runtime_generation_failure_preserves_service_configuration(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare("openwrt")
         result: subprocess.CompletedProcess[str] = self.run_install("generate")
-        self.assertNotEqual(result.returncode, 0)
+        assert result.returncode != 0
         self.assert_restored()
-        self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
-        self.assertFalse(any(e["command"] == "uhttpd-service" for e in self.events()))
+        assert (self.root / "uci.json").read_text() == self.original_uci
+        assert not any((e["command"] == "uhttpd-service" for e in self.events()))
 
     def test_openwrt_manual_config_still_validated_when_helper_fails(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare("openwrt")
         result: subprocess.CompletedProcess[str] = self.run_install(
             "generate", HORATIO_UCI_ENABLED="false"
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("validating manual configuration", result.stderr)
-        self.assertIn(
-            ["-t", "-c", str(self.nginx / "nginx.conf")],
-            [e["args"] for e in self.events() if e["command"] == "nginx"],
-        )
+        assert result.returncode == 0, result.stderr
+        assert "validating manual configuration" in result.stderr
+        assert ["-t", "-c", str(self.nginx / "nginx.conf")] in [
+            e["args"] for e in self.events() if e["command"] == "nginx"
+        ]
 
     def test_openwrt_absent_uci_flag_selects_manual_config(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare("openwrt")
         result: subprocess.CompletedProcess[str] = self.run_install(
             HORATIO_UCI_ENABLED=""
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            [e["args"] for e in self.events() if e["command"] == "nginx"],
-            [["-t", "-c", str(self.nginx / "nginx.conf")]],
-        )
+        assert result.returncode == 0, result.stderr
+        assert [e["args"] for e in self.events() if e["command"] == "nginx"] == [
+            ["-t", "-c", str(self.nginx / "nginx.conf")]
+        ]
 
     def test_openwrt_waits_for_stop_and_http_readiness_before_committing(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare("openwrt")
         result: subprocess.CompletedProcess[str] = self.run_install(
             HORATIO_STOP_DELAY="2", HORATIO_READY_DELAY="2"
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        assert result.returncode == 0, result.stderr
         events: list[dict[str, Any]] = self.events()
         probes: list[dict[str, Any]] = [e for e in events if e["command"] == "wget"]
-        self.assertEqual(len(probes), 3)
-        self.assertTrue(all(e["recovery_exists"] for e in probes))
+        assert len(probes) == 3
+        assert all((e["recovery_exists"] for e in probes))
         calls: list[list[str]] = [
             e["args"] for e in events if e["command"] == "nginx-service"
         ]
         stopping: int
         starting: int
         stopping, starting = calls.index(["stop"]), calls.index(["start"])
-        self.assertEqual(calls[stopping + 1 : starting], [["running"]] * 3)
+        assert calls[stopping + 1 : starting] == [["running"]] * 3
         last_probe: int = max(i for i, e in enumerate(events) if e["command"] == "wget")
         enabled: int = next(i for i, e in enumerate(events) if e["args"] == ["enable"])
-        self.assertLess(last_probe, enabled)
-        self.assertEqual(list(self.nginx.glob(".horatio-*")), [])
+        assert last_probe < enabled
+        assert list(self.nginx.glob(".horatio-*")) == []
 
     def test_openwrt_async_nginx_failure_and_wrong_http_responder_both_roll_back(
-        self: InstallerTests,
+        self: TestNginxInstaller,
+        subtests: pytest.Subtests,
+        tmp_path: Path,
     ) -> None:
         failure: str
         for failure in ("nginx-async", "wrong-index"):
-            with self.subTest(failure=failure):
+            with subtests.test(failure=failure):
                 # Each subcase gets its own initial service state and event log.
-                case: InstallerTests = InstallerTests()
-                case.setUp()
-                try:
-                    case.prepare("openwrt")
-                    result: subprocess.CompletedProcess[str] = case.run_install(
-                        failure, HORATIO_WAS_RUNNING="0"
-                    )
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("did not serve the generated index", result.stderr)
-                    case.assert_restored()
-                    self.assertEqual(
-                        (case.root / "uci.json").read_text(), case.original_uci
-                    )
-                    self.assertFalse(
-                        any(e["args"] == ["enable"] for e in case.events())
-                    )
-                finally:
-                    case.doCleanups()
+                case: TestNginxInstaller = TestNginxInstaller()
+                case.prepare_root(tmp_path / failure)
+                case.prepare("openwrt")
+                result: subprocess.CompletedProcess[str] = case.run_install(
+                    failure, HORATIO_WAS_RUNNING="0"
+                )
+                assert result.returncode != 0
+                assert "did not serve the generated index" in result.stderr
+                case.assert_restored()
+                assert (case.root / "uci.json").read_text() == case.original_uci
+                assert not any((e["args"] == ["enable"] for e in case.events()))
 
     def test_openwrt_async_uhttpd_failure_rolls_back_before_nginx_changes(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare("openwrt")
         result: subprocess.CompletedProcess[str] = self.run_install("uhttpd-async")
-        self.assertNotEqual(result.returncode, 0)
+        assert result.returncode != 0
         self.assert_restored()
-        self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
-        self.assertEqual(
-            [e["args"] for e in self.events() if e["command"] == "nginx-service"],
-            [["running"]],
-        )
+        assert (self.root / "uci.json").read_text() == self.original_uci
+        assert [
+            e["args"] for e in self.events() if e["command"] == "nginx-service"
+        ] == [["running"]]
 
     def test_openwrt_async_restore_failure_keeps_recovery_files(
-        self: InstallerTests,
+        self: TestNginxInstaller,
+        subtests: pytest.Subtests,
+        tmp_path: Path,
     ) -> None:
         service: str
         for service in ("nginx", "uhttpd"):
-            with self.subTest(service=service):
-                case: InstallerTests = InstallerTests()
-                case.setUp()
-                try:
-                    case.prepare("openwrt")
-                    result: subprocess.CompletedProcess[str] = case.run_install(
-                        "nginx-async", HORATIO_FAIL_RESTORE=service
-                    )
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("recovery was incomplete", result.stderr)
-                    backups: list[Path] = list(case.nginx.glob(".horatio-*"))
-                    self.assertEqual(len(backups), 1)
-                    self.assertIn(str(backups[0]), result.stderr)
-                    self.assertEqual(
-                        (backups[0] / "config").read_text(),
-                        "# previous working config\n",
-                    )
-                    self.assertEqual(
-                        (backups[0] / "index").read_text(), "previous index\n"
-                    )
-                    self.assertEqual(
-                        (backups[0] / "uhttpd").read_text(), case.original_uci
-                    )
-                finally:
-                    case.doCleanups()
+            with subtests.test(service=service):
+                case: TestNginxInstaller = TestNginxInstaller()
+                case.prepare_root(tmp_path / service)
+                case.prepare("openwrt")
+                result: subprocess.CompletedProcess[str] = case.run_install(
+                    "nginx-async", HORATIO_FAIL_RESTORE=service
+                )
+                assert result.returncode != 0
+                assert "recovery was incomplete" in result.stderr
+                backups: list[Path] = list(case.nginx.glob(".horatio-*"))
+                assert len(backups) == 1
+                assert str(backups[0]) in result.stderr
+                assert (
+                    backups[0] / "config"
+                ).read_text() == "# previous working config\n"
+                assert (backups[0] / "index").read_text() == "previous index\n"
+                assert (backups[0] / "uhttpd").read_text() == case.original_uci
 
     def test_missing_readiness_client_does_not_change_configuration(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare("openwrt")
         (self.bin / "wget").unlink()
         result: subprocess.CompletedProcess[str] = self.run_install()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("wget is required", result.stderr)
+        assert result.returncode != 0
+        assert "wget is required" in result.stderr
         self.assert_restored()
-        self.assertEqual(self.events(), [])
+        assert self.events() == []
 
     def test_missing_readiness_deadline_does_not_change_configuration(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare("openwrt")
         (self.bin / "timeout").unlink()
         result: subprocess.CompletedProcess[str] = self.run_install()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("timeout is required", result.stderr)
+        assert result.returncode != 0
+        assert "timeout is required" in result.stderr
         self.assert_restored()
-        self.assertEqual(self.events(), [])
+        assert self.events() == []
 
     def test_missing_nginx_after_package_command_does_not_change_configuration(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare("openwrt", nginx=False)
         result: subprocess.CompletedProcess[str] = self.run_install(
             HORATIO_PACKAGE_INSTALL="missing"
         )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("nginx is unavailable", result.stderr)
+        assert result.returncode != 0
+        assert "nginx is unavailable" in result.stderr
         self.assert_restored()
-        self.assertEqual([e["command"] for e in self.events()], ["apk"])
-        self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
+        assert [e["command"] for e in self.events()] == ["apk"]
+        assert (self.root / "uci.json").read_text() == self.original_uci
 
     def test_openwrt_validation_failure_never_changes_luci(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare("openwrt")
         result: subprocess.CompletedProcess[str] = self.run_install("validate")
-        self.assertNotEqual(result.returncode, 0)
+        assert result.returncode != 0
         self.assert_restored()
-        self.assertEqual(
-            [e["args"] for e in self.events() if e["command"] == "uci"],
-            [["-q", "get", "nginx.global.uci_enable"]],
-        )
-        self.assertFalse(any(e["command"] == "uhttpd-service" for e in self.events()))
+        assert [e["args"] for e in self.events() if e["command"] == "uci"] == [
+            ["-q", "get", "nginx.global.uci_enable"]
+        ]
+        assert not any((e["command"] == "uhttpd-service" for e in self.events()))
 
     def test_failed_first_proxy_restart_restores_luci_and_stops_proxy(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare("openwrt")
         result: subprocess.CompletedProcess[str] = self.run_install(
             "nginx-service", HORATIO_WAS_RUNNING="0"
         )
-        self.assertNotEqual(result.returncode, 0)
+        assert result.returncode != 0
         self.assert_restored()
-        self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
+        assert (self.root / "uci.json").read_text() == self.original_uci
         service_calls: list[tuple[Any, Any]] = [
             (e["command"], e["args"]) for e in self.events()
         ]
-        self.assertIn(("nginx-service", ["stop"]), service_calls)
-        self.assertEqual(service_calls.count(("nginx-service", ["start"])), 1)
+        assert ("nginx-service", ["stop"]) in service_calls
+        assert service_calls.count(("nginx-service", ["start"])) == 1
         restored_restart: dict[str, Any] = [
             e
             for e in self.events()
             if e["command"] == "uhttpd-service" and e["args"] == ["restart"]
         ][-1]
-        self.assertEqual(restored_restart["config"], json.loads(self.original_uci))
+        assert restored_restart["config"] == json.loads(self.original_uci)
 
     def test_luci_restart_failure_restores_uci_without_restarting_nginx(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare("openwrt")
         result: subprocess.CompletedProcess[str] = self.run_install("uhttpd-service")
-        self.assertNotEqual(result.returncode, 0)
+        assert result.returncode != 0
         self.assert_restored()
-        self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
-        self.assertEqual(
-            [e["args"] for e in self.events() if e["command"] == "nginx-service"],
-            [["running"]],
-        )
+        assert (self.root / "uci.json").read_text() == self.original_uci
+        assert [
+            e["args"] for e in self.events() if e["command"] == "nginx-service"
+        ] == [["running"]]
 
     def test_failed_restore_retains_backup_and_reports_its_location(
-        self: InstallerTests,
+        self: TestNginxInstaller,
     ) -> None:
         self.prepare()
         # Fail validation, then fail the actual restore rename. The rejected
@@ -1057,16 +1031,10 @@ http {
         (self.bin / "mv").unlink()
         (self.bin / "mv").symlink_to(self.mock)
         result: subprocess.CompletedProcess[str] = self.run_install("restore")
-        self.assertNotEqual(result.returncode, 0)
+        assert result.returncode != 0
         backups: list[Path] = list(self.nginx.glob(".horatio-*"))
-        self.assertEqual(len(backups), 1)
-        self.assertIn(str(backups[0]), result.stderr)
-        self.assertEqual(
-            (backups[0] / "config").read_text(), "# previous working config\n"
-        )
-        self.assertEqual(self.index.read_text(), "previous index\n")
-        self.assertTrue(self.default.is_symlink())
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+        assert len(backups) == 1
+        assert str(backups[0]) in result.stderr
+        assert (backups[0] / "config").read_text() == "# previous working config\n"
+        assert self.index.read_text() == "previous index\n"
+        assert self.default.is_symlink()

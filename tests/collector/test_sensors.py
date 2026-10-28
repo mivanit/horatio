@@ -8,12 +8,14 @@ import os
 import subprocess
 import sys
 import tempfile
-import unittest
-import unittest.mock
 from pathlib import Path
 from typing import Any
 
-SOURCE: str = Path(__file__).with_name("health-sensors.sh").read_text()
+import pytest
+
+from tests.support import ROOT
+
+SOURCE: str = (ROOT / "collector/health-sensors.sh").read_text()
 SHELL: str
 PYTHON: str
 SHELL, PYTHON = SOURCE.split('python3 - "$tmp" "$OUT" <<\'PY\'\n', 1)
@@ -79,9 +81,9 @@ def tlimit_text(
     return f"GPU {bus}\n    {current_key} : {current} C\n    {threshold_key} : {threshold} C\n"
 
 
-class GPUSensorTests(unittest.TestCase):
+class TestGPUSensors:
     def collect(
-        self: GPUSensorTests,
+        self: TestGPUSensors,
         *,
         csv: str | None = None,
         temperature: str = "",
@@ -148,28 +150,31 @@ class GPUSensorTests(unittest.TestCase):
             ]
             return state, calls
 
-    def test_modern_driver_keeps_counters_and_all_columns(self: GPUSensorTests) -> None:
+    def test_modern_driver_keeps_counters_and_all_columns(self: TestGPUSensors) -> None:
         state: dict[str, Any]
         calls: list[list[str]]
         state, calls = self.collect()
         gpu: dict[str, Any]
         (gpu,) = state["gpus"]
-        self.assertEqual(
-            (gpu["core_c"], gpu["mem_c"], gpu["power_w"], gpu["power_limit_w"]),
-            (60, 65, 120.5, 300),
+        assert (gpu["core_c"], gpu["mem_c"], gpu["power_w"], gpu["power_limit_w"]) == (
+            60,
+            65,
+            120.5,
+            300,
         )
-        self.assertEqual((gpu["sw_thermal_s"], gpu["hw_thermal_s"]), (1.5, 2))
-        self.assertEqual(state["alarms"], [])
-        self.assertEqual(len(calls), 2)
+        assert (gpu["sw_thermal_s"], gpu["hw_thermal_s"]) == (1.5, 2)
+        assert state["alarms"] == []
+        assert len(calls) == 2
 
     def test_rejected_optional_counter_retries_from_either_stream(
-        self: GPUSensorTests,
+        self: TestGPUSensors,
+        subtests: pytest.Subtests,
     ) -> None:
         reason: str
         for reason in ("sw", "hw"):
             stream: str
             for stream in ("stdout", "stderr"):
-                with self.subTest(reason=reason, stream=stream):
+                with subtests.test(reason=reason, stream=stream):
                     diagnostic: str = (
                         f'Field "clocks_event_reasons_counters.{reason}_thermal_slowdown" '
                         "is not a valid field to query.\n"
@@ -185,33 +190,26 @@ class GPUSensorTests(unittest.TestCase):
                     )
                     gpu: dict[str, Any]
                     (gpu,) = state["gpus"]
-                    self.assertEqual(
-                        (gpu["sw_thermal_s"], gpu["hw_thermal_s"]), (None, None)
-                    )
-                    self.assertEqual(
-                        (
-                            gpu["mem_c"],
-                            gpu["ecc_uncorrected"],
-                            gpu["retired_pending"],
-                            gpu["power_w"],
-                            gpu["power_limit_w"],
-                        ),
-                        (65, 3, True, 120.5, 300),
-                    )
-                    self.assertEqual(
-                        state["alarms"],
-                        [
-                            "GPU 0: thermal slowdown active (sw)",
-                            "GPU 0: 3 uncorrected ECC errors since driver load",
-                            "GPU 0: retired pages pending",
-                        ],
-                    )
-                    self.assertEqual(len(calls), 3)
-                    self.assertIn("temperature.memory", calls[1][0])
-                    self.assertNotIn("clocks_event_reasons_counters", calls[1][0])
+                    assert (gpu["sw_thermal_s"], gpu["hw_thermal_s"]) == (None, None)
+                    assert (
+                        gpu["mem_c"],
+                        gpu["ecc_uncorrected"],
+                        gpu["retired_pending"],
+                        gpu["power_w"],
+                        gpu["power_limit_w"],
+                    ) == (65, 3, True, 120.5, 300)
+                    assert state["alarms"] == [
+                        "GPU 0: thermal slowdown active (sw)",
+                        "GPU 0: 3 uncorrected ECC errors since driver load",
+                        "GPU 0: retired pages pending",
+                    ]
+                    assert len(calls) == 3
+                    assert "temperature.memory" in calls[1][0]
+                    assert "clocks_event_reasons_counters" not in calls[1][0]
 
     def test_other_failures_do_not_retry_and_remain_alarms(
-        self: GPUSensorTests,
+        self: TestGPUSensors,
+        subtests: pytest.Subtests,
     ) -> None:
         status: int
         diagnostic: str
@@ -220,20 +218,18 @@ class GPUSensorTests(unittest.TestCase):
             (124, ""),
             (2, 'Field "temperature.memory" is not a valid field to query.'),
         ):
-            with self.subTest(status=status, diagnostic=diagnostic):
+            with subtests.test(status=status, diagnostic=diagnostic):
                 state: dict[str, Any]
                 calls: list[list[str]]
                 state, calls = self.collect(
                     extended={"stderr": diagnostic, "status": status}
                 )
-                self.assertEqual(len(calls), 2)
-                self.assertEqual(state["gpus"], [])
-                self.assertTrue(
-                    any(f"exit {status}" in alarm for alarm in state["alarms"])
-                )
+                assert len(calls) == 2
+                assert state["gpus"] == []
+                assert any((f"exit {status}" in alarm for alarm in state["alarms"]))
 
     def test_failed_fallback_is_not_hidden_or_retried_again(
-        self: GPUSensorTests,
+        self: TestGPUSensors,
     ) -> None:
         rejected: str = 'Field "clocks_event_reasons_counters.sw_thermal_slowdown" is not a valid field to query.'
         state: dict[str, Any]
@@ -242,20 +238,20 @@ class GPUSensorTests(unittest.TestCase):
             extended={"stdout": rejected, "status": 2},
             basic={"stderr": "Driver not loaded", "status": 9},
         )
-        self.assertEqual(len(calls), 3)
-        self.assertEqual(state["gpus"], [])
-        self.assertEqual(state["alarms"], ["collector: gpu: Driver not loadedexit 9"])
+        assert len(calls) == 3
+        assert state["gpus"] == []
+        assert state["alarms"] == ["collector: gpu: Driver not loadedexit 9"]
 
     def test_truncated_modern_row_is_not_mistaken_for_fallback(
-        self: GPUSensorTests,
+        self: TestGPUSensors,
     ) -> None:
         state: dict[str, Any]
         state, _ = self.collect(csv=gpu_csv(counters=False))
-        self.assertEqual(state["gpus"], [])
-        self.assertTrue(state["alarms"][0].startswith("collector: gpu: unparsed line:"))
+        assert state["gpus"] == []
+        assert state["alarms"][0].startswith("collector: gpu: unparsed line:")
 
     def test_absolute_core_and_memory_limits_keep_existing_rules(
-        self: GPUSensorTests,
+        self: TestGPUSensors,
     ) -> None:
         temperature: str = """GPU 00000000:01:00.0
     GPU Shutdown Temp : 100 C
@@ -267,45 +263,40 @@ class GPUSensorTests(unittest.TestCase):
         state, _ = self.collect(
             csv=gpu_csv(core=84, memory=86), temperature=temperature
         )
-        self.assertEqual(
-            state["alarms"],
-            [
-                "GPU 0: memory 86 C >= max operating 87 C - 3",
-                "GPU 0: core 84 C >= max operating 85 C - 3",
-            ],
-        )
+        assert state["alarms"] == [
+            "GPU 0: memory 86 C >= max operating 87 C - 3",
+            "GPU 0: core 84 C >= max operating 85 C - 3",
+        ]
         limits: dict[str, float | None] = state["gpus"][0]["limits"]
-        self.assertEqual(
-            [limits[key] for key in ("shutdown", "slowdown", "max_op", "mem_max_op")],
-            [100, 90, 85, 87],
-        )
+        assert [
+            limits[key] for key in ("shutdown", "slowdown", "max_op", "mem_max_op")
+        ] == [100, 90, 85, 87]
 
     def test_old_and_new_tlimit_labels_use_relative_threshold(
-        self: GPUSensorTests,
+        self: TestGPUSensors,
+        subtests: pytest.Subtests,
     ) -> None:
         old: bool
         for old in (False, True):
             current: str
             threshold: str
             for current, threshold in (("2", "0"), ("-3", "-5"), ("3", "0")):
-                with self.subTest(old=old, current=current, threshold=threshold):
+                with subtests.test(old=old, current=current, threshold=threshold):
                     state: dict[str, Any]
                     state, _ = self.collect(
                         temperature=tlimit_text(current, threshold, old=old)
                     )
-                    self.assertEqual(
-                        state["alarms"],
-                        [
-                            f"GPU 0: T.Limit {current} C <= max operating {threshold} C + 3"
-                        ],
-                    )
+                    assert state["alarms"] == [
+                        f"GPU 0: T.Limit {current} C <= max operating {threshold} C + 3"
+                    ]
                     limits: dict[str, float | None] = state["gpus"][0]["limits"]
-                    self.assertIsNone(limits["max_op"])
-                    self.assertIsNone(limits["mem_max_op"])
-                    self.assertEqual(limits["current_tlimit"], float(current))
+                    assert limits["max_op"] is None
+                    assert limits["mem_max_op"] is None
+                    assert limits["current_tlimit"] == float(current)
 
     def test_far_or_unavailable_tlimit_has_no_temperature_alarm(
-        self: GPUSensorTests,
+        self: TestGPUSensors,
+        subtests: pytest.Subtests,
     ) -> None:
         current: str
         threshold: str
@@ -315,28 +306,26 @@ class GPUSensorTests(unittest.TestCase):
             ("N/A", "0"),
             ("1", "N/A"),
         ):
-            with self.subTest(current=current, threshold=threshold):
+            with subtests.test(current=current, threshold=threshold):
                 state: dict[str, Any]
                 state, _ = self.collect(temperature=tlimit_text(current, threshold))
-                self.assertEqual(state["alarms"], [])
+                assert state["alarms"] == []
 
-    def test_tlimit_obeys_custom_and_disabled_margin(self: GPUSensorTests) -> None:
+    def test_tlimit_obeys_custom_and_disabled_margin(self: TestGPUSensors) -> None:
         state: dict[str, Any]
         state, _ = self.collect(
             temperature=tlimit_text("4"), config={"gpu_temp_alarm_margin_c": 5}
         )
-        self.assertEqual(
-            state["alarms"], ["GPU 0: T.Limit 4 C <= max operating 0 C + 5"]
-        )
+        assert state["alarms"] == ["GPU 0: T.Limit 4 C <= max operating 0 C + 5"]
         state, _ = self.collect(
             csv=gpu_csv(sw="Active"),
             temperature=tlimit_text("-1"),
             config={"gpu_temp_alarm_margin_c": None},
         )
-        self.assertEqual(state["alarms"], ["GPU 0: thermal slowdown active (sw)"])
+        assert state["alarms"] == ["GPU 0: thermal slowdown active (sw)"]
 
     def test_limits_match_bus_id_not_order_and_ignore_case(
-        self: GPUSensorTests,
+        self: TestGPUSensors,
     ) -> None:
         csv: str = gpu_csv(bus="00000000:0a:00.0") + gpu_csv(
             index=1, bus="00000000:0b:00.0"
@@ -346,13 +335,5 @@ class GPUSensorTests(unittest.TestCase):
         )
         state: dict[str, Any]
         state, _ = self.collect(csv=csv, temperature=temperature)
-        self.assertEqual(
-            state["alarms"], ["GPU 0: T.Limit 1 C <= max operating 0 C + 3"]
-        )
-        self.assertEqual(
-            [gpu["limits"]["current_tlimit"] for gpu in state["gpus"]], [1, 9]
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert state["alarms"] == ["GPU 0: T.Limit 1 C <= max operating 0 C + 3"]
+        assert [gpu["limits"]["current_tlimit"] for gpu in state["gpus"]] == [1, 9]

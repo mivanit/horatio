@@ -1,6 +1,7 @@
 -- CPU topology and public IP fixtures; no native modules, network or file writes.
--- Usage: lua5.1 openwrt/test_metrics.lua
+-- Usage: lua5.1 tests/openwrt/test_metrics.lua
 local script_dir = (arg and arg[0] or ""):match("(.*)[/\\][^/\\]*$") or "."
+script_dir = script_dir .. "/../../openwrt"
 local metrics = dofile(script_dir .. "/metrics.lua")
 local real_open, real_popen = io.open, io.popen
 local files, replies, http_calls = {}, {}, 0

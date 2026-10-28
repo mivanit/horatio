@@ -1,12 +1,12 @@
 // Focused browser behavior checks using the actual application functions.
-// Run with: node test_frontend.js (Node with built-in fetch; no dependencies).
+// Run with: node tests/frontend/dashboard.js (Node with built-in fetch; no dependencies).
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const read = name => fs.readFileSync(path.join(__dirname, 'static', name), 'utf8');
+const read = name => fs.readFileSync(path.join(__dirname, '..', '..', 'static', name), 'utf8');
 const app = read('app.js'), config = read('config.js'), charts = read('charts.js');
 function between(source, start, end) {
   const a = source.indexOf(start), b = source.indexOf(end, a + start.length);

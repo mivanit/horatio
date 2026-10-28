@@ -4,7 +4,7 @@
 -- shimmed with a minimal parser sufficient for the flat fixture records.
 -- Writer tests fork real processes because lockf ownership is per-process.
 --
--- Usage: lua5.1 openwrt/test_history.lua
+-- Usage: lua5.1 tests/openwrt/test_history.lua
 -- Also run it under a DST zone, e.g. TZ=America/New_York in summer (test 9).
 
 local passes, fails = 0, 0
@@ -59,6 +59,7 @@ package.preload["luci.jsonc"] = function()
 end
 
 local script_dir = (arg and arg[0] or ""):match("(.*)[/\\][^/\\]*$") or "."
+script_dir = script_dir .. "/../../openwrt"
 package.path = script_dir .. "/?.lua;" .. package.path
 local history = require("history")
 

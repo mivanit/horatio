@@ -1,4 +1,4 @@
-"""Process argument privacy checks: python -m unittest test_process_info.
+"""Process argument privacy checks: uv run pytest tests/unit/test_process_privacy.py.
 
 Uses real /proc data for Python's inline-code mode and pure argv fixtures for
 other interpreters, so Ruby, Perl, and PHP do not need to be installed.
@@ -8,17 +8,19 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import unittest
-import unittest.mock
 from typing import Any
 
-import server
+import pytest
 
 SECRET: str = "HORATIO_TEST_SECRET_MARKER"
 
 
-class ProcessInfoTests(unittest.TestCase):
-    def test_script_and_module_positions(self: ProcessInfoTests) -> None:
+class TestProcessPrivacy:
+    def test_script_and_module_positions(
+        self: TestProcessPrivacy, subtests: pytest.Subtests
+    ) -> None:
+        import server
+
         cases: list[tuple[list[str], str, str]] = [
             (
                 ["/usr/bin/python3", "-u", "-m", "http.server", "--token", SECRET],
@@ -61,14 +63,18 @@ class ProcessInfoTests(unittest.TestCase):
         name: str
         path: str
         for argv, name, path in cases:
-            with self.subTest(argv=argv):
-                self.assertEqual(
-                    server._sanitize_process_argv(argv), {"name": name, "path": path}
-                )
+            with subtests.test(argv=argv):
+                assert server._sanitize_process_argv(argv) == {
+                    "name": name,
+                    "path": path,
+                }
 
     def test_inline_code_and_unknown_option_operands_are_private(
-        self: ProcessInfoTests,
+        self: TestProcessPrivacy,
+        subtests: pytest.Subtests,
     ) -> None:
+        import server
+
         code: str = f'token="{SECRET}"'
         cases: list[list[str]] = [
             ["python", "-c", code],
@@ -100,20 +106,23 @@ class ProcessInfoTests(unittest.TestCase):
         ]
         argv: list[str]
         for argv in cases:
-            with self.subTest(argv=argv):
+            with subtests.test(argv=argv):
                 info: dict[str, str] = server._sanitize_process_argv(argv)
-                self.assertEqual(info, {"name": argv[0], "path": argv[0]})
-                self.assertNotIn(SECRET, info["name"])
-                self.assertNotIn(SECRET, info["path"])
+                assert info == {"name": argv[0], "path": argv[0]}
+                assert SECRET not in info["name"]
+                assert SECRET not in info["path"]
 
     def test_real_python_inline_code_stays_out_of_live_and_history_names(
-        self: ProcessInfoTests,
+        self: TestProcessPrivacy,
+        subtests: pytest.Subtests,
     ) -> None:
         # Empty option operands must survive /proc splitting; otherwise -c can
         # be mistaken for the preceding option's operand and expose its body.
+        import server
+
         options: list[str]
         for options in ([], ["-W", ""]):
-            with self.subTest(options=options):
+            with subtests.test(options=options):
                 child: subprocess.Popen[str] = subprocess.Popen(
                     [
                         sys.executable,
@@ -129,11 +138,11 @@ class ProcessInfoTests(unittest.TestCase):
                     assert child.stdout is not None
                     # /proc can briefly expose an empty cmdline during exec.
                     # Inspect a running interpreter, not that startup window.
-                    self.assertEqual(child.stdout.readline(), "ready\n")
+                    assert child.stdout.readline() == "ready\n"
                     info: dict[str, str] = server.get_sanitized_process_info(child.pid)
-                    self.assertNotIn(SECRET, info["name"])
-                    self.assertNotIn(SECRET, info["path"])
-                    self.assertEqual(info["path"], sys.executable)
+                    assert SECRET not in info["name"]
+                    assert SECRET not in info["path"]
+                    assert info["path"] == sys.executable
                     rows: list[dict[str, Any]] = server.build_process_records(
                         [
                             {
@@ -146,15 +155,11 @@ class ProcessInfoTests(unittest.TestCase):
                         [],
                         1,
                     )
-                    self.assertEqual(len(rows), 1)
-                    self.assertEqual(rows[0]["name"], info["name"])
-                    self.assertNotIn(SECRET, rows[0]["name"])
+                    assert len(rows) == 1
+                    assert rows[0]["name"] == info["name"]
+                    assert SECRET not in rows[0]["name"]
                 finally:
                     child.terminate()
                     child.wait(timeout=5)
                     if child.stdout is not None:
                         child.stdout.close()
-
-
-if __name__ == "__main__":
-    unittest.main()

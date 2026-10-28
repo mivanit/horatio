@@ -1,5 +1,5 @@
 -- CGI response tests; no OpenWrt services or native modules are required.
--- Usage: lua5.1 openwrt/test_handler.lua
+-- Usage: lua5.1 tests/openwrt/test_handler.lua
 package.preload["luci.jsonc"] = function()
     return {parse = function() return {} end}
 end
@@ -17,6 +17,7 @@ end
 local output = {}
 uhttpd = {send = function(s) output[#output + 1] = s end}
 local script_dir = (arg and arg[0] or ""):match("(.*)[/\\][^/\\]*$") or "."
+script_dir = script_dir .. "/../../openwrt"
 dofile(script_dir .. "/handler.lua")
 
 local failed = 0

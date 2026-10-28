@@ -91,7 +91,7 @@ the 60 s file is missing or older than 5 minutes. Nothing is mailed for an alarm
 
 ## Testing without hardware
 
-Run `python3 collector/test_sensors.py` from the repository root for GPU capture and alarm
+Run `uv run --locked pytest tests/collector` from the repository root for GPU capture and alarm
 fixtures. These run the script's actual GPU shell block with a fake `nvidia-smi`, then its
 actual Python parser, without root or hardware. Older drivers that reject thermal-counter
 query fields are retried without those counters; the other GPU readings and alarms remain available.
