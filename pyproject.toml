@@ -37,5 +37,6 @@ ignore = ["ANN401"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/integration", "tests/installers", "tests/collector", "tests/frontend"]
-addopts = "--import-mode=importlib --strict-markers -ra"
+# Tests run their own event loops and do not use AnyIO's pytest plugin.
+addopts = "--import-mode=importlib --strict-markers -ra -p no:anyio"
 markers = ["integration: real dashboard and Glances HTTP tests"]
