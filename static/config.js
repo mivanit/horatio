@@ -559,8 +559,8 @@ async function safeFetch(url, fallback, timeout = 5000) {
 
 // Data cache for reducing API calls
 const dataCache = {
-  // 30 s, not static: power_draw feeds the Power card.
-  gpuInfo: { ttl: 30000, data: null, lastUpdate: null },
+  // Expire before the next 30 s poll: power_draw feeds the Power card.
+  gpuInfo: { ttl: 10000, data: null, lastUpdate: null },
   cpuInfo: { ttl: Infinity, data: null, lastUpdate: null },
   systemInfo: { ttl: Infinity, data: null, lastUpdate: null },
   drives: { ttl: 60000, data: null, lastUpdate: null },

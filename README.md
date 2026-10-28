@@ -219,7 +219,8 @@ Python functions, variables, and fields have explicit type annotations; use
 from their inputs because Python has no syntax for annotating them inline.
 
 CI uses Ubuntu 24.04, Python 3.13, Node.js 22, `uv.lock`, and pinned action
-revisions. The native Lua job builds the dependencies below and runs the history
+revisions. The native Lua job uses OpenWrt's double/int32 number model, checks
+large byte totals in API responses, and runs the history
 tests under UTC and America/New_York. It does not boot OpenWrt or exercise real
 router services. The workflow starts when these files are pushed to GitHub;
 branch protection is configured separately in the repository settings.
@@ -255,7 +256,7 @@ LUA_CPATH='/path/to/nixio/?.so;;' make test-openwrt LUA=/path/to/lua5.1
 
 To build the same pinned Lua/Nixio dependencies used in CI without installing
 system-wide modules (requires a C toolchain, Make, libcrypt development headers,
-`curl`, Git, and `tar`):
+`curl`, Git, `tar`, and `patch`):
 
 ```sh
 sh scripts/setup-lua-tests.sh /tmp/horatio-native-lua
@@ -286,8 +287,9 @@ useful for the Lua tests, but does not replace a booted router for service tests
 <details>
 <summary>Build the native Lua test environment on Linux without installing host packages</summary>
 
-Requires a C toolchain, Make, Git, curl, and libcrypt development files. The
+Requires a C toolchain, Make, Git, curl, patch, and libcrypt development files. The
 [setup script](scripts/setup-lua-tests.sh) uses the [official Lua archive and checksum](https://www.lua.org/ftp/)
+with pinned [OpenWrt number-model patches](https://github.com/openwrt/openwrt/tree/c9c78ac1c71995b1b467c3c5fe99527dbfaf7d71/package/utils/lua/patches)
 and a pinned [OpenWrt Nixio source revision](https://github.com/openwrt/luci/tree/75a306df84a020c57a631ef5b4c02ace56d93387/libs/luci-lib-nixio).
 Run from the Horatio checkout:
 

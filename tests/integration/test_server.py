@@ -141,9 +141,8 @@ REQUIRED_ENDPOINTS: list[str] = [
     "/api/mail",
     "/api/storage-health",
     "/api/sensors",
-]
-OPTIONAL_ENDPOINTS: list[str] = [
-    "/api/4/gpu",
+    # These return HTTP 200 with empty data or an error payload when tools
+    # are unavailable; server errors and timeouts still indicate a failure.
     "/api/gpu-info",
     "/api/gpu-processes",
     "/api/disk-processes",
@@ -174,21 +173,17 @@ def test_endpoint(live_server: str, path: str) -> None:
         assert validator(data), describe(data)
 
 
-@pytest.mark.parametrize("path", OPTIONAL_ENDPOINTS)
-def test_optional_endpoint(live_server: str, path: str) -> None:
-    error: httpx.HTTPError
-    try:
-        response: httpx.Response = httpx.get(f"{live_server}{path}", timeout=10)
-    except httpx.HTTPError as error:
-        pytest.skip(f"Optional host capability unavailable: {error}")
-    if response.status_code != 200:
-        pytest.skip(
-            f"Optional host capability unavailable: HTTP {response.status_code}"
-        )
-    validator: Callable[[Any], bool] | None = SCHEMAS.get(path)
-    if validator is not None:
-        data: Any = response.json()
-        assert validator(data), describe(data)
+def test_optional_gpu_endpoint(live_server: str) -> None:
+    response: httpx.Response = httpx.get(f"{live_server}/api/4/gpu", timeout=10)
+    # Glances reports an unavailable plugin with this specific HTTP 400 body.
+    # Other failures, including errors inside an available plugin, must fail CI.
+    if response.status_code == 400 and response.json().get("detail", "").startswith(
+        "Unknown plugin gpu (available plugins:"
+    ):
+        pytest.skip("Glances GPU plugin is unavailable on this host")
+    assert response.status_code == 200, response.text
+    data: Any = response.json()
+    assert SCHEMAS["/api/4/gpu"](data), describe(data)
 
 
 @pytest.mark.parametrize(

@@ -48,7 +48,8 @@ function json.encode(val)
     elseif t == "number" then
         if val ~= val or val == math.huge or val == -math.huge then return "null" end
         if val == math.floor(val) and math.abs(val) < 1e15 then
-            return string.format("%d", val)
+            -- OpenWrt's Lua uses 32-bit integers; byte totals can exceed 2 GiB.
+            return string.format("%.0f", val)
         end
         return string.format("%.2f", val)
     elseif t == "string" then

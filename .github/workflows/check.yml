@@ -55,7 +55,7 @@ jobs:
       - name: Install build prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential libcrypt-dev curl git gzip tzdata
+          sudo apt-get install -y --no-install-recommends build-essential libcrypt-dev curl git gzip tzdata patch
       - name: Build pinned Lua and Nixio
         run: sh scripts/setup-lua-tests.sh "$RUNNER_TEMP/horatio-native-lua"
       - name: Test native Lua behavior on Linux
