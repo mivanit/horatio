@@ -2692,10 +2692,11 @@ async def update_history_settings(request: Request) -> Response:
 
     # Apply changes
     changed: bool = False
-    if (
+    interval_changed: bool = (
         record_interval is not None
         and record_interval != APP.state.history_record_interval
-    ):
+    )
+    if interval_changed:
         APP.state.history_record_interval = record_interval
         changed = True
     if (
@@ -2730,8 +2731,8 @@ async def update_history_settings(request: Request) -> Response:
         APP.state.history_processes_enabled = processes_enabled is True
         changed = True
 
-    # Restart history recorder task if interval/duration changed
-    if changed and APP.state.history_task is not None:
+    # Only interval changes reset the timer; other options apply to the next sample.
+    if interval_changed and APP.state.history_task is not None:
         APP.state.history_task.cancel()
         try:
             await APP.state.history_task

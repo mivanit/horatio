@@ -1526,13 +1526,7 @@ async function fetchDataOnce() {
       updateCardNoData('cpu-cores', true);
 
       // Cross-core spread (live): min/median/max across cores this poll
-      const sortedCores = [...values].sort((a, b) => a - b);
-      const n = sortedCores.length;
-      const coreMin = sortedCores[0];
-      const coreMax = sortedCores[n - 1];
-      const coreMedian = n % 2
-        ? sortedCores[(n - 1) / 2]
-        : (sortedCores[n / 2 - 1] + sortedCores[n / 2]) / 2;
+      const { min: coreMin, median: coreMedian, max: coreMax } = rangeStats(values);
       pushHistory(history.cpuCoresMin, coreMin);
       pushHistory(history.cpuCoresMedian, coreMedian);
       pushHistory(history.cpuCoresMax, coreMax);

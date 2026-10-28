@@ -19,6 +19,63 @@ from starlette.types import Message, Scope
 from tests.support import describe, history_line
 
 
+def test_history_settings_preserve_recording_schedule() -> None:
+    """Only an interval change should interrupt the automatic recorder's wait."""
+    import server
+
+    server.PASSWORD_FILE.write_text(server._hash_password("test-password"))
+
+    async def save(**settings: int | bool) -> server.Response:
+        body: bytes = json.dumps({"password": "test-password", **settings}).encode()
+
+        async def receive() -> Message:
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        request: Request = Request(
+            {"type": "http", "client": ("127.0.0.1", 12345)}, receive
+        )
+        return await server.update_history_settings(request)
+
+    async def run() -> None:
+        state: Any = server.APP.state
+        state.history_record_interval = 600
+        state.history_sample_duration = 10
+        state.history_sample_count = 5
+        state.manual_record_min_interval = 60
+        state.history_process_count = 10
+        state.history_processes_enabled = False
+        state.ping_enabled = True
+        original: asyncio.Task[None] = asyncio.create_task(server.history_recorder())
+        state.history_task = original
+        try:
+            await asyncio.sleep(0)  # Let the actual recorder start its wait.
+            response: server.Response = await save(
+                min_record_interval=30,
+                sample_duration=12,
+                sample_count=3,
+                process_count=5,
+                processes_enabled=True,
+                ping_enabled=False,
+            )
+            assert response.status_code == 200
+            assert state.history_task is original and not original.done(), (
+                "Changing sampling options or the manual cooldown must preserve the pending recording"
+            )
+            response = await save(record_interval=600)
+            assert response.status_code == 200 and state.history_task is original
+            response = await save(record_interval=60)
+            assert response.status_code == 200 and state.history_record_interval == 60
+            assert original.cancelled() and state.history_task is not original, (
+                "Changing the automatic interval must reschedule the recorder"
+            )
+        finally:
+            original.cancel()
+            state.history_task.cancel()
+            await asyncio.gather(original, state.history_task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
 def test_read_history_unit() -> None:
     """Unit tests for server._read_history tail-reading (no server process needed)."""
     import server

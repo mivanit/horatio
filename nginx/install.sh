@@ -161,7 +161,8 @@ server {
 }
 "
 
-# Service server blocks
+# Service server blocks and index links
+LINKS=""
 while IFS= read -r line || [ -n "$line" ]; do
     # Skip comments and blank lines (but not the domain directive)
     case "$line" in
@@ -192,22 +193,12 @@ server {
     }
 }
 "
+    LINKS="${LINKS}    <li><a href=\"http://${name}.${DOMAIN}\">${name}</a></li>
+"
 done < "$SERVICES_FILE"
 
 # --- Generate index.html ---
 echo "Generating index page..."
-
-LINKS=""
-while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-        '#'*|'') continue ;;
-    esac
-    name=$(echo "$line" | awk '{print $1}')
-    port=$(echo "$line" | awk '{print $2}')
-    [ -n "$name" ] && [ -n "$port" ] || continue
-    LINKS="${LINKS}    <li><a href=\"http://${name}.${DOMAIN}\">${name}</a></li>
-"
-done < "$SERVICES_FILE"
 
 INDEX="<!DOCTYPE html>
 <html>

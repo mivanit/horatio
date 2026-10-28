@@ -290,16 +290,6 @@ function animateValue(element, newValue, suffix = '', decimals = 1) {
   requestAnimationFrame(update);
 }
 
-// Fade transition for text value updates
-function fadeUpdateValue(element, newText) {
-  if (element.textContent === newText) return;
-  element.style.opacity = '0.6';
-  element.textContent = newText;
-  requestAnimationFrame(() => {
-    element.style.opacity = '1';
-  });
-}
-
 // GPU colors for multi-GPU support
 const GPU_COLORS = [
   getCssColor('--color-gpu'), getCssColor('--color-gpu-mem'),
@@ -507,11 +497,6 @@ async function fetchEndpointList() {
   } catch (e) {
     // Backend doesn't support list-endpoints — assume all available
   }
-}
-
-function isEndpointAvailable(endpointPath) {
-  if (availableEndpoints === null) return true;
-  return availableEndpoints.has(endpointPath);
 }
 
 function hideUnavailableCards() {

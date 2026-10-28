@@ -61,7 +61,7 @@ function liveContext(ids) {
   });
   evaluate(context,
     between(charts, '// Data stores', '// Generate time labels') +
-    between(config, 'function animateValue', '// Fade transition') +
+    between(config, 'function animateValue', '// GPU colors') +
     between(config, 'function getCache', '// The CPU core temperatures') +
     between(app, 'function guard', 'async function fetchDataOnce'));
   return context;
@@ -165,7 +165,7 @@ async function testStartupReadTimeouts() {
       });
       evaluate(context,
         between(config, 'async function loadConfig', '// Update card warning') +
-        between(config, 'async function fetchEndpointList', 'function isEndpointAvailable') +
+        between(config, 'async function fetchEndpointList', 'function hideUnavailableCards') +
         between(config, 'async function safeFetch', '// Data cache for reducing API calls') +
         between(app, 'function startPolling', '// Toggle connection'));
       let watchdog;
