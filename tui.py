@@ -169,7 +169,14 @@ class Terminal:
 
 
 # The bottom bar, nano style: key in reverse video, then what it does.
-KEYS = (("q", "Quit"), ("r", "Refresh"), ("v", "View"), ("t", "Table"), ("+", "Longer"), ("-", "Shorter"))
+KEYS = (
+    ("q", "Quit"),
+    ("r", "Refresh"),
+    ("v", "View"),
+    ("t", "Table"),
+    ("+", "Longer"),
+    ("-", "Shorter"),
+)
 BAR_ROWS = 2  # status line + key list
 
 
@@ -201,13 +208,25 @@ def draw(frame: str, status: str, cols: int, rows: int, host: str = "") -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("url", nargs="?", default=None,
-                        help="horatio server (default: $HORATIO_URL, the server this was "
-                             "downloaded from, or this box's horatio)")
-    parser.add_argument("--interval", type=float, default=2.0, help="seconds between refreshes (min 1)")
-    parser.add_argument("--color", choices=("on", "256", "16", "off"), help="override colour detection")
-    parser.add_argument("--style", choices=("unicode", "ascii", "simple"), help="override character set")
-    parser.add_argument("--hours", type=float, help="history window (default: the server's 1-3 h)")
+    parser.add_argument(
+        "url",
+        nargs="?",
+        default=None,
+        help="horatio server (default: $HORATIO_URL, the server this was "
+        "downloaded from, or this box's horatio)",
+    )
+    parser.add_argument(
+        "--interval", type=float, default=2.0, help="seconds between refreshes (min 1)"
+    )
+    parser.add_argument(
+        "--color", choices=("on", "256", "16", "off"), help="override colour detection"
+    )
+    parser.add_argument(
+        "--style", choices=("unicode", "ascii", "simple"), help="override character set"
+    )
+    parser.add_argument(
+        "--hours", type=float, help="history window (default: the server's 1-3 h)"
+    )
     parser.add_argument("--once", action="store_true", help="print one frame and exit")
     args = parser.parse_args()
     args.url = args.url or default_url()
@@ -224,11 +243,18 @@ def main() -> int:
     state = {"view": 0, "table": False, "hours": args.hours}
 
     def url(cols: int, rows: int | None) -> str:
-        return build_url(args.url, {
-            "view": VIEWS[state["view"]], "style": style, "color": color,
-            "width": max(60, cols), "height": None if rows is None else max(5, rows - BAR_ROWS),
-            "hours": state["hours"], "table": 1 if state["table"] else None,
-        })
+        return build_url(
+            args.url,
+            {
+                "view": VIEWS[state["view"]],
+                "style": style,
+                "color": color,
+                "width": max(60, cols),
+                "height": None if rows is None else max(5, rows - BAR_ROWS),
+                "hours": state["hours"],
+                "table": 1 if state["table"] else None,
+            },
+        )
 
     if args.once or not isatty:
         cols, _ = shutil.get_terminal_size((100, 50))
@@ -260,8 +286,10 @@ def main() -> int:
                     next_fetch = now + backoff
                 age = f"{time.monotonic() - fetched:.0f}s ago" if fetched else "never"
                 hours = f"{state['hours']:g}h" if state["hours"] else "auto window"
-                status = (f" {VIEWS[state['view']]}  {hours}  {color}/{style}"
-                          f"  updated {age}  {'ERROR: ' + error if error else ''}")
+                status = (
+                    f" {VIEWS[state['view']]}  {hours}  {color}/{style}"
+                    f"  updated {age}  {'ERROR: ' + error if error else ''}"
+                )
                 draw(frame or f"connecting to {args.url} ...", status, cols, rows, host)
                 k = term.key(min(0.5, max(0.0, next_fetch - time.monotonic())))
                 if not k:
@@ -274,7 +302,9 @@ def main() -> int:
                     state["table"] = not state["table"]
                 elif k in "+=-_":
                     cur = state["hours"] or 2
-                    i = min(range(len(HOURS_STEPS)), key=lambda j: abs(HOURS_STEPS[j] - cur))
+                    i = min(
+                        range(len(HOURS_STEPS)), key=lambda j: abs(HOURS_STEPS[j] - cur)
+                    )
                     i = min(len(HOURS_STEPS) - 1, i + 1) if k in "+=" else max(0, i - 1)
                     state["hours"] = HOURS_STEPS[i]
                 elif k != "r":

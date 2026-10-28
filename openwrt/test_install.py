@@ -20,7 +20,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 ASSET = b"// Chart.js test fixture\nwindow.Chart = {};\n"
 ASSET_HASH = hashlib.sha256(ASSET).hexdigest()
-MOCK = r'''#!/usr/bin/env python3
+MOCK = r"""#!/usr/bin/env python3
 import json, os, pathlib, pwd, sys
 name, args = pathlib.Path(sys.argv[0]).name, sys.argv[1:]
 root = pathlib.Path(os.environ["HORATIO_INSTALL_TEST"])
@@ -65,7 +65,7 @@ elif name == "crontab":
             table.write_text(event["content"])
 elif name == "test-uhttpd-service" and event["config"] is None and os.environ["HORATIO_UNINSTALL"] != "1":
     sys.exit(42)
-'''
+"""
 
 
 class InstallerTests(unittest.TestCase):
@@ -89,33 +89,61 @@ class InstallerTests(unittest.TestCase):
         script = script.replace("/etc/init.d/uhttpd", "test-uhttpd-service")
         script = script.replace("/etc/init.d/cron", "test-cron-service")
         script = script.replace("/etc/crontabs", str(self.root / "crontabs"))
-        script = re.sub(r'CHARTJS_SHA256="[a-f0-9]+"', f'CHARTJS_SHA256="{ASSET_HASH}"', script)
+        script = re.sub(
+            r'CHARTJS_SHA256="[a-f0-9]+"', f'CHARTJS_SHA256="{ASSET_HASH}"', script
+        )
         self.script = self.root / "openwrt/install.sh"
         self.script.write_text(script)
         mock = self.bin / "mock"
         mock.write_text(MOCK)
         mock.chmod(0o755)
-        for name in ("uci", "uhttpd", "apk", "wget", "crontab", "sleep", "ip",
-                     "test-uhttpd-service", "test-cron-service"):
+        for name in (
+            "uci",
+            "uhttpd",
+            "apk",
+            "wget",
+            "crontab",
+            "sleep",
+            "ip",
+            "test-uhttpd-service",
+            "test-cron-service",
+        ):
             (self.bin / name).symlink_to(mock)
 
     def run_install(self, mode="success", *, extra_env=None, uninstall=False):
-        env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
-                   HORATIO_INSTALL_TEST=str(self.root), HORATIO_DOWNLOAD_MODE=mode,
-                   HORATIO_UNINSTALL="1" if uninstall else "0")
+        env = dict(
+            os.environ,
+            PATH=f"{self.bin}:{os.environ['PATH']}",
+            HORATIO_INSTALL_TEST=str(self.root),
+            HORATIO_DOWNLOAD_MODE=mode,
+            HORATIO_UNINSTALL="1" if uninstall else "0",
+        )
         env.pop("LAN_IP", None)
         if extra_env:
             env.update(extra_env)
-        return subprocess.run(["sh", str(self.script), *(["--uninstall"] if uninstall else [])], env=env, text=True,
-                              capture_output=True, timeout=10)
+        return subprocess.run(
+            ["sh", str(self.script), *(["--uninstall"] if uninstall else [])],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
 
     def events(self, command):
         path = self.root / "events"
-        entries = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        entries = (
+            [json.loads(line) for line in path.read_text().splitlines()]
+            if path.exists()
+            else []
+        )
         return [entry for entry in entries if entry["command"] == command]
 
     def downloads(self):
-        return [entry for entry in self.events("wget") if entry["args"][-1].startswith("https://")]
+        return [
+            entry
+            for entry in self.events("wget")
+            if entry["args"][-1].startswith("https://")
+        ]
 
     def cron_writes(self):
         return [entry for entry in self.events("crontab") if "content" in entry]
@@ -131,7 +159,9 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.asset.read_bytes(), ASSET)
         self.assertEqual(len(self.downloads()), 2)
         self.assertEqual(self.events("test-uhttpd-service")[0]["config"], self.example)
-        self.assertTrue(all(entry["args"][1] != str(self.asset) for entry in self.downloads()))
+        self.assertTrue(
+            all(entry["args"][1] != str(self.asset) for entry in self.downloads())
+        )
 
     def test_existing_empty_or_partial_asset_is_repaired(self):
         for old in (b"", b"old partial download"):
@@ -162,7 +192,9 @@ class InstallerTests(unittest.TestCase):
     def test_pins_match_linux_installer(self):
         for key in ("CHARTJS_VERSION", "CHARTJS_SHA256"):
             pattern = rf'^{key}="([^"]+)"$'
-            router = re.search(pattern, (ROOT / "openwrt/install.sh").read_text(), re.MULTILINE)
+            router = re.search(
+                pattern, (ROOT / "openwrt/install.sh").read_text(), re.MULTILINE
+            )
             linux = re.search(pattern, (ROOT / "install.sh").read_text(), re.MULTILINE)
             self.assertIsNotNone(router)
             self.assertIsNotNone(linux)
@@ -173,35 +205,51 @@ class InstallerTests(unittest.TestCase):
             with self.subTest(address=address):
                 result = self.run_install(extra_env={"LAN_IP": address})
                 self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-                self.assertIn(["add_list", "uhttpd.dashboard.listen_http=192.168.50.1:8080"],
-                              [event["args"] for event in self.events("uci")])
-                self.assertNotIn(["get", "network.lan.ipaddr"],
-                                 [event["args"] for event in self.events("uci")])
+                self.assertIn(
+                    ["add_list", "uhttpd.dashboard.listen_http=192.168.50.1:8080"],
+                    [event["args"] for event in self.events("uci")],
+                )
+                self.assertNotIn(
+                    ["get", "network.lan.ipaddr"],
+                    [event["args"] for event in self.events("uci")],
+                )
                 self.assertEqual(self.events("ip"), [])
-                self.assertEqual(self.events("wget")[-1]["args"][-1],
-                                 "http://192.168.50.1:8080/api/4/load")
+                self.assertEqual(
+                    self.events("wget")[-1]["args"][-1],
+                    "http://192.168.50.1:8080/api/4/load",
+                )
 
     def test_empty_override_uses_detected_lan_ip(self):
-        result = self.run_install(extra_env={"LAN_IP": "", "HORATIO_DETECTED_LAN_IP": "192.168.3.1/24"})
+        result = self.run_install(
+            extra_env={"LAN_IP": "", "HORATIO_DETECTED_LAN_IP": "192.168.3.1/24"}
+        )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertIn(["add_list", "uhttpd.dashboard.listen_http=192.168.3.1:8080"],
-                      [event["args"] for event in self.events("uci")])
+        self.assertIn(
+            ["add_list", "uhttpd.dashboard.listen_http=192.168.3.1:8080"],
+            [event["args"] for event in self.events("uci")],
+        )
         self.assertEqual(self.events("ip"), [])
 
     def test_missing_uci_address_falls_back_to_non_loopback_interface(self):
         result = self.run_install(extra_env={"HORATIO_DETECTED_LAN_IP": ""})
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertIn(["add_list", "uhttpd.dashboard.listen_http=192.168.2.1:8080"],
-                      [event["args"] for event in self.events("uci")])
+        self.assertIn(
+            ["add_list", "uhttpd.dashboard.listen_http=192.168.2.1:8080"],
+            [event["args"] for event in self.events("uci")],
+        )
         self.assertEqual(len(self.events("ip")), 1)
 
     def test_only_owned_cron_entries_are_replaced_or_removed(self):
-        unrelated = ("0 1 * * * /usr/local/bin/dashboard-history-backup.sh\n"
-                     "5 1 * * * echo dashboard-history\n"
-                     "10 1 * * * /backup # dashboard-history-backup\n"
-                     "15 1 * * * /ordinary-job\n")
-        owned = ("0 3,15 * * * /old-job # dashboard-history\n"
-                 "0 3,15 * * * /duplicate-job # dashboard-history \t\n")
+        unrelated = (
+            "0 1 * * * /usr/local/bin/dashboard-history-backup.sh\n"
+            "5 1 * * * echo dashboard-history\n"
+            "10 1 * * * /backup # dashboard-history-backup\n"
+            "15 1 * * * /ordinary-job\n"
+        )
+        owned = (
+            "0 3,15 * * * /old-job # dashboard-history\n"
+            "0 3,15 * * * /duplicate-job # dashboard-history \t\n"
+        )
         for uninstall in (False, True):
             with self.subTest(uninstall=uninstall):
                 self.cron.write_text(unrelated + owned)
@@ -215,8 +263,10 @@ class InstallerTests(unittest.TestCase):
                 if uninstall:
                     self.assertEqual(final, unrelated)
                 else:
-                    expected = ("0 3,15 * * * wget -qO /dev/null --post-data='' "
-                                "http://192.168.1.1:8080/api/history/record # dashboard-history\n")
+                    expected = (
+                        "0 3,15 * * * wget -qO /dev/null --post-data='' "
+                        "http://192.168.1.1:8080/api/history/record # dashboard-history\n"
+                    )
                     self.assertEqual(final, unrelated + expected)
 
     def test_missing_and_empty_cron_tables_are_supported(self):
@@ -227,18 +277,27 @@ class InstallerTests(unittest.TestCase):
                     if exists:
                         self.cron.write_text("")
                     result = self.run_install(uninstall=uninstall)
-                    self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-                    self.assertEqual(self.cron.read_text().count("# dashboard-history"),
-                                     0 if uninstall else 1)
+                    self.assertEqual(
+                        result.returncode, 0, result.stderr + result.stdout
+                    )
+                    self.assertEqual(
+                        self.cron.read_text().count("# dashboard-history"),
+                        0 if uninstall else 1,
+                    )
 
     def test_failed_cron_read_never_replaces_existing_jobs(self):
         previous = "0 1 * * * /backup\n0 3,15 * * * /record # dashboard-history\n"
         for uninstall in (False, True):
             with self.subTest(uninstall=uninstall):
                 self.cron.write_text(previous)
-                result = self.run_install(uninstall=uninstall, extra_env={
-                    "HORATIO_FAIL_COMMAND": json.dumps(["crontab", "-c", str(self.cron.parent), "-l"]),
-                })
+                result = self.run_install(
+                    uninstall=uninstall,
+                    extra_env={
+                        "HORATIO_FAIL_COMMAND": json.dumps(
+                            ["crontab", "-c", str(self.cron.parent), "-l"]
+                        ),
+                    },
+                )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(self.cron.read_text(), previous)
                 self.assertEqual(self.cron_writes(), [])
@@ -258,8 +317,9 @@ class InstallerTests(unittest.TestCase):
                 with self.subTest(mode=mode, uninstall=uninstall):
                     self.cron.write_text(previous)
                     (self.root / "events").unlink(missing_ok=True)
-                    result = self.run_install(uninstall=uninstall,
-                                              extra_env={"HORATIO_CRON_WRITE_MODE": mode})
+                    result = self.run_install(
+                        uninstall=uninstall, extra_env={"HORATIO_CRON_WRITE_MODE": mode}
+                    )
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(self.cron.read_text(), previous)
                     self.assertEqual(len(self.cron_writes()), 1)
@@ -268,12 +328,18 @@ class InstallerTests(unittest.TestCase):
 
     def test_uninstall_stops_on_uci_or_service_failure_before_removing_cron(self):
         previous = "0 3,15 * * * /record # dashboard-history\n"
-        for command in (["uci", "show", "uhttpd"], ["uci", "delete", "uhttpd.dashboard"],
-                        ["uci", "commit", "uhttpd"], ["test-uhttpd-service", "restart"]):
+        for command in (
+            ["uci", "show", "uhttpd"],
+            ["uci", "delete", "uhttpd.dashboard"],
+            ["uci", "commit", "uhttpd"],
+            ["test-uhttpd-service", "restart"],
+        ):
             with self.subTest(command=command):
                 self.cron.write_text(previous)
-                result = self.run_install(uninstall=True,
-                                          extra_env={"HORATIO_FAIL_COMMAND": json.dumps(command)})
+                result = self.run_install(
+                    uninstall=True,
+                    extra_env={"HORATIO_FAIL_COMMAND": json.dumps(command)},
+                )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("injected command failure", result.stderr)
                 self.assertNotIn("Dashboard removed.", result.stdout)
@@ -289,18 +355,25 @@ class InstallerTests(unittest.TestCase):
         history.parent.mkdir()
         history.write_text('{"ts": 42}\n')
         for _ in range(2):
-            result = self.run_install(uninstall=True, extra_env={"HORATIO_SECTION_MISSING": "1"})
+            result = self.run_install(
+                uninstall=True, extra_env={"HORATIO_SECTION_MISSING": "1"}
+            )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertIn("Dashboard removed.", result.stdout)
             self.assertEqual(self.cron.read_text(), previous)
             self.assertEqual(config.read_text(), '{"title": "My Router"}\n')
             self.assertEqual(history.read_text(), '{"ts": 42}\n')
-        self.assertNotIn(["delete", "uhttpd.dashboard"], [event["args"] for event in self.events("uci")])
+        self.assertNotIn(
+            ["delete", "uhttpd.dashboard"],
+            [event["args"] for event in self.events("uci")],
+        )
 
     def test_install_reports_cron_service_failure(self):
-        result = self.run_install(extra_env={
-            "HORATIO_FAIL_COMMAND": json.dumps(["test-cron-service", "restart"]),
-        })
+        result = self.run_install(
+            extra_env={
+                "HORATIO_FAIL_COMMAND": json.dumps(["test-cron-service", "restart"]),
+            }
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("Dashboard is running!", result.stdout)
 

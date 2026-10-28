@@ -17,25 +17,48 @@ SECRET = "HORATIO_TEST_SECRET_MARKER"
 class ProcessInfoTests(unittest.TestCase):
     def test_script_and_module_positions(self) -> None:
         cases = [
-            (["/usr/bin/python3", "-u", "-m", "http.server", "--token", SECRET],
-             "http.server", "/usr/bin/python3 -m http.server"),
-            (["python3.13", "-I", "-B", "app.py", "-m", SECRET], "app.py", "python3.13 app.py"),
-            (["python", "-W", "ignore", "-X", "dev", "/srv/my app.py", SECRET],
-             "my app.py", "python /srv/my app.py"),
-            (["python", "-Wignore", "-Xdev", "-m", "package.module", SECRET],
-             "package.module", "python -m package.module"),
+            (
+                ["/usr/bin/python3", "-u", "-m", "http.server", "--token", SECRET],
+                "http.server",
+                "/usr/bin/python3 -m http.server",
+            ),
+            (
+                ["python3.13", "-I", "-B", "app.py", "-m", SECRET],
+                "app.py",
+                "python3.13 app.py",
+            ),
+            (
+                ["python", "-W", "ignore", "-X", "dev", "/srv/my app.py", SECRET],
+                "my app.py",
+                "python /srv/my app.py",
+            ),
+            (
+                ["python", "-Wignore", "-Xdev", "-m", "package.module", SECRET],
+                "package.module",
+                "python -m package.module",
+            ),
             (["python", "--", "-script.py", SECRET], "-script.py", "python -script.py"),
             (["pypy3", "script.py", SECRET], "script.py", "pypy3 script.py"),
-            (["node", "--no-warnings", "/srv/app.js", "--eval", SECRET], "app.js", "node /srv/app.js"),
+            (
+                ["node", "--no-warnings", "/srv/app.js", "--eval", SECRET],
+                "app.js",
+                "node /srv/app.js",
+            ),
             (["nodejs", "--", "app.js", SECRET], "app.js", "nodejs app.js"),
             (["ruby3.1", "-w", "/srv/app.rb", SECRET], "app.rb", "ruby3.1 /srv/app.rb"),
             (["perl", "-w", "/srv/app.pl", SECRET], "app.pl", "perl /srv/app.pl"),
-            (["php8.2", "-n", "-f", "/srv/app.php", SECRET], "app.php", "php8.2 /srv/app.php"),
+            (
+                ["php8.2", "-n", "-f", "/srv/app.php", SECRET],
+                "app.php",
+                "php8.2 /srv/app.php",
+            ),
             (["php", "/srv/app.php", SECRET], "app.php", "php /srv/app.php"),
         ]
         for argv, name, path in cases:
             with self.subTest(argv=argv):
-                self.assertEqual(server._sanitize_process_argv(argv), {"name": name, "path": path})
+                self.assertEqual(
+                    server._sanitize_process_argv(argv), {"name": name, "path": path}
+                )
 
     def test_inline_code_and_unknown_option_operands_are_private(self) -> None:
         code = f'token="{SECRET}"'
@@ -80,8 +103,12 @@ class ProcessInfoTests(unittest.TestCase):
         for options in ([], ["-W", ""]):
             with self.subTest(options=options):
                 child = subprocess.Popen(
-                    [sys.executable, *options, "-c",
-                     f'import time; token="{SECRET}"; print("ready", flush=True); time.sleep(30)'],
+                    [
+                        sys.executable,
+                        *options,
+                        "-c",
+                        f'import time; token="{SECRET}"; print("ready", flush=True); time.sleep(30)',
+                    ],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     text=True,
@@ -95,7 +122,14 @@ class ProcessInfoTests(unittest.TestCase):
                     self.assertNotIn(SECRET, info["path"])
                     self.assertEqual(info["path"], sys.executable)
                     rows = server.build_process_records(
-                        [{"pid": child.pid, "name": "python", "cpu_percent": 1, "memory_info": {"rss": 1024}}],
+                        [
+                            {
+                                "pid": child.pid,
+                                "name": "python",
+                                "cpu_percent": 1,
+                                "memory_info": {"rss": 1024},
+                            }
+                        ],
                         [],
                         1,
                     )

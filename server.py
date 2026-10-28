@@ -189,7 +189,6 @@ if not isinstance(_processes_enabled, bool):
 DEFAULT_HISTORY_PROCESSES_ENABLED: Final[bool] = _processes_enabled
 
 
-
 def _read_limits(cfg: dict[str, Any]) -> tuple[float, float]:
     """(network_mbps, disk_io_mbps) ceilings from config.json's "limits".
 
@@ -293,13 +292,17 @@ def _verify_password(password: str) -> bool:
 # client IP and lock that IP out for a spell once it crosses the threshold.
 AUTH_MAX_FAILS: Final[int] = 5
 AUTH_LOCKOUT_SEC: Final[int] = 60
-_auth_failures: dict[str, tuple[int, float]] = {}  # ip -> (consecutive_fails, locked_until)
+_auth_failures: dict[
+    str, tuple[int, float]
+] = {}  # ip -> (consecutive_fails, locked_until)
 # One KDF at a time: a burst of guesses must not fill the thread pool that the
 # recorder and the threaded cards share.
 _kdf_lock: asyncio.Lock = asyncio.Lock()
 
 
-async def _verify_password_throttled(request: Request, password: str) -> Response | None:
+async def _verify_password_throttled(
+    request: Request, password: str
+) -> Response | None:
     """Verify ``password`` rate-limited per client IP.
 
     Returns an error Response to send back — 429 while the IP is locked out, 403 on
@@ -323,7 +326,10 @@ async def _verify_password_throttled(request: Request, password: str) -> Respons
     # Count the attempt before the KDF runs, so concurrent guesses each see the
     # earlier ones and the lockout holds under a burst; a correct one clears it.
     fails += 1
-    _auth_failures[ip] = (fails, now + AUTH_LOCKOUT_SEC if fails >= AUTH_MAX_FAILS else 0.0)
+    _auth_failures[ip] = (
+        fails,
+        now + AUTH_LOCKOUT_SEC if fails >= AUTH_MAX_FAILS else 0.0,
+    )
     async with _kdf_lock:
         ok = await asyncio.to_thread(_verify_password, password)
     if not ok:
@@ -347,7 +353,11 @@ def _sanitize_process_argv(argv: list[str]) -> dict[str, str]:
     args = argv[1:]
 
     def script(path: str) -> dict[str, str]:
-        return executable if path == "-" else {"name": Path(path).name, "path": f"{exe} {path}"}
+        return (
+            executable
+            if path == "-"
+            else {"name": Path(path).name, "path": f"{exe} {path}"}
+        )
 
     if re.fullmatch(r"(?:pythonw?|pypy)(?:\d+(?:\.\d+)*)?t?", exe_name.lower()):
         i = 0
@@ -362,8 +372,26 @@ def _sanitize_process_argv(argv: list[str]) -> dict[str, str]:
                 return executable
             if not arg.startswith("-"):
                 return script(arg)
-            if arg in {"-b", "-bb", "-B", "-d", "-E", "-i", "-I", "-O", "-OO",
-                       "-P", "-q", "-R", "-s", "-S", "-u", "-v", "-vv", "-x"}:
+            if arg in {
+                "-b",
+                "-bb",
+                "-B",
+                "-d",
+                "-E",
+                "-i",
+                "-I",
+                "-O",
+                "-OO",
+                "-P",
+                "-q",
+                "-R",
+                "-s",
+                "-S",
+                "-u",
+                "-v",
+                "-vv",
+                "-x",
+            }:
                 i += 1
             elif arg in {"-W", "-X", "--check-hash-based-pycs"}:
                 i += 2  # their operands are not scripts (and can contain secrets)
@@ -373,7 +401,9 @@ def _sanitize_process_argv(argv: list[str]) -> dict[str, str]:
                 return executable  # includes -c, stdin, and unknown options
         return executable
 
-    interpreter = re.fullmatch(r"(node|nodejs|ruby|perl|php)(?:\.?\d+(?:\.\d+)*)?", exe_name.lower())
+    interpreter = re.fullmatch(
+        r"(node|nodejs|ruby|perl|php)(?:\.?\d+(?:\.\d+)*)?", exe_name.lower()
+    )
     if interpreter:
         kind = interpreter.group(1)
         harmless_flags = {
@@ -414,7 +444,9 @@ def get_sanitized_process_info(
         cmdline_raw = Path(f"/proc/{pid}/cmdline").read_text()
         # Keep empty operands: dropping the value in `-W '' -c code` shifts
         # -c into the warning option and makes its code look like a script.
-        cmdline: list[str] = cmdline_raw.removesuffix("\0").split("\0") if cmdline_raw else []
+        cmdline: list[str] = (
+            cmdline_raw.removesuffix("\0").split("\0") if cmdline_raw else []
+        )
 
         # Fallback: if only 1 element with spaces, it's space-separated (e.g., Firefox snap)
         if len(cmdline) == 1 and " " in cmdline[0]:
@@ -539,8 +571,11 @@ def get_gpu_stats() -> list[dict[str, Any]]:
         "clocks_event_reasons_counters.sw_thermal_slowdown",
         "clocks_event_reasons_counters.hw_thermal_slowdown",
     )
-    command = ["nvidia-smi", "--query-gpu=" + basic_fields + "," + ",".join(counters),
-               "--format=csv,noheader,nounits"]
+    command = [
+        "nvidia-smi",
+        "--query-gpu=" + basic_fields + "," + ",".join(counters),
+        "--format=csv,noheader,nounits",
+    ]
     try:
         result = subprocess.run(
             command,
@@ -552,9 +587,14 @@ def get_gpu_stats() -> list[dict[str, Any]]:
         # Retry only that diagnostic; keep valid memory/temperature/power data.
         diagnostic = result.stdout + result.stderr
         if result.returncode != 0 and any(
-            f'Field "{field}" is not a valid field to query' in diagnostic for field in counters
+            f'Field "{field}" is not a valid field to query' in diagnostic
+            for field in counters
         ):
-            command = ["nvidia-smi", "--query-gpu=" + basic_fields, "--format=csv,noheader,nounits"]
+            command = [
+                "nvidia-smi",
+                "--query-gpu=" + basic_fields,
+                "--format=csv,noheader,nounits",
+            ]
             result = subprocess.run(command, capture_output=True, text=True, timeout=5)
         if result.returncode != 0:
             logger.warning("nvidia-smi failed: %s", result.stderr.strip())
@@ -664,7 +704,11 @@ def _dedupe_fs_by_device(fs_entries: list[dict[str, Any]]) -> list[dict[str, Any
 
     def _key(fs: dict[str, Any]) -> tuple[str, Any, Any]:
         size, used = fs.get("size"), fs.get("used")
-        if isinstance(size, (int, float)) and isinstance(used, (int, float)) and size > 0:
+        if (
+            isinstance(size, (int, float))
+            and isinstance(used, (int, float))
+            and size > 0
+        ):
             used = round(used / (size * 0.001))  # bucket: 0.1% of the fs
         return (os.path.realpath(fs["device_name"]), size, used)
 
@@ -781,8 +825,12 @@ def build_gpu_records(
                     **_gpu_mem_fields(st),
                     # Seconds of thermal slowdown since driver load (cumulative:
                     # a rise between two records is slowdown in that interval).
-                    "throttle_sw_thermal_s": _round(sw_us / 1e6, 1) if sw_us is not None else None,
-                    "throttle_hw_thermal_s": _round(hw_us / 1e6, 1) if hw_us is not None else None,
+                    "throttle_sw_thermal_s": _round(sw_us / 1e6, 1)
+                    if sw_us is not None
+                    else None,
+                    "throttle_hw_thermal_s": _round(hw_us / 1e6, 1)
+                    if hw_us is not None
+                    else None,
                 }
             )
     elif gpu_data:
@@ -839,7 +887,9 @@ def aggregate_ping(
     """
     result: dict[str, Any] = {}
     for target, attempts in ping_attempts.items():
-        vals = [v for v in (_num(s) for s in ping_samples.get(target, [])) if v is not None]
+        vals = [
+            v for v in (_num(s) for s in ping_samples.get(target, [])) if v is not None
+        ]
         if vals:
             failed = max(0, attempts - len(vals))
             loss = round(failed / attempts, 4) if attempts else 0.0
@@ -930,11 +980,13 @@ def _proc_parent_and_start(pid: int) -> tuple[int | None, float | None]:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
         # The comm field is in parentheses and may itself contain spaces/parens.
-        fields = stat[stat.rindex(")") + 2:].split()
+        fields = stat[stat.rindex(")") + 2 :].split()
         ppid = int(fields[1])
         start_ticks = int(fields[19])
         create_time = (
-            round(_BOOT_TIME + start_ticks / _CLK_TCK, 2) if _BOOT_TIME is not None else None
+            round(_BOOT_TIME + start_ticks / _CLK_TCK, 2)
+            if _BOOT_TIME is not None
+            else None
         )
         return ppid, create_time
     except (OSError, ValueError, IndexError):
@@ -976,8 +1028,11 @@ def build_process_records(
             slot["gpus"].add(g["gpu_index"])
 
     valid = [
-        p for p in processes
-        if isinstance(p, dict) and isinstance(p.get("pid"), int) and not isinstance(p["pid"], bool)
+        p
+        for p in processes
+        if isinstance(p, dict)
+        and isinstance(p.get("pid"), int)
+        and not isinstance(p["pid"], bool)
     ]
 
     def cpu(p: dict[str, Any]) -> float:
@@ -1005,8 +1060,10 @@ def build_process_records(
     def sparse(row: dict[str, Any], rates: tuple[str, ...] = ()) -> dict[str, Any]:
         # Drop unknowns, and the rate keys when zero or negative (counter reset).
         return {
-            k: v for k, v in row.items()
-            if v is not None and not (k in rates and isinstance(v, (int, float)) and v <= 0)
+            k: v
+            for k, v in row.items()
+            if v is not None
+            and not (k in rates and isinstance(v, (int, float)) and v <= 0)
         }
 
     chosen: dict[int, dict[str, Any]] = {}
@@ -1031,8 +1088,12 @@ def build_process_records(
             "user": p.get("username"),
             "status": p.get("status"),
             "cpu_percent": _round(p.get("cpu_percent"), 1),
-            "rss_mb": _round(rss_bytes(p) / (1024**2), 1) if rss_bytes(p) is not None else None,
-            "threads": p.get("num_threads") if isinstance(p.get("num_threads"), int) else None,
+            "rss_mb": _round(rss_bytes(p) / (1024**2), 1)
+            if rss_bytes(p) is not None
+            else None,
+            "threads": p.get("num_threads")
+            if isinstance(p.get("num_threads"), int)
+            else None,
             "disk_read_kbps": _round(rd, 1),
             "disk_write_kbps": _round(wr, 1),
         }
@@ -1065,7 +1126,9 @@ def build_process_records(
     return rows
 
 
-async def collect_history_sample(glances_url: str, live: bool = False) -> dict[str, Any]:
+async def collect_history_sample(
+    glances_url: str, live: bool = False
+) -> dict[str, Any]:
     """Collect a single history sample from all data sources.
 
     Takes samples over the configured duration and computes min/avg/max
@@ -1097,9 +1160,7 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
     ping_samples: dict[str, list[float]] = (
         {t: [] for t in PING_TARGETS} if ping_enabled else {}
     )
-    ping_attempts: dict[str, int] = (
-        {t: 0 for t in PING_TARGETS} if ping_enabled else {}
-    )
+    ping_attempts: dict[str, int] = {t: 0 for t in PING_TARGETS} if ping_enabled else {}
 
     # Collect samples over time
     async with httpx.AsyncClient() as client:
@@ -1142,16 +1203,20 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
                             continue
                         total_in += caps.sample(
                             iface.get("bytes_recv_rate_per_sec"),
-                            MAX_NETWORK_MBPS, ("network.in_mbps", name),
+                            MAX_NETWORK_MBPS,
+                            ("network.in_mbps", name),
                         )
                         total_out += caps.sample(
                             iface.get("bytes_sent_rate_per_sec"),
-                            MAX_NETWORK_MBPS, ("network.out_mbps", name),
+                            MAX_NETWORK_MBPS,
+                            ("network.out_mbps", name),
                         )
                     net_in_samples.append(total_in)
                     net_out_samples.append(total_out)
                 else:
-                    logger.warning("Network API returned status %d", net_resp.status_code)
+                    logger.warning(
+                        "Network API returned status %d", net_resp.status_code
+                    )
 
                 # Fetch disk I/O
                 disk_resp = await client.get(f"{glances_url}/api/4/diskio", timeout=5.0)
@@ -1167,11 +1232,13 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
                             this_iter[disk_name] = (
                                 caps.sample(
                                     disk.get("read_bytes_rate_per_sec"),
-                                    MAX_DISK_IO_MBPS, ("disk_io.read_mbps", disk_name),
+                                    MAX_DISK_IO_MBPS,
+                                    ("disk_io.read_mbps", disk_name),
                                 ),
                                 caps.sample(
                                     disk.get("write_bytes_rate_per_sec"),
-                                    MAX_DISK_IO_MBPS, ("disk_io.write_mbps", disk_name),
+                                    MAX_DISK_IO_MBPS,
+                                    ("disk_io.write_mbps", disk_name),
                                 ),
                             )
                     disk_iter_samples.append(this_iter)
@@ -1259,7 +1326,9 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
         process_data: list = []
         if processes_enabled:
             try:
-                proc_resp = await client.get(f"{glances_url}/api/4/processlist", timeout=10.0)
+                proc_resp = await client.get(
+                    f"{glances_url}/api/4/processlist", timeout=10.0
+                )
                 if proc_resp.status_code == 200:
                     process_data = proc_resp.json()
             except Exception as e:
@@ -1310,7 +1379,9 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
     # CPU clocks: min/median/avg/max MHz over every core and sample of the burst,
     # with the hardware range. Omitted on a box without cpufreq.
     if freq_samples:
-        cpu_freq = aggregate_cpu_freq(freq_samples, await asyncio.to_thread(_cpu_freq_limits))
+        cpu_freq = aggregate_cpu_freq(
+            freq_samples, await asyncio.to_thread(_cpu_freq_limits)
+        )
         if cpu_freq is not None:
             record["cpu_freq"] = cpu_freq
 
@@ -1352,7 +1423,9 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
             resolved: str = os.path.realpath(device_name)
             if resolved.startswith("/dev/"):
                 disk = resolved[5:]
-                if disk not in disk_to_mount or len(mnt_point) < len(disk_to_mount[disk]):
+                if disk not in disk_to_mount or len(mnt_point) < len(
+                    disk_to_mount[disk]
+                ):
                     disk_to_mount[disk] = mnt_point
     # The whole-box totals count the MOUNTED devices only: Glances' diskio rows are
     # one per block device including partitions and md/dm layers, so summing every
@@ -1362,8 +1435,12 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
     counted: set[str] = {d for d in seen_disks if d in disk_to_mount} or seen_disks
     # Each device is capped already; the total is their plain sum (a busy pool
     # legitimately exceeds one drive's ceiling).
-    disk_read_samples = [sum(v[0] for d, v in it.items() if d in counted) for it in disk_iter_samples]
-    disk_write_samples = [sum(v[1] for d, v in it.items() if d in counted) for it in disk_iter_samples]
+    disk_read_samples = [
+        sum(v[0] for d, v in it.items() if d in counted) for it in disk_iter_samples
+    ]
+    disk_write_samples = [
+        sum(v[1] for d, v in it.items() if d in counted) for it in disk_iter_samples
+    ]
     if disk_read_samples or disk_write_samples:
         record["disk_io"] = {
             "read_mbps": compute_stats(disk_read_samples),
@@ -1387,7 +1464,10 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
     # The caps this record was collected under, per interface / per drive. Its
     # presence tells clamp_record_rates the totals are already sane sums (older
     # records only have totals, so reading clamps those instead).
-    record["rate_caps"] = {"network_mbps": MAX_NETWORK_MBPS, "disk_io_mbps": MAX_DISK_IO_MBPS}
+    record["rate_caps"] = {
+        "network_mbps": MAX_NETWORK_MBPS,
+        "disk_io_mbps": MAX_DISK_IO_MBPS,
+    }
     capped = caps.note(disk_to_mount)
     if capped:
         record["rate_capped"] = capped
@@ -1446,12 +1526,22 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
     # Chassis sensors from the collector's 60 s sensors snapshot (IPMI and RAPL are
     # root-only, so the OS cannot see them). Only a fresh snapshot counts: a dead
     # collector then leaves gaps in the charts instead of a flat line forever.
-    sensors = await asyncio.to_thread(_get_storage_health, SENSORS_PATH, SENSORS_STALE_SEC)
+    sensors = await asyncio.to_thread(
+        _get_storage_health, SENSORS_PATH, SENSORS_STALE_SEC
+    )
     if sensors["status"] == "ok":
         temps.update(
-            {r["label"]: r["value"] for r in sensors.get("temps", []) if r.get("value") is not None}
+            {
+                r["label"]: r["value"]
+                for r in sensors.get("temps", [])
+                if r.get("value") is not None
+            }
         )
-        fans = {r["label"]: r["value"] for r in sensors.get("fans", []) if r.get("value") is not None}
+        fans = {
+            r["label"]: r["value"]
+            for r in sensors.get("fans", [])
+            if r.get("value") is not None
+        }
         if fans:
             record["fans"] = fans
         # Watts rows only (BMC total + RAPL CPU/DRAM): the same capture also carries PSU amps/volts.
@@ -1459,7 +1549,8 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
             {
                 r["label"]: r["value"]
                 for r in sensors.get("power", [])
-                if r.get("value") is not None and str(r.get("reading", "")).endswith("Watts")
+                if r.get("value") is not None
+                and str(r.get("reading", "")).endswith("Watts")
             }
         )
     # Drive temperatures from the 15-min snapshot (SMART), fresh only, keyed by device.
@@ -1469,7 +1560,9 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
             {
                 d["device"]: d["temperature_c"]
                 for d in health.get("drives", [])
-                if isinstance(d, dict) and d.get("device") and d.get("temperature_c") is not None
+                if isinstance(d, dict)
+                and d.get("device")
+                and d.get("temperature_c") is not None
             }
         )
     if temps:
@@ -1505,7 +1598,8 @@ async def collect_history_sample(glances_url: str, live: bool = False) -> dict[s
             record["processes"] = await asyncio.to_thread(
                 build_process_records,
                 process_data if isinstance(process_data, list) else [],
-                gpu_procs, process_count,
+                gpu_procs,
+                process_count,
             )
         except Exception as e:
             logger.warning("History: failed to build process records: %s", e)
@@ -1625,7 +1719,9 @@ async def wait_for_glances_warm(glances_url: str, timeout: float = 20.0) -> bool
         while time.monotonic() < deadline:
             try:
                 resp = await client.get(f"{glances_url}/api/4/cpu", timeout=5.0)
-                total = _num(resp.json().get("total")) if resp.status_code == 200 else None
+                total = (
+                    _num(resp.json().get("total")) if resp.status_code == 200 else None
+                )
                 # Per-core warms up separately, on its own first requests.
                 await client.get(f"{glances_url}/api/4/percpu", timeout=5.0)
             except Exception:
@@ -1644,7 +1740,9 @@ async def record_initial_sample(glances_url: str) -> None:
     """Record initial history sample on startup (runs in background)."""
     try:
         if not await wait_for_glances_warm(glances_url):
-            logger.warning("Glances CPU readings still cold after 20 s; recording anyway")
+            logger.warning(
+                "Glances CPU readings still cold after 20 s; recording anyway"
+            )
         logger.info("Recording initial history sample")
         initial_sample = await collect_history_sample(glances_url)
         await asyncio.to_thread(append_history_record, initial_sample)
@@ -1654,7 +1752,9 @@ async def record_initial_sample(glances_url: str) -> None:
         logger.warning("Failed to record startup history: %s", e)
 
 
-GLANCES_MAX_MISSES: Final[int] = 3  # failed 5 s probes in a row (~30 s) before a restart
+GLANCES_MAX_MISSES: Final[int] = (
+    3  # failed 5 s probes in a row (~30 s) before a restart
+)
 
 
 async def _glances_answers() -> bool:
@@ -1767,11 +1867,15 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
-    stop_glances(app.state.glances_process)  # the watchdog may have replaced the original
+    stop_glances(
+        app.state.glances_process
+    )  # the watchdog may have replaced the original
 
 
 # No /docs, /redoc, /openapi.json: nothing uses them and the service is unauthenticated.
-APP: FastAPI = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+APP: FastAPI = FastAPI(
+    lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
+)
 
 
 class _GZipUnlessRange:
@@ -2026,7 +2130,9 @@ def _read_history(
                 covered = (
                     offset == 0
                     or (first_ts is not None and first_ts < cutoff)
-                    or (since is not None and first_ts is not None and first_ts <= since)
+                    or (
+                        since is not None and first_ts is not None and first_ts <= since
+                    )
                 )
                 # offset > 0 with a maxed window means we can't grow further.
                 hit_cap = offset > 0 and capped >= max_bytes
@@ -2074,9 +2180,7 @@ def _recording_health() -> dict[str, Any]:
         try:
             age = (
                 datetime.now(timezone.utc).timestamp()
-                - datetime.fromisoformat(
-                    str(since).replace("Z", "+00:00")
-                ).timestamp()
+                - datetime.fromisoformat(str(since).replace("Z", "+00:00")).timestamp()
             )
             stale = age > 2 * interval + duration
         except ValueError:
@@ -2157,7 +2261,9 @@ async def get_history(hours: float = 24, since: str | None = None) -> Response:
         "recording": _recording_health(),
     }
     # A long range is many MB of JSON: encode it off the event loop.
-    return Response(content=await asyncio.to_thread(json.dumps, body), media_type="application/json")
+    return Response(
+        content=await asyncio.to_thread(json.dumps, body), media_type="application/json"
+    )
 
 
 @APP.get("/api/history/field/{name}")
@@ -2173,7 +2279,9 @@ async def get_history_field(
     """
     if name not in HISTORY_SIDE_FIELDS:
         return Response(
-            content=json.dumps({"error": f"unknown field; one of {sorted(HISTORY_SIDE_FIELDS)}"}),
+            content=json.dumps(
+                {"error": f"unknown field; one of {sorted(HISTORY_SIDE_FIELDS)}"}
+            ),
             status_code=404,
             media_type="application/json",
         )
@@ -2191,7 +2299,10 @@ async def get_history_field(
         )
     records, skipped, truncated, cutoff = result
     slim = [
-        {"timestamp": rec.get("timestamp"), **({name: rec[name]} if name in rec else {})}
+        {
+            "timestamp": rec.get("timestamp"),
+            **({name: rec[name]} if name in rec else {}),
+        }
         for rec in records
     ]
     body = {
@@ -2203,7 +2314,9 @@ async def get_history_field(
         "cutoff": cutoff,
         "now": cutoff + hours * 3600,
     }
-    return Response(content=await asyncio.to_thread(json.dumps, body), media_type="application/json")
+    return Response(
+        content=await asyncio.to_thread(json.dumps, body), media_type="application/json"
+    )
 
 
 def _history_export_stat() -> os.stat_result:
@@ -2216,9 +2329,17 @@ def _history_export_stat() -> os.stat_result:
 class _HistoryFileResponse(FileResponse):
     """Keep FileResponse's range support, but bound full exports to their size."""
 
-    async def _handle_simple(self, send: Send, send_header_only: bool, send_pathsend: bool) -> None:
+    async def _handle_simple(
+        self, send: Send, send_header_only: bool, send_pathsend: bool
+    ) -> None:
         remaining = int(self.headers["content-length"])
-        await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
+        await send(
+            {
+                "type": "http.response.start",
+                "status": self.status_code,
+                "headers": self.raw_headers,
+            }
+        )
         if send_header_only or not remaining:
             await send({"type": "http.response.body", "body": b"", "more_body": False})
             return
@@ -2230,7 +2351,13 @@ class _HistoryFileResponse(FileResponse):
                 if not chunk:
                     raise OSError("History file shrank during export")
                 remaining -= len(chunk)
-                await send({"type": "http.response.body", "body": chunk, "more_body": remaining > 0})
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": chunk,
+                        "more_body": remaining > 0,
+                    }
+                )
 
 
 @APP.get("/api/history/raw")
@@ -2438,10 +2565,7 @@ async def update_history_settings(request: Request) -> Response:
     ):
         APP.state.history_sample_duration = sample_duration
         changed = True
-    if (
-        sample_count is not None
-        and sample_count != APP.state.history_sample_count
-    ):
+    if sample_count is not None and sample_count != APP.state.history_sample_count:
         APP.state.history_sample_count = sample_count
         changed = True
     if (
@@ -2451,10 +2575,7 @@ async def update_history_settings(request: Request) -> Response:
         APP.state.manual_record_min_interval = min_record_interval
         changed = True
 
-    if (
-        process_count is not None
-        and process_count != APP.state.history_process_count
-    ):
+    if process_count is not None and process_count != APP.state.history_process_count:
         APP.state.history_process_count = process_count
         changed = True
 
@@ -2562,7 +2683,10 @@ def _get_gpu_info() -> list[dict[str, int | float | str | None]]:
         logger.warning("nvidia-smi error: %s", e)
         return []
     if result.returncode != 0:
-        logger.warning("nvidia-smi failed: %s", result.stderr.strip() or f"exit {result.returncode}")
+        logger.warning(
+            "nvidia-smi failed: %s",
+            result.stderr.strip() or f"exit {result.returncode}",
+        )
         return []
 
     # Get CUDA version from nvidia-smi header
@@ -2640,7 +2764,9 @@ def _get_cpu_info() -> dict[str, Any]:
     for block in re.split(r"\n\s*\n", content.strip()):
         fields = {
             key.strip(): value.strip()
-            for key, value in (line.split(":", 1) for line in block.splitlines() if ":" in line)
+            for key, value in (
+                line.split(":", 1) for line in block.splitlines() if ":" in line
+            )
         }
         model_name = model_name or fields.get("model name", "")
         cache_size = cache_size or fields.get("cache size", "")
@@ -2786,7 +2912,9 @@ async def ip_info() -> Response:
         )
 
 
-def _parse_pmon(stdout: str) -> dict[tuple[int, int], tuple[float | None, float | None]]:
+def _parse_pmon(
+    stdout: str,
+) -> dict[tuple[int, int], tuple[float | None, float | None]]:
     """{(gpu index, pid): (sm %, mem %)} from ``nvidia-smi pmon -c 1 -s u``.
 
     Columns: gpu pid type sm mem enc dec jpg ofa command; '#' lines are headers.
@@ -2803,6 +2931,7 @@ def _parse_pmon(stdout: str) -> dict[tuple[int, int], tuple[float | None, float 
             key = (int(parts[0]), int(parts[1]))
         except ValueError:
             continue
+
         def pct(tok: str) -> float | None:
             try:
                 return float(tok)  # '-' -> ValueError -> None
@@ -2813,7 +2942,9 @@ def _parse_pmon(stdout: str) -> dict[tuple[int, int], tuple[float | None, float 
     return out
 
 
-def _gpu_process_utilization() -> dict[tuple[int, int], tuple[float | None, float | None]]:
+def _gpu_process_utilization() -> dict[
+    tuple[int, int], tuple[float | None, float | None]
+]:
     """Per-process SM / memory-bandwidth utilization, {} when pmon is unusable.
 
     ``--query-compute-apps`` has no utilization field; ``pmon`` is the only
@@ -2838,7 +2969,11 @@ def _gpu_process_utilization() -> dict[tuple[int, int], tuple[float | None, floa
         logger.debug("nvidia-smi pmon failed: %s", e)
         return {}
     if result.returncode != 0:
-        logger.debug("nvidia-smi pmon exit %d: %s", result.returncode, result.stderr.strip()[:200])
+        logger.debug(
+            "nvidia-smi pmon exit %d: %s",
+            result.returncode,
+            result.stderr.strip()[:200],
+        )
         return {}
     return _parse_pmon(result.stdout)
 
@@ -3370,7 +3505,12 @@ def _get_storage_health(
     path: str = STATE_PATH, stale_sec: int = STATE_STALE_SEC
 ) -> dict[str, Any]:
     """A collector snapshot plus ``status``/``age_sec`` (sync). Never raises."""
-    result: dict[str, Any] = {"status": "ok", "detail": None, "age_sec": None, "path": path}
+    result: dict[str, Any] = {
+        "status": "ok",
+        "detail": None,
+        "age_sec": None,
+        "path": path,
+    }
     try:
         with open(path, "rb") as f:
             state = json.load(f)
@@ -3409,7 +3549,9 @@ async def storage_health() -> Response:
 @APP.get("/api/sensors")
 async def sensors_snapshot() -> Response:
     """The 60 s fans / temps / power snapshot. Always 200; ``status`` says freshness."""
-    result = await asyncio.to_thread(_get_storage_health, SENSORS_PATH, SENSORS_STALE_SEC)
+    result = await asyncio.to_thread(
+        _get_storage_health, SENSORS_PATH, SENSORS_STALE_SEC
+    )
     return Response(content=json.dumps(result), media_type="application/json")
 
 
@@ -3418,8 +3560,18 @@ async def sensors_snapshot() -> Response:
 # any blocked view (/4/processlist, /4/all: full command lines) has encoded
 # spellings (process%256cist, /api/../api/4/...) a deny-list check never sees.
 GLANCES_PROXY_PLUGINS: Final[tuple[str, ...]] = (
-    "cpu", "percpu", "mem", "memswap", "gpu", "network", "diskio", "sensors",
-    "load", "uptime", "system", "fs",
+    "cpu",
+    "percpu",
+    "mem",
+    "memswap",
+    "gpu",
+    "network",
+    "diskio",
+    "sensors",
+    "load",
+    "uptime",
+    "system",
+    "fs",
 )
 
 
@@ -3428,12 +3580,22 @@ async def list_endpoints() -> Response:
     """Return list of all API endpoints this server implements."""
     endpoints = [
         *(f"/4/{plugin}" for plugin in GLANCES_PROXY_PLUGINS),
-        "/cpu-info", "/gpu-info", "/ip-info", "/ping",
-        "/gpu-processes", "/disk-processes", "/network-processes",
+        "/cpu-info",
+        "/gpu-info",
+        "/ip-info",
+        "/ping",
+        "/gpu-processes",
+        "/disk-processes",
+        "/network-processes",
         "/processlist",
-        "/history", "/history/settings", "/history/record",
-        "/history/field/temps", "/history/field/processes",
-        "/mail", "/storage-health", "/sensors",
+        "/history",
+        "/history/settings",
+        "/history/record",
+        "/history/field/temps",
+        "/history/field/processes",
+        "/mail",
+        "/storage-health",
+        "/sensors",
         "/list-endpoints",
     ]
     return Response(
@@ -3545,14 +3707,23 @@ def _ansi_256(r: int, g: int, b: int) -> int:
 
 
 _ANSI_16: Final[list[tuple[int, int, int]]] = [
-    (0, 0, 0), (205, 49, 49), (13, 188, 121), (229, 229, 16),
-    (36, 114, 200), (188, 63, 188), (17, 168, 205), (229, 229, 229),
+    (0, 0, 0),
+    (205, 49, 49),
+    (13, 188, 121),
+    (229, 229, 16),
+    (36, 114, 200),
+    (188, 63, 188),
+    (17, 168, 205),
+    (229, 229, 229),
 ]
 
 
 def _ansi_16(r: int, g: int, b: int) -> int:
     """Nearest of the 8 base colours (30-37), bright (90-97) when it's light."""
-    i = min(range(8), key=lambda k: sum((a - c) ** 2 for a, c in zip((r, g, b), _ANSI_16[k])))
+    i = min(
+        range(8),
+        key=lambda k: sum((a - c) ** 2 for a, c in zip((r, g, b), _ANSI_16[k])),
+    )
     return (90 if max(r, g, b) > 191 else 30) + i
 
 
@@ -3577,18 +3748,28 @@ def _fmt(value: Any, spec: str = ".1f", none: str = "-") -> str:
 
 
 def _bar(
-    percent: Any, unicode: bool, key: str = "cpu", color: bool | str = False,
+    percent: Any,
+    unicode: bool,
+    key: str = "cpu",
+    color: bool | str = False,
     width: int = TEXT_BAR_WIDTH,
 ) -> str:
     p = _num(percent)
     filled = 0 if p is None else round(max(0.0, min(p, 100.0)) / 100 * width)
     if unicode:
-        return _paint("█" * filled, key, color) + _paint("░" * (width - filled), "muted", color)
+        return _paint("█" * filled, key, color) + _paint(
+            "░" * (width - filled), "muted", color
+        )
     return "[" + _paint("#" * filled, key, color) + " " * (width - filled) + "]"
 
 
 def _range_bar(
-    lo: Any, mid: Any, hi: Any, unicode: bool, key: str, color: bool | str,
+    lo: Any,
+    mid: Any,
+    hi: Any,
+    unicode: bool,
+    key: str,
+    color: bool | str,
     width: int = TEXT_BAR_WIDTH,
 ) -> str:
     """A 0-100 track with min..max filled and the median marked."""
@@ -3696,7 +3877,11 @@ def _time_buckets(
 
 
 def _temps_of(record: dict[str, Any]) -> list[float]:
-    return [v for v in (_num(t) for t in (record.get("temps") or {}).values()) if v is not None]
+    return [
+        v
+        for v in (_num(t) for t in (record.get("temps") or {}).values())
+        if v is not None
+    ]
 
 
 def _record_time(record: dict[str, Any]) -> datetime | None:
@@ -3732,7 +3917,13 @@ def _gpu_field(record: dict[str, Any], i: int, field: str) -> Any:
     return gpus[i].get(field) if i < len(gpus) and isinstance(gpus[i], dict) else None
 
 
-def _section(name: str, unicode: bool, color: bool | str, extra: str = "", width: int = TEXT_WIDTH) -> str:
+def _section(
+    name: str,
+    unicode: bool,
+    color: bool | str,
+    extra: str = "",
+    width: int = TEXT_WIDTH,
+) -> str:
     dash = "─" if unicode else "-"
     head = f"{dash * 2} {_paint(name, 'title', color)} "
     tail = f" {extra}" if extra else ""
@@ -3779,9 +3970,14 @@ def _render_latest(
     then = _record_time(record)
     when = then.strftime("%Y-%m-%d %H:%M:%S %Z") if then else "?"
     deg = "°C" if unicode else " C"
-    add(sec("Snapshot", f"{when} " + _paint(f"({_age(then, now)})", "muted", color)), "@header")
+    add(
+        sec("Snapshot", f"{when} " + _paint(f"({_age(then, now)})", "muted", color)),
+        "@header",
+    )
 
-    def row(label: str, percent: Any, detail: str, key: str, thr: Any = None, slot: str = "") -> None:
+    def row(
+        label: str, percent: Any, detail: str, key: str, thr: Any = None, slot: str = ""
+    ) -> None:
         pct = _paint(f"{_fmt(percent):>5}%", _level(percent, thr, key), color)
         add(
             _paint(f"{label:<10}", key, color)
@@ -3794,8 +3990,14 @@ def _render_latest(
 
     cpu = record.get("cpu") or {}
     burst = _num(record.get("duration_sec")) or 0
-    row("CPU", cpu.get("avg"), _paint(f"max {_fmt(cpu.get('max'))}%", "muted", color) if burst else "",
-        "cpu", th.get("cpu_percent"), "cpu")
+    row(
+        "CPU",
+        cpu.get("avg"),
+        _paint(f"max {_fmt(cpu.get('max'))}%", "muted", color) if burst else "",
+        "cpu",
+        th.get("cpu_percent"),
+        "cpu",
+    )
     spread = record.get("cpu_cores") or {}
     if spread:
         lo, med, hi = (spread.get(k) for k in ("min", "median", "max"))
@@ -3816,7 +4018,11 @@ def _render_latest(
         load_pct,
         "  ".join(
             _paint(f"{label} {_fmt(load.get(k), '.2f')}", key, color)
-            for label, k, key in (("1m", "min1", "load"), ("5m", "min5", "load_5m"), ("15m", "min15", "load_15m"))
+            for label, k, key in (
+                ("1m", "min1", "load"),
+                ("5m", "min5", "load_5m"),
+                ("15m", "min15", "load_15m"),
+            )
         )
         + _paint(f"  / {cores} cores", "muted", color),
         "load",
@@ -3833,39 +4039,97 @@ def _render_latest(
     for i, gpu in enumerate(gpus):
         idx = gpu.get("index")
         t = temps.get(f"GPU {idx}")
-        temp = "" if t is None else _paint(f"{_fmt(t, '.0f')}{deg}", _temp_key(t, th.get("temp_celsius")), color)
-        row(f"GPU {idx}", gpu.get("util_percent"), temp, "gpu", th.get("gpu_util_percent"), f"gpu{i}")
-        row("  memory", gpu.get("mem_percent"), gb(gpu, "mem_used_gb", "mem_total_gb"),
-            "gpu_mem", th.get("gpu_memory_percent"), f"gmem{i}")
+        temp = (
+            ""
+            if t is None
+            else _paint(
+                f"{_fmt(t, '.0f')}{deg}", _temp_key(t, th.get("temp_celsius")), color
+            )
+        )
+        row(
+            f"GPU {idx}",
+            gpu.get("util_percent"),
+            temp,
+            "gpu",
+            th.get("gpu_util_percent"),
+            f"gpu{i}",
+        )
+        row(
+            "  memory",
+            gpu.get("mem_percent"),
+            gb(gpu, "mem_used_gb", "mem_total_gb"),
+            "gpu_mem",
+            th.get("gpu_memory_percent"),
+            f"gmem{i}",
+        )
 
     add(sec("I/O"))
     up, down = ("↑", "↓") if unicode else ("^", "v")
     net_thr, io_thr = th.get("network_mbps"), th.get("disk_io_mbps")
     io = [
-        ("Network", down, "in", _get(record, "network", "in_mbps", "avg"), "net_in", net_thr),
-        ("Network", up, "out", _get(record, "network", "out_mbps", "avg"), "net_out", net_thr),
-        ("Disk I/O", up, "read", _get(record, "disk_io", "read_mbps", "avg"), "read", io_thr),
-        ("Disk I/O", down, "write", _get(record, "disk_io", "write_mbps", "avg"), "write", io_thr),
+        (
+            "Network",
+            down,
+            "in",
+            _get(record, "network", "in_mbps", "avg"),
+            "net_in",
+            net_thr,
+        ),
+        (
+            "Network",
+            up,
+            "out",
+            _get(record, "network", "out_mbps", "avg"),
+            "net_out",
+            net_thr,
+        ),
+        (
+            "Disk I/O",
+            up,
+            "read",
+            _get(record, "disk_io", "read_mbps", "avg"),
+            "read",
+            io_thr,
+        ),
+        (
+            "Disk I/O",
+            down,
+            "write",
+            _get(record, "disk_io", "write_mbps", "avg"),
+            "write",
+            io_thr,
+        ),
     ]
 
     def io_cell(arrow: str, name: str, v: Any, k: str, thr: Any) -> str:
-        return _paint(f"{arrow} {name:<5}", k, color) + _paint(f"{_fmt(v, '.2f'):>8}", _level(v, thr, k), color)
+        return _paint(f"{arrow} {name:<5}", k, color) + _paint(
+            f"{_fmt(v, '.2f'):>8}", _level(v, thr, k), color
+        )
 
     for pair in (io[:2], io[2:]):
         add(
-            _paint(f"{pair[0][0]:<10}", pair[0][4], color) + " "
-            + "    ".join(io_cell(*c[1:]) for c in pair) + _paint("  MB/s", "muted", color),
+            _paint(f"{pair[0][0]:<10}", pair[0][4], color)
+            + " "
+            + "    ".join(io_cell(*c[1:]) for c in pair)
+            + _paint("  MB/s", "muted", color),
             pair[0][4],
         )
 
-    pings = [(t, p) for t, p in (record.get("ping") or {}).items() if isinstance(p, dict)]
+    pings = [
+        (t, p) for t, p in (record.get("ping") or {}).items() if isinstance(p, dict)
+    ]
     cells = []
     for i, (target, p) in enumerate(pings):
         key = f"ping_{i % 3}"
         avg, loss = _num(p.get("avg")), _num(p.get("loss")) or 0.0
         # Target's colour on the marker, the address muted, the measurement in
         # the target's colour (orange over the threshold), so they read apart.
-        dot = _paint("●" if unicode else "*", key, color) + " " + _paint(target, "muted", color) + " "
+        dot = (
+            _paint("●" if unicode else "*", key, color)
+            + " "
+            + _paint(target, "muted", color)
+            + " "
+        )
         if avg is None:
             cells.append(dot + _paint("DOWN", "error", color))
             continue
@@ -3874,8 +4138,10 @@ def _render_latest(
             cell += _paint(f" {loss * 100:.0f}% loss", "warning", color)
         cells.append(cell)
     if cells:
-        add(_paint(f"{'Ping':<10}", "ping", color) + " " + "   ".join(cells),
-            f"ping:{pings[0][0]}")
+        add(
+            _paint(f"{'Ping':<10}", "ping", color) + " " + "   ".join(cells),
+            f"ping:{pings[0][0]}",
+        )
 
     readings = _temps_of(record)
     if readings:
@@ -3883,7 +4149,8 @@ def _render_latest(
         thr = th.get("temp_celsius")
         add(
             "   ".join(
-                _paint(f"{label} ", "muted", color) + _paint(f"{value:>3.0f}", _temp_key(value, thr), color)
+                _paint(f"{label} ", "muted", color)
+                + _paint(f"{value:>3.0f}", _temp_key(value, thr), color)
                 for label, value in (
                     ("min", min(readings)),
                     ("median", statistics.median(readings)),
@@ -3899,8 +4166,17 @@ def _render_latest(
         add(sec("Drives"))
     for d in drives:
         mount = str(d.get("mount", "?"))
-        row(mount if len(mount) <= 10 else "…" + mount[-9:] if unicode else ".." + mount[-8:],
-            d.get("percent"), gb(d), "drive", th.get("disk_percent"))
+        row(
+            mount
+            if len(mount) <= 10
+            else "…" + mount[-9:]
+            if unicode
+            else ".." + mount[-8:],
+            d.get("percent"),
+            gb(d),
+            "drive",
+            th.get("disk_percent"),
+        )
     return lines
 
 
@@ -3919,7 +4195,9 @@ def _spark_field_width(col_w: int) -> int:
     return max(10, col_w - 8 - 2 - TEXT_STATS_WIDTH)
 
 
-def auto_history_hours(width: int, view: str, unicode: bool, record_interval: float) -> float:
+def auto_history_hours(
+    width: int, view: str, unicode: bool, record_interval: float
+) -> float:
     """Default window: as many records as the sparklines have columns, so each
     column is about one record, kept between 1 and 3 hours."""
     _, _, col_w = _text_layout(width, view, unicode)
@@ -3929,7 +4207,10 @@ def auto_history_hours(width: int, view: str, unicode: bool, record_interval: fl
 
 
 def _render_history(
-    records: list[dict[str, Any]], unicode: bool, hours: float, rows: int,
+    records: list[dict[str, Any]],
+    unicode: bool,
+    hours: float,
+    rows: int,
     color: bool | str = False,
     thresholds: dict[str, Any] | None = None,
     table: bool = False,
@@ -3947,8 +4228,11 @@ def _render_history(
     th = thresholds or {}
     labels = f"{'min':>7} {'mean':>7} {'max':>7}"
     header = _section(
-        f"History, last {hours:g}h ({len(records)} records)", unicode, color,
-        _paint(labels, "muted", color), width,
+        f"History, last {hours:g}h ({len(records)} records)",
+        unicode,
+        color,
+        _paint(labels, "muted", color),
+        width,
     )
     if not records:
         return header, [], [_paint("No history records yet.", "muted", color)], []
@@ -3965,37 +4249,109 @@ def _render_history(
         }
 
     columns: list[_HistRow] = [
-        _HistRow("cpu", "CPU%", spec=".1f", key="cpu", threshold=th.get("cpu_percent"),
-                 scale="pct", **avg_min_max("cpu")),
-        _HistRow("cpu_cores", "Cores", series(lambda r: _get(r, "cpu_cores", "median")), ".1f",
-                 "cpu_cores", None, "pct"),
-        _HistRow("load", "Load1", series(lambda r: _get(r, "load", "min1")), ".2f", "load", None, "load"),
-        _HistRow("memory", "Mem%", series(lambda r: _get(r, "memory", "percent")), ".1f", "memory",
-                 th.get("memory_percent"), "pct"),
-        _HistRow("swap", "Swap%", series(lambda r: _get(r, "swap", "percent")), ".1f", "swap",
-                 th.get("swap_percent"), "pct"),
+        _HistRow(
+            "cpu",
+            "CPU%",
+            spec=".1f",
+            key="cpu",
+            threshold=th.get("cpu_percent"),
+            scale="pct",
+            **avg_min_max("cpu"),
+        ),
+        _HistRow(
+            "cpu_cores",
+            "Cores",
+            series(lambda r: _get(r, "cpu_cores", "median")),
+            ".1f",
+            "cpu_cores",
+            None,
+            "pct",
+        ),
+        _HistRow(
+            "load",
+            "Load1",
+            series(lambda r: _get(r, "load", "min1")),
+            ".2f",
+            "load",
+            None,
+            "load",
+        ),
+        _HistRow(
+            "memory",
+            "Mem%",
+            series(lambda r: _get(r, "memory", "percent")),
+            ".1f",
+            "memory",
+            th.get("memory_percent"),
+            "pct",
+        ),
+        _HistRow(
+            "swap",
+            "Swap%",
+            series(lambda r: _get(r, "swap", "percent")),
+            ".1f",
+            "swap",
+            th.get("swap_percent"),
+            "pct",
+        ),
     ]
     for i in range(n_gpus):
         columns.append(
-            _HistRow(f"gpu{i}", f"GPU{i}%", series(lambda r, i=i: _gpu_field(r, i, "util_percent")),
-                     ".0f", "gpu", th.get("gpu_util_percent"), "pct")
+            _HistRow(
+                f"gpu{i}",
+                f"GPU{i}%",
+                series(lambda r, i=i: _gpu_field(r, i, "util_percent")),
+                ".0f",
+                "gpu",
+                th.get("gpu_util_percent"),
+                "pct",
+            )
         )
         columns.append(
-            _HistRow(f"gmem{i}", f"GMem{i}", series(lambda r, i=i: _gpu_field(r, i, "mem_percent")),
-                     ".0f", "gpu_mem", th.get("gpu_memory_percent"), "pct")
+            _HistRow(
+                f"gmem{i}",
+                f"GMem{i}",
+                series(lambda r, i=i: _gpu_field(r, i, "mem_percent")),
+                ".0f",
+                "gpu_mem",
+                th.get("gpu_memory_percent"),
+                "pct",
+            )
         )
     for slot, name, path, key, thr in (
         ("net_in", "NetIn", ("network", "in_mbps"), "net_in", th.get("network_mbps")),
-        ("net_out", "NetOut", ("network", "out_mbps"), "net_out", th.get("network_mbps")),
+        (
+            "net_out",
+            "NetOut",
+            ("network", "out_mbps"),
+            "net_out",
+            th.get("network_mbps"),
+        ),
         ("read", "DiskR", ("disk_io", "read_mbps"), "read", th.get("disk_io_mbps")),
         ("write", "DiskW", ("disk_io", "write_mbps"), "write", th.get("disk_io_mbps")),
     ):
-        columns.append(_HistRow(slot, name, spec=".2f", key=key, threshold=thr, scale="zero",
-                                **avg_min_max(*path)))
+        columns.append(
+            _HistRow(
+                slot,
+                name,
+                spec=".2f",
+                key=key,
+                threshold=thr,
+                scale="zero",
+                **avg_min_max(*path),
+            )
+        )
     # The hottest sensor in each record.
     columns.append(
-        _HistRow("maxt", "MaxT", [max(t) if t else None for t in map(_temps_of, records)], ".0f",
-                 "temp", th.get("temp_celsius"), "temp")
+        _HistRow(
+            "maxt",
+            "MaxT",
+            [max(t) if t else None for t in map(_temps_of, records)],
+            ".0f",
+            "temp",
+            th.get("temp_celsius"),
+            "temp",
+        )
     )
 
     # Sparkline field fills the width so the stats line up under the header labels.
@@ -4007,7 +4363,9 @@ def _render_history(
     start = end - hours * 3600
     rec_times = [t.timestamp() if t else None for t in map(_record_time, records)]
     # Hold a value across empty columns for up to 1.5 record intervals.
-    interval = getattr(APP.state, "history_record_interval", DEFAULT_HISTORY_RECORD_INTERVAL)
+    interval = getattr(
+        APP.state, "history_record_interval", DEFAULT_HISTORY_RECORD_INTERVAL
+    )
     hold = 1.5 * max(float(interval), (end - start) / spark_w)
     chars = _SPARK_CHARS if unicode else _SPARK_ASCII
     spark_rows: list[tuple[str, str]] = []
@@ -4036,9 +4394,12 @@ def _render_history(
         )
         spark = _paint(
             f"{_sparkline(_time_buckets(rec_times, vals, start, end, spark_w, hold), chars, *row.bounds()):<{field_w}}",
-            key, color,
+            key,
+            color,
         )
-        spark_rows.append((slot, f"{_paint(f'{name:<7}', key, color)} {spark}  {stats}"))
+        spark_rows.append(
+            (slot, f"{_paint(f'{name:<7}', key, color)} {spark}  {stats}")
+        )
 
     # Time axis under the sparklines: window start, middle and end (now).
     fmt = "%m-%d %H:%M" if hours > 20 else "%H:%M"
@@ -4049,7 +4410,11 @@ def _render_history(
         return datetime.fromtimestamp(ts).strftime(fmt)
 
     if spark_w >= 3:
-        rule = ("└" + "─" * (spark_w - 2) + "┘") if unicode else ("+" + "-" * (spark_w - 2) + "+")
+        rule = (
+            ("└" + "─" * (spark_w - 2) + "┘")
+            if unicode
+            else ("+" + "-" * (spark_w - 2) + "+")
+        )
     else:
         rule = ("─" if unicode else "-") * spark_w
     first, last = label(start), label(end)
@@ -4057,13 +4422,21 @@ def _render_history(
     mid = label((start + end) / 2)
     if spark_w >= len(first) + len(mid) + len(last) + 4:
         at = spark_w // 2 - len(mid) // 2
-        ticks = ticks[:at] + mid + ticks[at + len(mid):]
+        ticks = ticks[:at] + mid + ticks[at + len(mid) :]
         # A tick on the rule over the middle label's centre.
         centre = at + len(mid) // 2
-        rule = rule[:centre] + ("┬" if unicode else "+") + rule[centre + 1:]
+        rule = rule[:centre] + ("┬" if unicode else "+") + rule[centre + 1 :]
     deg = "°C" if unicode else "C"
-    legend = _paint(f"Blank = no records. Net/Disk MB/s, MaxT = hottest sensor {deg}.", "muted", color)
-    foot = [" " * 8 + _paint(rule, "muted", color), " " * 8 + _paint(ticks, "muted", color), legend]
+    legend = _paint(
+        f"Blank = no records. Net/Disk MB/s, MaxT = hottest sensor {deg}.",
+        "muted",
+        color,
+    )
+    foot = [
+        " " * 8 + _paint(rule, "muted", color),
+        " " * 8 + _paint(ticks, "muted", color),
+        legend,
+    ]
     if not sparks:
         spark_rows, foot = [], [legend]
     if not table:
@@ -4072,12 +4445,18 @@ def _render_history(
     # Evenly sample at most `rows` records, always including the newest.
     count = len(records)
     shown = min(rows, count)
-    picks = [count - 1] if shown == 1 else [round(k * (count - 1) / (shown - 1)) for k in range(shown)]
+    picks = (
+        [count - 1]
+        if shown == 1
+        else [round(k * (count - 1) / (shown - 1)) for k in range(shown)]
+    )
     sep = " │ " if unicode else " | "
     table_w = 14 + len(sep) + 7 * len(columns) - 1
     tail = [""] if sparks else []
     tail.append(
-        f"{'Time':<14}" + sep + " ".join(_paint(f"{c.name[:6]:>6}", c.key, color) for c in columns)
+        f"{'Time':<14}"
+        + sep
+        + " ".join(_paint(f"{c.name[:6]:>6}", c.key, color) for c in columns)
     )
     tail.append(("─" if unicode else "-") * table_w)
     for idx in picks:
@@ -4089,7 +4468,9 @@ def _render_history(
             else f"{_fmt(c.values[idx], c.spec):>6}"
             for c in columns
         )
-        tail.append(_paint(f"{stamp:<14}", "muted", color) + _paint(sep, "muted", color) + cells)
+        tail.append(
+            _paint(f"{stamp:<14}", "muted", color) + _paint(sep, "muted", color) + cells
+        )
     return header, spark_rows, foot, tail
 
 
@@ -4126,23 +4507,34 @@ def render_text(
     if unicode:
         out = [
             _paint("╭" + "─" * span + "╮", "cpu", color),
-            _paint("│", "cpu", color) + _paint(inner[: len(heading) + 2], "title", color)
-            + inner[len(heading) + 2 :] + " " * fill + _paint(hint, "muted", color)
+            _paint("│", "cpu", color)
+            + _paint(inner[: len(heading) + 2], "title", color)
+            + inner[len(heading) + 2 :]
+            + " " * fill
+            + _paint(hint, "muted", color)
             + _paint("│", "cpu", color),
             _paint("╰" + "─" * span + "╯", "cpu", color),
         ]
     else:
         title_line = inner.strip()
-        out = ["=" * width, title_line + hint.rstrip().rjust(width - len(_strip_ansi(title_line))), "=" * width]
+        out = [
+            "=" * width,
+            title_line + hint.rstrip().rjust(width - len(_strip_ansi(title_line))),
+            "=" * width,
+        ]
     left: list[tuple[str, str]] = []
     if view in ("latest", "both"):
         if live or records:
-            left = _render_latest(live or records[-1], unicode, now, color, thresholds, col_w)
+            left = _render_latest(
+                live or records[-1], unicode, now, color, thresholds, col_w
+            )
         else:
             left = [("", "No data yet.")]
     hist: tuple[str, list[tuple[str, str]], list[str], list[str]] | None = None
     if view in ("history", "both"):
-        hist = _render_history(records, unicode, hours, rows, color, thresholds, table, col_w, now, sparks)
+        hist = _render_history(
+            records, unicode, hours, rows, color, thresholds, table, col_w, now, sparks
+        )
 
     if two_col and hist:
         # Snapshot on the left, history on the right. Each history row goes
@@ -4161,7 +4553,7 @@ def render_text(
                 right += [""] * (at - len(right) + 1)
             right[at] = line
             pos = at + 1
-        extra = right[len(left):]
+        extra = right[len(left) :]
         rows_left = [line for _, line in left] + [""] * len(extra)
         for a, b in zip(rows_left, right):
             out.append(a + " " * max(0, col_w - len(_strip_ansi(a))) + "   " + b)
@@ -4301,8 +4693,12 @@ async def text_view(
         return Response(content=TEXT_USAGE, status_code=400, media_type="text/plain")
     if hours is None:
         hours = auto_history_hours(
-            width, view, style == "unicode",
-            getattr(APP.state, "history_record_interval", DEFAULT_HISTORY_RECORD_INTERVAL),
+            width,
+            view,
+            style == "unicode",
+            getattr(
+                APP.state, "history_record_interval", DEFAULT_HISTORY_RECORD_INTERVAL
+            ),
         )
     hours = max(0.1, min(hours, 8760))
     rows = max(1, min(rows, 500))
@@ -4376,7 +4772,19 @@ def _fit_height(body: str, height: int, color: bool | str) -> str:
     if len(lines) <= height:
         return body
     cut = len(lines) - (height - 1)
-    return "\n".join(lines[: height - 1] + [_paint(f"... {cut} more lines (taller terminal, or another view)", "muted", color)]) + "\n"
+    return (
+        "\n".join(
+            lines[: height - 1]
+            + [
+                _paint(
+                    f"... {cut} more lines (taller terminal, or another view)",
+                    "muted",
+                    color,
+                )
+            ]
+        )
+        + "\n"
+    )
 
 
 # Short-lived caches so several terminals polling /text every second cost one
@@ -4393,8 +4801,13 @@ _history_cache: dict[str, Any] = {"key": None, "result": None}
 
 async def _live_sample() -> dict[str, Any]:
     async with _live_lock:
-        if _live_cache["record"] is None or time.monotonic() - _live_cache["at"] > _LIVE_TTL:
-            _live_cache["record"] = await collect_history_sample(APP.state.glances_url, live=True)
+        if (
+            _live_cache["record"] is None
+            or time.monotonic() - _live_cache["at"] > _LIVE_TTL
+        ):
+            _live_cache["record"] = await collect_history_sample(
+                APP.state.glances_url, live=True
+            )
             _live_cache["at"] = time.monotonic()
         return _live_cache["record"]
 

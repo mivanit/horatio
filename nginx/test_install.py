@@ -15,7 +15,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MOCK = r'''#!/usr/bin/python3
+MOCK = r"""#!/usr/bin/python3
 import json, os, pathlib, subprocess, sys
 root = pathlib.Path(os.environ["HORATIO_NGINX_TEST_ROOT"])
 executable = pathlib.Path(sys.argv[0])
@@ -148,7 +148,7 @@ elif name == "rm":
         print("injected config removal failure", file=sys.stderr)
         sys.exit(1)
     sys.exit(subprocess.run([os.environ["HORATIO_REAL_RM"], *args]).returncode)
-'''
+"""
 
 
 class InstallerTests(unittest.TestCase):
@@ -167,13 +167,33 @@ class InstallerTests(unittest.TestCase):
         self.mock.chmod(0o755)
         # A closed PATH allows a real missing-nginx/apk-only OpenWrt scenario,
         # regardless of commands installed on the test host.
-        for name in ("awk", "basename", "chmod", "cp", "dirname", "grep", "head",
-                     "mkdir", "mktemp", "mv", "rm", "rmdir", "sed", "timeout", "tr"):
+        for name in (
+            "awk",
+            "basename",
+            "chmod",
+            "cp",
+            "dirname",
+            "grep",
+            "head",
+            "mkdir",
+            "mktemp",
+            "mv",
+            "rm",
+            "rmdir",
+            "sed",
+            "timeout",
+            "tr",
+        ):
             command = shutil.which(name)
             self.assertIsNotNone(command, name)
             (self.bin / name).symlink_to(command)
-        self.env = dict(os.environ, PATH=str(self.bin), HORATIO_NGINX_TEST_ROOT=str(self.root),
-                        HORATIO_REAL_MV=shutil.which("mv"), HORATIO_REAL_RM=shutil.which("rm"))
+        self.env = dict(
+            os.environ,
+            PATH=str(self.bin),
+            HORATIO_NGINX_TEST_ROOT=str(self.root),
+            HORATIO_REAL_MV=shutil.which("mv"),
+            HORATIO_REAL_RM=shutil.which("rm"),
+        )
         script = (ROOT / "nginx/install.sh").read_text()
         script = script.replace("/etc/nginx", str(self.nginx))
         script = script.replace("/etc/init.d", str(self.root / "init.d"))
@@ -185,12 +205,15 @@ class InstallerTests(unittest.TestCase):
         self.script.write_text(script)
         self.services = self.root / "host.services"
         self.services.write_text("# domain: example.internal\ndashboard 8080\n")
-        self.original_uci = json.dumps({
-            "uhttpd.main.listen_http": ["0.0.0.0:80", "[::]:80"],
-            "uhttpd.main.listen_https": ["0.0.0.0:443", "[::]:443"],
-            "uhttpd.custom.option": "keep this",
-            "uhttpd.main.home": str(self.root / "www/luci"),
-        }, indent=2)
+        self.original_uci = json.dumps(
+            {
+                "uhttpd.main.listen_http": ["0.0.0.0:80", "[::]:80"],
+                "uhttpd.main.listen_https": ["0.0.0.0:443", "[::]:443"],
+                "uhttpd.custom.option": "keep this",
+                "uhttpd.main.home": str(self.root / "www/luci"),
+            },
+            indent=2,
+        )
         (self.root / "uci.json").write_text(self.original_uci)
 
     def prepare_uninstall(self):
@@ -200,8 +223,10 @@ class InstallerTests(unittest.TestCase):
         self.runtime_conf.write_text("# generated UCI configuration\n")
         (self.root / "www/luci").mkdir(parents=True)
         (self.nginx / "module.d").mkdir()
-        (self.nginx / "restrict_locally").write_text("allow 127.0.0.0/8;\nallow 192.168.0.0/16;\ndeny all;\n")
-        (self.nginx / "uci.conf.template").write_text('''# UCI_CONF_VERSION=1.2
+        (self.nginx / "restrict_locally").write_text(
+            "allow 127.0.0.0/8;\nallow 192.168.0.0/16;\ndeny all;\n"
+        )
+        (self.nginx / "uci.conf.template").write_text("""# UCI_CONF_VERSION=1.2
 worker_processes auto;
 user root;
 include module.d/*.module;
@@ -223,19 +248,29 @@ http {
     #UCI_HTTP_CONFIG
     include conf.d/*.conf;
 }
-''')
-        (self.root / "nginx-uci.json").write_text(json.dumps({
-            "nginx.global": "main", "nginx.global.uci_enable": "true",
-            "nginx._lan": "server", "nginx._lan.listen": "443 ssl default_server [::]:443 ssl default_server",
-            "nginx._lan.server_name": "_lan", "nginx._lan.include": "restrict_locally conf.d/*.locations",
-            "nginx._lan.uci_manage_ssl": "self-signed", "nginx._lan.ssl_certificate": "/etc/nginx/conf.d/_lan.crt",
-            "nginx._lan.ssl_certificate_key": "/etc/nginx/conf.d/_lan.key",
-            "nginx._lan.ssl_session_cache": "shared:SSL:32k", "nginx._lan.ssl_session_timeout": "64m",
-            "nginx._lan.access_log": "off; # logd openwrt",
-            "nginx._redirect2ssl": "server", "nginx._redirect2ssl.listen": "80 [::]:80",
-            "nginx._redirect2ssl.server_name": "_redirect2ssl",
-            "nginx._redirect2ssl.return": "302 https://$host$request_uri",
-        }))
+""")
+        (self.root / "nginx-uci.json").write_text(
+            json.dumps(
+                {
+                    "nginx.global": "main",
+                    "nginx.global.uci_enable": "true",
+                    "nginx._lan": "server",
+                    "nginx._lan.listen": "443 ssl default_server [::]:443 ssl default_server",
+                    "nginx._lan.server_name": "_lan",
+                    "nginx._lan.include": "restrict_locally conf.d/*.locations",
+                    "nginx._lan.uci_manage_ssl": "self-signed",
+                    "nginx._lan.ssl_certificate": "/etc/nginx/conf.d/_lan.crt",
+                    "nginx._lan.ssl_certificate_key": "/etc/nginx/conf.d/_lan.key",
+                    "nginx._lan.ssl_session_cache": "shared:SSL:32k",
+                    "nginx._lan.ssl_session_timeout": "64m",
+                    "nginx._lan.access_log": "off; # logd openwrt",
+                    "nginx._redirect2ssl": "server",
+                    "nginx._redirect2ssl.listen": "80 [::]:80",
+                    "nginx._redirect2ssl.server_name": "_redirect2ssl",
+                    "nginx._redirect2ssl.return": "302 https://$host$request_uri",
+                }
+            )
+        )
         current = json.loads(self.original_uci)
         current["uhttpd.main.listen_http"] = "127.0.0.1:8081"
         current.pop("uhttpd.main.listen_https")
@@ -243,9 +278,15 @@ http {
         (self.root / "uci.json").write_text(self.original_uci)
 
     def run_uninstall(self, failure="", **env):
-        return subprocess.run(["/bin/sh", str(self.script), str(self.services), "--uninstall"],
-                              env=dict(self.env, HORATIO_NGINX_FAIL=failure, HORATIO_UNINSTALL="1", **env),
-                              capture_output=True, text=True, timeout=10)
+        return subprocess.run(
+            ["/bin/sh", str(self.script), str(self.services), "--uninstall"],
+            env=dict(
+                self.env, HORATIO_NGINX_FAIL=failure, HORATIO_UNINSTALL="1", **env
+            ),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
 
     def test_uninstall_releases_ports_disables_nginx_and_preserves_extra_content(self):
         self.prepare_uninstall()
@@ -258,11 +299,28 @@ http {
         self.assertEqual(asset.read_text(), "keep this user asset")
         self.assertEqual((self.root / "nginx-enabled").read_text(), "0")
         events = self.events()
-        stop = next(i for i, e in enumerate(events) if e["command"] == "nginx-service" and e["args"] == ["stop"])
-        restart = next(i for i, e in enumerate(events) if e["command"] == "uhttpd-service" and e["args"] == ["restart"])
+        stop = next(
+            i
+            for i, e in enumerate(events)
+            if e["command"] == "nginx-service" and e["args"] == ["stop"]
+        )
+        restart = next(
+            i
+            for i, e in enumerate(events)
+            if e["command"] == "uhttpd-service" and e["args"] == ["restart"]
+        )
         self.assertLess(stop, restart)
-        self.assertFalse(any(e["command"] == "nginx-service" and e["args"] in (["start"], ["restart"]) for e in events))
-        self.assertEqual(json.loads((self.root / "uci.json").read_text())["uhttpd.main.listen_http"], "0.0.0.0:80")
+        self.assertFalse(
+            any(
+                e["command"] == "nginx-service"
+                and e["args"] in (["start"], ["restart"])
+                for e in events
+            )
+        )
+        self.assertEqual(
+            json.loads((self.root / "uci.json").read_text())["uhttpd.main.listen_http"],
+            "0.0.0.0:80",
+        )
         self.assertEqual(list((self.root / "www/luci").iterdir()), [])
         self.assertEqual(list(self.nginx.glob(".horatio-*")), [])
 
@@ -295,15 +353,24 @@ http {
         self.assertEqual(self.index.stat().st_mode & 0o777, 0o600)
         self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
         self.assertEqual((self.root / "nginx-enabled").read_text(), "1")
-        self.assertTrue(json.loads((self.root / "nginx-service-state.json").read_text())["running"])
+        self.assertTrue(
+            json.loads((self.root / "nginx-service-state.json").read_text())["running"]
+        )
         self.assertEqual(list(self.nginx.glob(".horatio-*")), [])
 
     def test_uninstall_failed_handoff_preserves_disabled_stopped_state(self):
         self.prepare_uninstall()
-        result = self.run_uninstall("luci-probe", HORATIO_WAS_RUNNING="0", HORATIO_WAS_ENABLED="0")
+        result = self.run_uninstall(
+            "luci-probe", HORATIO_WAS_RUNNING="0", HORATIO_WAS_ENABLED="0"
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.root / "nginx-enabled").read_text(), "0")
-        self.assertFalse(any(e["command"] == "nginx-service" and e["args"] == ["start"] for e in self.events()))
+        self.assertFalse(
+            any(
+                e["command"] == "nginx-service" and e["args"] == ["start"]
+                for e in self.events()
+            )
+        )
         self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
         self.assertTrue(self.conf.is_file() and self.index.is_file())
 
@@ -320,7 +387,17 @@ http {
         self.assertEqual(list((self.root / "www/luci").iterdir()), [])
 
     def test_uninstall_unknown_setups_refused_before_any_mutation(self):
-        for kind in ("manual", "server", "root", "listen", "locations", "conf", "template", "module", "restrict"):
+        for kind in (
+            "manual",
+            "server",
+            "root",
+            "listen",
+            "locations",
+            "conf",
+            "template",
+            "module",
+            "restrict",
+        ):
             with self.subTest(kind=kind):
                 case = InstallerTests()
                 case.setUp()
@@ -337,14 +414,20 @@ http {
                     elif kind == "listen":
                         data["nginx._lan.listen"] = "8443 ssl"
                     elif kind in ("locations", "conf"):
-                        (case.nginx / "conf.d" / ("custom." + kind)).write_text("# keep custom site\n")
+                        (case.nginx / "conf.d" / ("custom." + kind)).write_text(
+                            "# keep custom site\n"
+                        )
                     elif kind == "template":
                         with (case.nginx / "uci.conf.template").open("a") as f:
                             f.write("# custom include\ninclude custom.conf;\n")
                     elif kind == "module":
-                        (case.nginx / "module.d/custom.module").write_text("include custom.conf;\n")
+                        (case.nginx / "module.d/custom.module").write_text(
+                            "include custom.conf;\n"
+                        )
                     elif kind == "restrict":
-                        (case.nginx / "restrict_locally").write_text("location /custom { proxy_pass http://localhost:9000; }\n")
+                        (case.nginx / "restrict_locally").write_text(
+                            "location /custom { proxy_pass http://localhost:9000; }\n"
+                        )
                     (case.root / "nginx-uci.json").write_text(json.dumps(data))
                     config, index = case.conf.read_bytes(), case.index.read_bytes()
                     result = case.run_uninstall(**env)
@@ -352,8 +435,12 @@ http {
                     self.assertIn("no files or services were changed", result.stderr)
                     self.assertEqual(case.conf.read_bytes(), config)
                     self.assertEqual(case.index.read_bytes(), index)
-                    self.assertEqual((case.root / "uci.json").read_text(), case.original_uci)
-                    self.assertFalse(any(e["command"].endswith("-service") for e in case.events()))
+                    self.assertEqual(
+                        (case.root / "uci.json").read_text(), case.original_uci
+                    )
+                    self.assertFalse(
+                        any(e["command"].endswith("-service") for e in case.events())
+                    )
                     self.assertEqual(list(case.nginx.glob(".horatio-*")), [])
                 finally:
                     case.doCleanups()
@@ -377,7 +464,13 @@ http {
         self.assertIn("not a directory", result.stderr)
         self.assertTrue(self.conf.is_file() and self.index.is_file())
         self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
-        self.assertFalse(any(e["command"].endswith("-service") and e["args"] not in (["running"], ["enabled"]) for e in self.events()))
+        self.assertFalse(
+            any(
+                e["command"].endswith("-service")
+                and e["args"] not in (["running"], ["enabled"])
+                for e in self.events()
+            )
+        )
 
     def prepare(self, platform="ubuntu", *, nginx=True):
         if platform == "ubuntu":
@@ -407,13 +500,21 @@ http {
         self.default.symlink_to("../sites-available/default")
 
     def run_install(self, failure="", **env):
-        return subprocess.run(["/bin/sh", str(self.script), str(self.services)],
-                              env=dict(self.env, HORATIO_NGINX_FAIL=failure, **env),
-                              capture_output=True, text=True, timeout=10)
+        return subprocess.run(
+            ["/bin/sh", str(self.script), str(self.services)],
+            env=dict(self.env, HORATIO_NGINX_FAIL=failure, **env),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
 
     def events(self):
         path = self.root / "events"
-        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        return (
+            [json.loads(line) for line in path.read_text().splitlines()]
+            if path.exists()
+            else []
+        )
 
     def assert_restored(self):
         self.assertEqual(self.conf.read_text(), "# previous working config\n")
@@ -426,7 +527,10 @@ http {
 
     def test_ubuntu_uninstall_preserves_extra_content_and_symlink_targets(self):
         self.prepare()
-        config_target, index_target = self.root / "config-source", self.root / "index-source"
+        config_target, index_target = (
+            self.root / "config-source",
+            self.root / "index-source",
+        )
         self.conf.rename(config_target)
         self.index.rename(index_target)
         self.conf.symlink_to(config_target)
@@ -450,11 +554,18 @@ http {
         self.assertNotIn("Done.", result.stdout)
         self.assertIn("invalid port", result.stderr)
         self.assert_restored()
-        self.assertFalse(any(e["args"] == ["reload-or-restart", "nginx"] for e in self.events()))
+        self.assertFalse(
+            any(e["args"] == ["reload-or-restart", "nginx"] for e in self.events())
+        )
 
-    def test_ubuntu_uninstall_reload_failure_restores_symlinks_and_reloads_original(self):
+    def test_ubuntu_uninstall_reload_failure_restores_symlinks_and_reloads_original(
+        self,
+    ):
         self.prepare()
-        config_target, index_target = self.root / "config-source", self.root / "index-source"
+        config_target, index_target = (
+            self.root / "config-source",
+            self.root / "index-source",
+        )
         self.conf.rename(config_target)
         self.index.rename(index_target)
         self.conf.symlink_to(config_target)
@@ -467,7 +578,9 @@ http {
         self.assertTrue(self.index.is_symlink())
         self.assertEqual(config_target.read_text(), "# previous working config\n")
         self.assertEqual(index_target.read_text(), "previous index\n")
-        self.assertEqual(sum(e["args"] == ["reload-or-restart", "nginx"] for e in self.events()), 2)
+        self.assertEqual(
+            sum(e["args"] == ["reload-or-restart", "nginx"] for e in self.events()), 2
+        )
 
     def test_ubuntu_uninstall_failure_restores_originally_stopped_service(self):
         self.prepare()
@@ -475,7 +588,14 @@ http {
         self.assertNotEqual(result.returncode, 0)
         self.assert_restored()
         calls = [e["args"] for e in self.events() if e["command"] == "systemctl"]
-        self.assertEqual(calls, [["is-active", "--quiet", "nginx"], ["reload-or-restart", "nginx"], ["stop", "nginx"]])
+        self.assertEqual(
+            calls,
+            [
+                ["is-active", "--quiet", "nginx"],
+                ["reload-or-restart", "nginx"],
+                ["stop", "nginx"],
+            ],
+        )
 
     def test_ubuntu_uninstall_removal_failures_restore_files_and_modes(self):
         for failure in ("remove-config", "remove-index"):
@@ -491,7 +611,10 @@ http {
                     self.assertNotIn("Done.", result.stdout)
                     self.assertIn("removal failure", result.stderr)
                     case.assert_restored()
-                    reloads = sum(e["args"] == ["reload-or-restart", "nginx"] for e in case.events())
+                    reloads = sum(
+                        e["args"] == ["reload-or-restart", "nginx"]
+                        for e in case.events()
+                    )
                     self.assertEqual(reloads, 2 if failure == "remove-index" else 0)
                 finally:
                     case.doCleanups()
@@ -507,7 +630,9 @@ http {
         backups = list(self.nginx.glob(".horatio-*"))
         self.assertEqual(len(backups), 1)
         self.assertIn(str(backups[0]), result.stderr)
-        self.assertEqual((backups[0] / "config").read_text(), "# previous working config\n")
+        self.assertEqual(
+            (backups[0] / "config").read_text(), "# previous working config\n"
+        )
         self.assertEqual((backups[0] / "index").read_text(), "previous index\n")
         self.assertFalse(self.conf.exists())
         self.assertEqual(self.index.read_text(), "previous index\n")
@@ -525,11 +650,16 @@ http {
         result = self.run_install("validate")
         self.assertNotEqual(result.returncode, 0)
         self.assert_restored()
-        self.assertFalse(any(e["args"][0] == "reload-or-restart" for e in self.events()))
+        self.assertFalse(
+            any(e["args"][0] == "reload-or-restart" for e in self.events())
+        )
 
     def test_failed_reload_restores_symlinks_without_changing_their_targets(self):
         self.prepare()
-        config_target, index_target = self.root / "config-source", self.root / "index-source"
+        config_target, index_target = (
+            self.root / "config-source",
+            self.root / "index-source",
+        )
         self.conf.rename(config_target)
         self.index.rename(index_target)
         self.conf.symlink_to(config_target)
@@ -541,7 +671,9 @@ http {
         self.assertTrue(self.index.is_symlink())
         self.assertEqual(config_target.read_text(), "# previous working config\n")
         self.assertEqual(index_target.read_text(), "previous index\n")
-        reloads = [e for e in self.events() if e["args"] == ["reload-or-restart", "nginx"]]
+        reloads = [
+            e for e in self.events() if e["args"] == ["reload-or-restart", "nginx"]
+        ]
         self.assertEqual(len(reloads), 2)
 
     def test_success_removes_recovery_files_and_publishes_both_outputs(self):
@@ -561,11 +693,17 @@ http {
         events = self.events()
         commands = [e["command"] for e in events]
         self.assertEqual(events[0], {"command": "apk", "args": ["add", "nginx"]})
-        first_uci_write = next(i for i, e in enumerate(events) if e["command"] == "uci" and e["args"][0] == "set")
+        first_uci_write = next(
+            i
+            for i, e in enumerate(events)
+            if e["command"] == "uci" and e["args"][0] == "set"
+        )
         self.assertLess(commands.index("nginx"), first_uci_write)
         self.assertLess(commands.index("nginx"), commands.index("uhttpd-service"))
-        self.assertEqual(json.loads((self.root / "uci.json").read_text())["uhttpd.main.listen_http"],
-                         "127.0.0.1:8081")
+        self.assertEqual(
+            json.loads((self.root / "uci.json").read_text())["uhttpd.main.listen_http"],
+            "127.0.0.1:8081",
+        )
 
     def test_domain_named_default_keeps_its_generated_configuration(self):
         self.prepare()
@@ -584,10 +722,14 @@ http {
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(self.runtime_conf.is_file())
         events = self.events()
-        generation = next(i for i, e in enumerate(events) if e["command"] == "nginx-util")
+        generation = next(
+            i for i, e in enumerate(events) if e["command"] == "nginx-util"
+        )
         validation = next(i for i, e in enumerate(events) if e["command"] == "nginx")
         self.assertLess(generation, validation)
-        self.assertEqual(events[validation]["args"], ["-t", "-c", str(self.nginx / "uci.conf")])
+        self.assertEqual(
+            events[validation]["args"], ["-t", "-c", str(self.nginx / "uci.conf")]
+        )
         self.assertFalse(any(e["args"] == ["start"] for e in events[:validation]))
 
     def test_openwrt_manual_mode_does_not_validate_stale_generated_config(self):
@@ -612,15 +754,19 @@ http {
         result = self.run_install("generate", HORATIO_UCI_ENABLED="false")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("validating manual configuration", result.stderr)
-        self.assertIn(["-t", "-c", str(self.nginx / "nginx.conf")],
-                      [e["args"] for e in self.events() if e["command"] == "nginx"])
+        self.assertIn(
+            ["-t", "-c", str(self.nginx / "nginx.conf")],
+            [e["args"] for e in self.events() if e["command"] == "nginx"],
+        )
 
     def test_openwrt_absent_uci_flag_selects_manual_config(self):
         self.prepare("openwrt")
         result = self.run_install(HORATIO_UCI_ENABLED="")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([e["args"] for e in self.events() if e["command"] == "nginx"],
-                         [["-t", "-c", str(self.nginx / "nginx.conf")]])
+        self.assertEqual(
+            [e["args"] for e in self.events() if e["command"] == "nginx"],
+            [["-t", "-c", str(self.nginx / "nginx.conf")]],
+        )
 
     def test_openwrt_waits_for_stop_and_http_readiness_before_committing(self):
         self.prepare("openwrt")
@@ -632,7 +778,7 @@ http {
         self.assertTrue(all(e["recovery_exists"] for e in probes))
         calls = [e["args"] for e in events if e["command"] == "nginx-service"]
         stopping, starting = calls.index(["stop"]), calls.index(["start"])
-        self.assertEqual(calls[stopping + 1:starting], [["running"]] * 3)
+        self.assertEqual(calls[stopping + 1 : starting], [["running"]] * 3)
         last_probe = max(i for i, e in enumerate(events) if e["command"] == "wget")
         enabled = next(i for i, e in enumerate(events) if e["args"] == ["enable"])
         self.assertLess(last_probe, enabled)
@@ -650,8 +796,12 @@ http {
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("did not serve the generated index", result.stderr)
                     case.assert_restored()
-                    self.assertEqual((case.root / "uci.json").read_text(), case.original_uci)
-                    self.assertFalse(any(e["args"] == ["enable"] for e in case.events()))
+                    self.assertEqual(
+                        (case.root / "uci.json").read_text(), case.original_uci
+                    )
+                    self.assertFalse(
+                        any(e["args"] == ["enable"] for e in case.events())
+                    )
                 finally:
                     case.doCleanups()
 
@@ -661,8 +811,10 @@ http {
         self.assertNotEqual(result.returncode, 0)
         self.assert_restored()
         self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
-        self.assertEqual([e["args"] for e in self.events() if e["command"] == "nginx-service"],
-                         [["running"]])
+        self.assertEqual(
+            [e["args"] for e in self.events() if e["command"] == "nginx-service"],
+            [["running"]],
+        )
 
     def test_openwrt_async_restore_failure_keeps_recovery_files(self):
         for service in ("nginx", "uhttpd"):
@@ -671,15 +823,24 @@ http {
                 case.setUp()
                 try:
                     case.prepare("openwrt")
-                    result = case.run_install("nginx-async", HORATIO_FAIL_RESTORE=service)
+                    result = case.run_install(
+                        "nginx-async", HORATIO_FAIL_RESTORE=service
+                    )
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("recovery was incomplete", result.stderr)
                     backups = list(case.nginx.glob(".horatio-*"))
                     self.assertEqual(len(backups), 1)
                     self.assertIn(str(backups[0]), result.stderr)
-                    self.assertEqual((backups[0] / "config").read_text(), "# previous working config\n")
-                    self.assertEqual((backups[0] / "index").read_text(), "previous index\n")
-                    self.assertEqual((backups[0] / "uhttpd").read_text(), case.original_uci)
+                    self.assertEqual(
+                        (backups[0] / "config").read_text(),
+                        "# previous working config\n",
+                    )
+                    self.assertEqual(
+                        (backups[0] / "index").read_text(), "previous index\n"
+                    )
+                    self.assertEqual(
+                        (backups[0] / "uhttpd").read_text(), case.original_uci
+                    )
                 finally:
                     case.doCleanups()
 
@@ -715,8 +876,10 @@ http {
         result = self.run_install("validate")
         self.assertNotEqual(result.returncode, 0)
         self.assert_restored()
-        self.assertEqual([e["args"] for e in self.events() if e["command"] == "uci"],
-                         [["-q", "get", "nginx.global.uci_enable"]])
+        self.assertEqual(
+            [e["args"] for e in self.events() if e["command"] == "uci"],
+            [["-q", "get", "nginx.global.uci_enable"]],
+        )
         self.assertFalse(any(e["command"] == "uhttpd-service" for e in self.events()))
 
     def test_failed_first_proxy_restart_restores_luci_and_stops_proxy(self):
@@ -728,7 +891,11 @@ http {
         service_calls = [(e["command"], e["args"]) for e in self.events()]
         self.assertIn(("nginx-service", ["stop"]), service_calls)
         self.assertEqual(service_calls.count(("nginx-service", ["start"])), 1)
-        restored_restart = [e for e in self.events() if e["command"] == "uhttpd-service" and e["args"] == ["restart"]][-1]
+        restored_restart = [
+            e
+            for e in self.events()
+            if e["command"] == "uhttpd-service" and e["args"] == ["restart"]
+        ][-1]
         self.assertEqual(restored_restart["config"], json.loads(self.original_uci))
 
     def test_luci_restart_failure_restores_uci_without_restarting_nginx(self):
@@ -737,8 +904,10 @@ http {
         self.assertNotEqual(result.returncode, 0)
         self.assert_restored()
         self.assertEqual((self.root / "uci.json").read_text(), self.original_uci)
-        self.assertEqual([e["args"] for e in self.events() if e["command"] == "nginx-service"],
-                         [["running"]])
+        self.assertEqual(
+            [e["args"] for e in self.events() if e["command"] == "nginx-service"],
+            [["running"]],
+        )
 
     def test_failed_restore_retains_backup_and_reports_its_location(self):
         self.prepare()
@@ -752,7 +921,9 @@ http {
         backups = list(self.nginx.glob(".horatio-*"))
         self.assertEqual(len(backups), 1)
         self.assertIn(str(backups[0]), result.stderr)
-        self.assertEqual((backups[0] / "config").read_text(), "# previous working config\n")
+        self.assertEqual(
+            (backups[0] / "config").read_text(), "# previous working config\n"
+        )
         self.assertEqual(self.index.read_text(), "previous index\n")
         self.assertTrue(self.default.is_symlink())
 
