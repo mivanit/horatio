@@ -43,6 +43,7 @@ it survives re-installs. Keys:
 |---|---|
 | `sel_fault_patterns` | case-insensitive substrings of BMC event descriptions that count as a hardware fault (`SEL: N hardware events in 7d`). Routine chatter is excluded by not being listed |
 | `grown_defect_baseline` | `{serial: count}` for SAS drives; alarm when a drive exceeds its own number. An unlisted serial is watched from 0, so a replacement drive alarms as soon as it has defects: add it then |
+| `ipmi_timeout_s`, `gpu_timeout_s` | seconds each `ipmitool` / `nvidia-smi` call in the sensors run may take before it is killed and reported as an alarm (defaults 20 and 15). Three of each must fit inside `horatio-sensors.service`'s `TimeoutStartSec=2min`, or a hung BMC gets the run killed before its alarm is written |
 | `fan_rpm_alarm_above` | alarm when any fan exceeds this RPM; `null` = off |
 | `gpu_temp_alarm_margin_c` | alarm when a GPU's core or memory temperature is within this many °C of the driver's max operating temperature for it (including the relative GPU T.Limit reading on newer cards); absent = 3, `null` = off (the slowdown, ECC and retired-page GPU alarms stay on) |
 | `backup_timer` | systemd timer whose last trigger is checked (alarm after 30 h); `null` = none |

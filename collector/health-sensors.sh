@@ -50,10 +50,30 @@ trap 'rm -rf "$tmp"' EXIT
 # python notes it once as `info`. The tool AND the device node: ipmitool
 # installed on a box without a BMC fails every run with "Could not open device
 # at /dev/ipmi0 ...", and that is not a fault.
+# Per-call limits for the BMC and nvidia-smi: config `ipmi_timeout_s` and
+# `gpu_timeout_s`, defaults 20 and 15. Three ipmitool calls plus up to three
+# nvidia-smi calls must end inside the unit's TimeoutStartSec=2min (3x20 + 3x15 =
+# 105 s); past that, systemd kills the run before a hung BMC's `exit 124` reaches
+# the sidecar, and the alarm never appears. A missing key or a value that is not
+# a positive number means the default; malformed JSON crashes the python stage below.
+read -r IPMI_TIMEOUT GPU_TIMEOUT < <(python3 -c '
+import json, sys
+try:
+    config = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    config = {}
+def limit(key, default):
+    value = config.get(key)
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+    return value if ok else default
+print(limit("ipmi_timeout_s", 20), limit("gpu_timeout_s", 15))
+' "${HEALTH_CONFIG:-/etc/horatio/config.json}")
+: "${IPMI_TIMEOUT:=20}" "${GPU_TIMEOUT:=15}"
+
 if command -v ipmitool > /dev/null && [ -e /dev/ipmi0 ]; then
-    timeout 60 ipmitool sdr type fan          > "$tmp/fan.txt"   2> "$tmp/fan.err"   || echo "exit $?" >> "$tmp/fan.err"
-    timeout 60 ipmitool sdr type temperature  > "$tmp/temp.txt"  2> "$tmp/temp.err"  || echo "exit $?" >> "$tmp/temp.err"
-    timeout 60 ipmitool sdr type current      > "$tmp/power.txt" 2> "$tmp/power.err" || echo "exit $?" >> "$tmp/power.err"
+    timeout "$IPMI_TIMEOUT" ipmitool sdr type fan          > "$tmp/fan.txt"   2> "$tmp/fan.err"   || echo "exit $?" >> "$tmp/fan.err"
+    timeout "$IPMI_TIMEOUT" ipmitool sdr type temperature  > "$tmp/temp.txt"  2> "$tmp/temp.err"  || echo "exit $?" >> "$tmp/temp.err"
+    timeout "$IPMI_TIMEOUT" ipmitool sdr type current      > "$tmp/power.txt" 2> "$tmp/power.err" || echo "exit $?" >> "$tmp/power.err"
 else
     for f in fan temp power; do : > "$tmp/$f.txt"; : > "$tmp/$f.err"; done
     : > "$tmp/no-bmc"
@@ -86,7 +106,7 @@ rapl > "$tmp/rapl2.txt" 2>> "$tmp/rapl.err" || echo "exit $?" >> "$tmp/rapl.err"
 # `collector:` alarm, on purpose. No nvidia-smi at all: no rows, no alarm.
 if command -v nvidia-smi > /dev/null; then
     gpu_query=index,pci.bus_id,name,temperature.gpu,temperature.memory,clocks_event_reasons.sw_thermal_slowdown,clocks_event_reasons.hw_thermal_slowdown,clocks_event_reasons.hw_slowdown,clocks_event_reasons_counters.sw_thermal_slowdown,clocks_event_reasons_counters.hw_thermal_slowdown,ecc.errors.uncorrected.volatile.total,retired_pages.pending,power.draw,power.limit
-    timeout 30 nvidia-smi --query-gpu="$gpu_query" --format=csv,noheader,nounits > "$tmp/gpu.txt" 2> "$tmp/gpu.err" || {
+    timeout "$GPU_TIMEOUT" nvidia-smi --query-gpu="$gpu_query" --format=csv,noheader,nounits > "$tmp/gpu.txt" 2> "$tmp/gpu.err" || {
         rc=$?
         # Older drivers reject these optional counters instead of returning N/A.
         # Retry only that query error; ordinary driver failures remain alarms.
@@ -94,12 +114,12 @@ if command -v nvidia-smi > /dev/null; then
             gpu_query=${gpu_query//clocks_event_reasons_counters.sw_thermal_slowdown,/}
             gpu_query=${gpu_query//clocks_event_reasons_counters.hw_thermal_slowdown,/}
             : > "$tmp/gpu-no-counters"
-            timeout 30 nvidia-smi --query-gpu="$gpu_query" --format=csv,noheader,nounits > "$tmp/gpu.txt" 2> "$tmp/gpu.err" || echo "exit $?" >> "$tmp/gpu.err"
+            timeout "$GPU_TIMEOUT" nvidia-smi --query-gpu="$gpu_query" --format=csv,noheader,nounits > "$tmp/gpu.txt" 2> "$tmp/gpu.err" || echo "exit $?" >> "$tmp/gpu.err"
         else
             echo "exit $rc" >> "$tmp/gpu.err"
         fi
     }
-    timeout 30 nvidia-smi -q -d TEMPERATURE > "$tmp/gpu-temp.txt" 2> "$tmp/gpu-temp.err" || echo "exit $?" >> "$tmp/gpu-temp.err"
+    timeout "$GPU_TIMEOUT" nvidia-smi -q -d TEMPERATURE > "$tmp/gpu-temp.txt" 2> "$tmp/gpu-temp.err" || echo "exit $?" >> "$tmp/gpu-temp.err"
 else
     for f in gpu gpu-temp; do : > "$tmp/$f.txt"; : > "$tmp/$f.err"; done
 fi

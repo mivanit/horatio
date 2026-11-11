@@ -19,7 +19,11 @@ SOURCE: str = (ROOT / "collector/health-sensors.sh").read_text()
 SHELL: str
 PYTHON: str
 SHELL, PYTHON = SOURCE.split('python3 - "$tmp" "$OUT" <<\'PY\'\n', 1)
-GPU_CAPTURE: str = SHELL[SHELL.index("if command -v nvidia-smi") :]
+# The per-call timeout limits read from the config, then the GPU capture.
+LIMITS: str = SHELL[
+    SHELL.index("read -r IPMI_TIMEOUT") : SHELL.index("if command -v ipmitool")
+]
+GPU_CAPTURE: str = LIMITS + SHELL[SHELL.index("if command -v nvidia-smi") :]
 PYTHON = PYTHON.rsplit("\nPY", 1)[0]
 
 FAKE_SMI: str = """import json, os, sys
@@ -113,6 +117,12 @@ class TestGPUSensors:
             command: Path = fake_bin / "nvidia-smi"
             command.write_text(f"#!{sys.executable}\n{FAKE_SMI}")
             command.chmod(0o755)
+            # Records each limit it is given, then runs the command without one.
+            fake_timeout: Path = fake_bin / "timeout"
+            fake_timeout.write_text(
+                f'#!/bin/bash\necho "$1" >> "{stage}/timeouts"\nshift\nexec "$@"\n'
+            )
+            fake_timeout.chmod(0o755)
             env: dict[str, str] = dict(
                 os.environ,
                 PATH=f"{fake_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
@@ -148,7 +158,18 @@ class TestGPUSensors:
                 json.loads(line)
                 for line in (stage / "calls.jsonl").read_text().splitlines()
             ]
+            self.timeouts: list[str] = (stage / "timeouts").read_text().split()
             return state, calls
+
+    def test_gpu_timeout_comes_from_config(self: TestGPUSensors) -> None:
+        self.collect()
+        assert self.timeouts == ["15", "15"], "default per-call limit"
+        self.collect(config={"gpu_timeout_s": 7})
+        assert self.timeouts == ["7", "7"], "configured limit"
+        bad: Any
+        for bad in (0, -5, "10", True, None):
+            self.collect(config={"gpu_timeout_s": bad})
+            assert self.timeouts == ["15", "15"], f"invalid {bad!r} falls back"
 
     def test_modern_driver_keeps_counters_and_all_columns(self: TestGPUSensors) -> None:
         state: dict[str, Any]
