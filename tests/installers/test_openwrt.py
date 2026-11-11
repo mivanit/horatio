@@ -75,6 +75,10 @@ class TestOpenWrtInstaller:
         self.root: Path = tmp_path
         (self.root / "openwrt").mkdir()
         (self.root / "static").mkdir()
+        (self.root / "static/app.js").write_text("// app\n")
+        (self.root / "index.html").write_text("<!doctype html>\n")
+        (self.root / ".git").mkdir()
+        (self.root / ".git/config").write_text("[remote]\n")
         self.bin: Path = self.root / "bin"
         self.bin.mkdir()
         (self.root / "crontabs").mkdir()
@@ -428,3 +432,77 @@ class TestOpenWrtInstaller:
         )
         assert result.returncode != 0
         assert "Dashboard is running!" not in result.stdout
+
+    def uci_args(self: TestOpenWrtInstaller) -> list[list[str]]:
+        return [event["args"] for event in self.events("uci")]
+
+    def assert_served_tree(self: TestOpenWrtInstaller, config: Any) -> None:
+        www: Path = self.root / "www"
+        assert ["set", f"uhttpd.dashboard.home={www}"] in self.uci_args()
+        assert ["set", "uhttpd.dashboard.no_symlinks=1"] in self.uci_args()
+        assert sorted(path.name for path in www.iterdir()) == [
+            "config.json",
+            "index.html",
+            "static",
+        ]
+        assert (www / "index.html").read_text() == "<!doctype html>\n"
+        assert (www / "static/app.js").read_text() == "// app\n"
+        assert (www / "static/chart.umd.min.js").read_bytes() == ASSET
+        served: Path = www / "config.json"
+        assert served.is_file() and not served.is_symlink()
+        assert json.loads(served.read_text()) == config
+        # The handler and the documented edit path still reach the same file.
+        link: Path = self.root / "config.json"
+        assert link.is_symlink() and os.readlink(link) == "www/config.json"
+        assert link.resolve() == served.resolve()
+
+    def test_web_root_excludes_checkout_and_serves_example_config(
+        self: TestOpenWrtInstaller,
+    ) -> None:
+        result: subprocess.CompletedProcess[str] = self.run_install()
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert ["set", f"uhttpd.dashboard.home={self.root}"] not in self.uci_args()
+        self.assert_served_tree(self.example)
+        assert self.events("test-uhttpd-service")[0]["config"] == self.example
+
+    def test_existing_config_is_migrated_and_rerun_is_idempotent(
+        self: TestOpenWrtInstaller,
+    ) -> None:
+        custom: dict[str, Any] = {"title": "My Router", "ping_targets": []}
+        (self.root / "config.json").write_text(json.dumps(custom))
+        for _ in range(2):
+            result: subprocess.CompletedProcess[str] = self.run_install()
+            assert result.returncode == 0, result.stderr + result.stdout
+            self.assert_served_tree(custom)
+        # Edits through the root path reach the served file.
+        edited: dict[str, Any] = {"title": "Edited"}
+        (self.root / "config.json").write_text(json.dumps(edited))
+        assert json.loads((self.root / "www/config.json").read_text()) == edited
+        # Stale served assets are refreshed from the checkout on rerun.
+        (self.root / "static/app.js").write_text("// app\n")
+        (self.root / "www/static/stale.js").write_text("old")
+        result = self.run_install()
+        assert result.returncode == 0, result.stderr + result.stdout
+        self.assert_served_tree(edited)
+
+    def test_regular_root_config_replaces_stale_served_copy(
+        self: TestOpenWrtInstaller,
+    ) -> None:
+        # An editor that replaces the link leaves a regular file; it is the newest.
+        (self.root / "www").mkdir()
+        (self.root / "www/config.json").write_text('{"title": "stale"}')
+        custom: dict[str, Any] = {"title": "Newest"}
+        (self.root / "config.json").write_text(json.dumps(custom))
+        result: subprocess.CompletedProcess[str] = self.run_install()
+        assert result.returncode == 0, result.stderr + result.stdout
+        self.assert_served_tree(custom)
+
+    def test_uninstall_removes_served_copies_but_keeps_config(
+        self: TestOpenWrtInstaller,
+    ) -> None:
+        assert self.run_install().returncode == 0
+        result: subprocess.CompletedProcess[str] = self.run_install(uninstall=True)
+        assert result.returncode == 0, result.stderr + result.stdout
+        www: Path = self.root / "www"
+        assert [path.name for path in www.iterdir()] == ["config.json"]
+        assert json.loads((self.root / "config.json").read_text()) == self.example

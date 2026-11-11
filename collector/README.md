@@ -15,7 +15,8 @@ sudo bash install.sh   # scripts -> /usr/local/bin, units -> /etc/systemd/system
 ```
 
 Root-owned copies run; the checkout is never executed by a timer, so editing it as a user
-changes nothing until root re-runs the installer. Idempotent, keeps an existing config.
+changes nothing until root re-runs the installer, which copies from it (so the web service's
+unit mounts the checkout read-only, `logs/` aside). Idempotent, keeps an existing config.
 
 ## Requirements
 

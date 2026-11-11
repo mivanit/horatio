@@ -6,9 +6,13 @@ other interpreters, so Ruby, Perl, and PHP do not need to be installed.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -163,3 +167,64 @@ class TestProcessPrivacy:
                     child.wait(timeout=5)
                     if child.stdout is not None:
                         child.stdout.close()
+
+    def test_nethogs_fallback_keeps_only_the_executable(
+        self: TestProcessPrivacy,
+    ) -> None:
+        # nethogs -l prints the whole command line as the program; a process that
+        # exited before /proc is read must not fall back to its arguments.
+        import server
+
+        gone: int = 2**22 + 1  # above the kernel's pid_max ceiling: never in /proc
+        stdout: str = (
+            f"/usr/bin/curl -H Authorization:{SECRET} https://x/{gone}/1000\t1.5\t2.5\n"
+            "unknown TCP/0/0\t0.5\t0.5\n"
+        )
+        with patch.object(
+            server,
+            "_run_nethogs",
+            lambda cycles, timeout: subprocess.CompletedProcess([], 0, stdout, ""),
+        ):
+            resp: server.Response = asyncio.run(server.network_processes(1))
+        body: bytes | memoryview = resp.body
+        assert SECRET not in bytes(body).decode()
+        rows: dict[int, dict[str, Any]] = {r["pid"]: r for r in json.loads(bytes(body))}
+        assert (rows[gone]["name"], rows[gone]["path"]) == ("curl", "/usr/bin/curl")
+        assert rows[0]["name"] == "unattributed"
+
+    def test_cron_mail_subject_keeps_only_the_program(
+        self: TestProcessPrivacy, subtests: pytest.Subtests, tmp_path: Path
+    ) -> None:
+        import server
+
+        spool: Path = tmp_path / "spool"
+        spool.write_text(
+            "From root@box  Mon Sep 14 08:00:00 2026\nFrom: root <root@box>\n"
+            f"Subject: Cron <root@box> /usr/bin/sync --key {SECRET}\n\nbody\n\n"
+        )
+        assert [m["subject"] for m in server._get_mail(str(spool))["messages"]] == [
+            "Cron <root@box> sync"
+        ]
+
+        cases: list[tuple[str, str]] = [
+            (
+                f"Cron <root@box> /usr/local/bin/backup --password {SECRET}",
+                "Cron <root@box> backup",
+            ),
+            (
+                f"Cron <miv@box> TOKEN={SECRET} python3 /srv/sync.py -k {SECRET}",
+                "Cron <miv@box> sync.py",
+            ),
+            (
+                f"Cron <root@box> python3 -c 'print(\"{SECRET}\")'",
+                "Cron <root@box> python3",
+            ),
+            (f"Cron <root@box> cd /srv && ./run {SECRET}", "Cron <root@box> cd"),
+            (f"Cron <root@box> A={SECRET}", "Cron <root@box>"),
+            ("SMART error (Health) on /dev/sda", "SMART error (Health) on /dev/sda"),
+        ]
+        subject: str
+        want: str
+        for subject, want in cases:
+            with subtests.test(subject=subject):
+                assert server._redact_cron_subject(subject) == want

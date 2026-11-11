@@ -1,8 +1,13 @@
 const API_BASE = '/api/4';
+// Browsers that block site data throw on any localStorage access; settings
+// then just don't persist instead of the whole page failing to load.
+function lsGet(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+function lsSet(key, value) { try { localStorage.setItem(key, value); } catch (e) { /* not persisted */ } }
+function lsRemove(key) { try { localStorage.removeItem(key); } catch (e) { /* not persisted */ } }
 const DEFAULT_HISTORY_LENGTH = 60;
 const MIN_HISTORY_LENGTH = 10;
 let historyLength = Math.max(
-  parseInt(localStorage.getItem('historyLength')) || DEFAULT_HISTORY_LENGTH,
+  parseInt(lsGet('historyLength')) || DEFAULT_HISTORY_LENGTH,
   MIN_HISTORY_LENGTH
 );
 const DEFAULT_POLL_INTERVAL = 2000;
@@ -54,18 +59,18 @@ const COLORS = {
 const IP_INFO_TIMEOUT_MS = 20000;
 const SLOW_POLL_INTERVAL = 30000; // 30 seconds for static/slow-changing data
 const DEFAULT_PROCESS_COUNT = 8;
-let topProcessesLimit = parseInt(localStorage.getItem('topProcessesLimit')) || DEFAULT_PROCESS_COUNT;
+let topProcessesLimit = parseInt(lsGet('topProcessesLimit')) || DEFAULT_PROCESS_COUNT;
 const MIN_POLL_INTERVAL = 1000;
 let pollInterval = Math.max(
-  parseInt(localStorage.getItem('pollInterval')) || DEFAULT_POLL_INTERVAL,
+  parseInt(lsGet('pollInterval')) || DEFAULT_POLL_INTERVAL,
   MIN_POLL_INTERVAL
 );
 
 const DEFAULT_NETHOGS_DURATION = 3;
-let nethogsDuration = parseInt(localStorage.getItem('nethogsDuration')) || DEFAULT_NETHOGS_DURATION;
+let nethogsDuration = parseInt(lsGet('nethogsDuration')) || DEFAULT_NETHOGS_DURATION;
 
 const DEFAULT_DISK_DURATION = 1;
-let diskDuration = parseInt(localStorage.getItem('diskDuration')) || DEFAULT_DISK_DURATION;
+let diskDuration = parseInt(lsGet('diskDuration')) || DEFAULT_DISK_DURATION;
 
 // Calculate nethogs fetch timeout (matches server: 1.5x duration + 5s buffer)
 function getNethogsTimeout() {
@@ -406,7 +411,7 @@ const HISTORY_TIME_RANGES = [
   { value: 720, label: '30 days' },
 ];
 const _DEFAULT_HISTORY_HOURS = 24;
-let defaultHistoryHours = parseFloat(localStorage.getItem('defaultHistoryHours')) || _DEFAULT_HISTORY_HOURS;
+let defaultHistoryHours = parseFloat(lsGet('defaultHistoryHours')) || _DEFAULT_HISTORY_HOURS;
 
 // History metric display names and colors
 const HISTORY_METRICS = {

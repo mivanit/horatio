@@ -54,7 +54,6 @@ CONF_NAME=$(echo "$DOMAIN" | tr '.' '-')
 # --- Platform detection ---
 if command -v systemctl >/dev/null 2>&1; then
     PLATFORM="ubuntu"
-    CONF_DEST="/etc/nginx/sites-enabled/$CONF_NAME"
     INDEX_DIR="/var/www/$CONF_NAME"
 elif command -v uci >/dev/null 2>&1; then
     PLATFORM="openwrt"
@@ -142,6 +141,26 @@ if [ "$PLATFORM" = openwrt ]; then
     done
 fi
 
+# --- Inspect the effective nginx configuration ---
+# Read before the candidate is written; a failed dump just leaves it empty.
+if [ "$PLATFORM" = openwrt ]; then
+    case "$(uci -q get nginx.global.uci_enable 2>/dev/null || true)" in
+        1|on|true|yes|enabled) OPENWRT_NGINX_CONF=/etc/nginx/uci.conf ;;
+        *) OPENWRT_NGINX_CONF=/etc/nginx/nginx.conf ;;
+    esac
+    NGINX_DUMP=""
+    [ "$2" = --uninstall ] || NGINX_DUMP=$(nginx -T -c "$OPENWRT_NGINX_CONF" 2>/dev/null) || NGINX_DUMP=""
+else
+    NGINX_DUMP=$(nginx -T 2>/dev/null) || NGINX_DUMP=""
+    # Debian/Ubuntu include sites-enabled/; Fedora, Arch and RHEL only conf.d/*.conf.
+    if [ -d /etc/nginx/sites-enabled ] &&
+        printf '%s\n' "$NGINX_DUMP" | grep -Eq '^[[:space:]]*include[[:space:]][^;]*sites-enabled/'; then
+        CONF_DEST="/etc/nginx/sites-enabled/$CONF_NAME"
+    else
+        CONF_DEST="/etc/nginx/conf.d/$CONF_NAME.conf"
+    fi
+fi
+
 # --- Generate nginx conf ---
 echo "Generating nginx config for $DOMAIN..."
 
@@ -150,9 +169,18 @@ CONF=""
 # Default server block: index page
 CONF="${CONF}# Auto-generated from $(basename "$SERVICES_FILE")
 # Do not edit -- re-run install.sh to update
-
+"
+# Long subdomains need a larger bucket, but nginx rejects a duplicate directive:
+# set it only if no other file (e.g. nginx.conf, another .services) already does.
+if ! printf '%s\n' "$NGINX_DUMP" | awk -v own="# configuration file $CONF_DEST:" '
+    /^# configuration file / { skip = ($0 == own) }
+    !skip && /^[[:space:]]*server_names_hash_bucket_size[[:space:];]/ { found = 1 }
+    END { exit !found }'; then
+    CONF="${CONF}
 server_names_hash_bucket_size 64;
-
+"
+fi
+CONF="${CONF}
 server {
     listen 80;
     server_name $DOMAIN;
@@ -446,10 +474,6 @@ echo "Testing nginx config..."
 if [ "$PLATFORM" = "openwrt" ]; then
     # Like OpenWrt's nginx_init, prepare RAM-backed config without starting the
     # service. uci.conf can be a dangling symlink after a disabled-service boot.
-    case "$(uci -q get nginx.global.uci_enable 2>/dev/null || true)" in
-        1|on|true|yes|enabled) OPENWRT_NGINX_CONF=/etc/nginx/uci.conf ;;
-        *) OPENWRT_NGINX_CONF=/etc/nginx/nginx.conf ;;
-    esac
     mkdir -p /var/log/nginx /var/lib/nginx
     if command -v nginx-util >/dev/null 2>&1 && ! nginx-util init_lan; then
         # The native init script also permits manual config after helper failure.
@@ -461,6 +485,11 @@ if [ "$PLATFORM" = "openwrt" ]; then
     nginx -t -c "$OPENWRT_NGINX_CONF"
 else
     nginx -t
+    # A valid config can still silently ignore a file no include reaches.
+    nginx -T 2>/dev/null | grep -qxF "# configuration file $CONF_DEST:" || {
+        echo "Error: nginx does not load $CONF_DEST; check the include lines in nginx.conf." >&2
+        exit 1
+    }
 fi
 
 # The candidate is valid. Only now replace the index and change LuCI's listener.

@@ -91,6 +91,7 @@ curl http://<host>:8080/text?style=simple         # plain ASCII, for scripts and
 | `history.min_record_interval` | minimum seconds between manual "record now" requests, 0 to disable (default 60) |
 | `history.sample_duration`, `history.sample_count` | each record averages `sample_count` samples over `sample_duration` seconds |
 | `history.max_file_mb` | OpenWrt backend only: past this size the older part of `logs/history.jsonl` is gzipped beside it and the file keeps its newest half (default 256). Archives are retained. Rotation needs free space for the compressed archive and the retained half; choose a smaller value on limited flash. History requests read at most the newest 4 MiB and report `truncated` when the requested range does not fit |
+| `history.max_hours` | Linux server only (OpenWrt reads at most its 4 MiB tail anyway): largest window, in hours, any history read serves (`/api/history`, `/api/history/field/<name>`, `/text`); larger requests are clamped to it. Lower it on a small box: a year-long window parses up to the 64 MB history tail into memory (default 8760, 0.1 to 8760) |
 | `history.processes_enabled`, `history.process_count` | log the top `process_count` processes by CPU and by memory, plus any holding GPU memory, in each history record (`processes`: pid, name always; ppid, create_time, user, status, threads, cpu_percent, rss_mb, disk_read_kbps, disk_write_kbps, gpu_mem_mib + gpus, gpu_util_percent when known and non-zero); default off, 10. Roughly doubles a record's size at 10, so the 64 MB history tail covers fewer days |
 | `thresholds.*_percent`, `temp_celsius`, `network_mbps`, `disk_io_mbps`, `ping_ms` | orange-card thresholds |
 | `thresholds.power_max_watts`, `power_psu_watts`, `power_warn_fraction` | the power bar's right edge, its dashed PSU line, and the orange threshold as a fraction of the PSU |
@@ -108,9 +109,13 @@ addresses, mail subjects, drive models and serials, and the Glances metrics; the
 proxy forwards only the plugins the UI reads (cpu, percpu, mem, memswap, gpu, network, diskio,
 sensors, load, uptime, system, fs), so Glances' process views with full command lines are
 unreachable, and the dashboard's own process list strips arguments. The web process
-runs as an unprivileged user under `ProtectSystem=strict` and never runs `sudo`, `smartctl` or
-`ipmitool`: the collector runs as root on its own timers and the web process only reads the
-JSON it writes. The IP card and each history record ask `api.ipify.org` for the public address.
+runs as an unprivileged user and never runs `sudo`, `smartctl` or `ipmitool`: the collector
+runs as root on its own timers and the web process only reads the JSON it writes. The unit
+sandboxes it: everything is read-only except the checkout's `logs/` (`ProtectSystem=strict`),
+and `/home`, `/root` and `/run/user` are empty (`ProtectHome=tmpfs`) except the checkout and the
+venv's Python, bound back in read-only. The checkout itself is read-only to the service because
+root runs code from it (`collector/install.sh` copies the collector scripts, `install.sh`), and
+`.password` is written only by `server.py --set-password`, run by hand. The IP card and each history record ask `api.ipify.org` for the public address.
 
 Process labels retain recognized script paths or Python module names, but omit inline code
 and unrecognized interpreter options. This protects live data and new history records;
@@ -240,7 +245,11 @@ sh install.sh --uninstall
 ```
 
 Requires `uhttpd-mod-lua`, `luci-lib-jsonc`, and `luci-lib-nixio` (installed by the
-script; rerun it when updating). A kernel file lock serializes recording and
+script). uhttpd serves only `www/`, never the checkout: the installer copies
+`index.html` and `static/` there, so rerun it after updating. The config lives at
+`www/config.json` (served as `/config.json`); `config.json` in the checkout root is
+a link to it, so edit either path. An existing `config.json` is moved into `www/`
+on install, and uninstall leaves both in place. A kernel file lock serializes recording and
 rotation and releases automatically if a request worker exits. A successfully
 saved record whose rotation failed returns a warning; its original history is
 retained. It does not implement `since=` (Refresh reloads the whole window there)

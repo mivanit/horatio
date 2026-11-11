@@ -12,7 +12,8 @@
     "sample_duration": 10,
     "sample_count": 5,
     "processes_enabled": false,
-    "process_count": 10
+    "process_count": 10,
+    "max_hours": 8760
   },
   "limits": {
     "network_mbps": 1250,

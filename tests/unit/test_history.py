@@ -570,3 +570,29 @@ def test_history_export_unit() -> None:
             await export("HEAD response", original, method="HEAD")
 
         asyncio.run(run())
+
+
+def test_history_max_hours_clamps_every_history_read() -> None:
+    """history.max_hours bounds the window /api/history and its side fields read;
+    a larger request is served as the largest allowed window, not refused."""
+    import server
+
+    assert server.HISTORY_MAX_HOURS == 8760, "config.example.json keeps the old cap"
+    asked: list[float] = []
+
+    def fake_read(
+        hours: float, since: float | None = None
+    ) -> tuple[list[dict[str, Any]], int, bool, float]:
+        asked.append(hours)
+        return [], 0, False, 0.0
+
+    with (
+        patch.object(server, "HISTORY_MAX_HOURS", 48.0),
+        patch.object(server, "_read_history", fake_read),
+    ):
+        assert server._clamp_hours(8760) == 48.0
+        assert server._clamp_hours(0) == 0.1
+        assert server._clamp_hours(5) == 5
+        asyncio.run(server.get_history(hours=8760))
+        asyncio.run(server.get_history_field("temps", hours=1000))
+    assert asked == [48.0, 48.0], f"history reads use the clamped window: {asked}"

@@ -4,6 +4,8 @@ static/chart.umd.min.js
 .password
 # per-machine configs: created from the *.example.json files by install.sh
 config.json
+# OpenWrt web root: copies made by openwrt/install.sh plus the real config
+www/
 collector/health-config.json
 nginx/*.services
 !nginx/example.services

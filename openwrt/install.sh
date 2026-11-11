@@ -11,6 +11,12 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DASHBOARD_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+# uhttpd serves only this directory: index.html and static/ are copied in on
+# each install, and www/config.json is the real config (DASHBOARD_DIR/config.json
+# links to it). Serving the checkout itself would expose .git/, logs/ and source.
+WWW_DIR="$DASHBOARD_DIR/www"
+CONFIG="$DASHBOARD_DIR/config.json"
+WWW_CONFIG="$WWW_DIR/config.json"
 UCI_SECTION="dashboard"
 PORT=8080
 
@@ -51,7 +57,9 @@ if [ "$1" = "--uninstall" ]; then
     uci commit uhttpd
     /etc/init.d/uhttpd restart
     update_history_cron ""
-    info "Dashboard removed."
+    # Remove the served copies; keep www/config.json and its config.json link.
+    rm -rf "$WWW_DIR/static" "$WWW_DIR/index.html"
+    info "Dashboard removed. Config kept: $WWW_DIR/config.json"
     exit 0
 fi
 
@@ -125,12 +133,39 @@ if [ -z "$LAN_IP" ]; then
 fi
 info "Binding to $LAN_IP:$PORT"
 
+# --- Web root ---
+# Refresh the served copies; config.json in www/ is never touched here.
+info "Copying frontend into $WWW_DIR..."
+mkdir -p "$WWW_DIR"
+rm -rf "$WWW_DIR/static" "$WWW_DIR/index.html"
+cp "$DASHBOARD_DIR/index.html" "$WWW_DIR/index.html"
+cp -RL "$DASHBOARD_DIR/static" "$WWW_DIR/static"
+
 # Config must exist before uhttpd loads the Lua handler at startup. Preserve
-# the machine's existing config on updates, as the Linux installer does.
-if [ ! -f "$DASHBOARD_DIR/config.json" ]; then
-    cp "$DASHBOARD_DIR/config.example.json" "$DASHBOARD_DIR/config.json"
+# the machine's existing config on updates, as the Linux installer does. The
+# frontend fetches /config.json from www/; the Lua handler and the documented
+# edit path use DASHBOARD_DIR/config.json, a link outside the web root.
+# A regular file there is the newest edit (first migration, or an editor that
+# replaced the link), so it wins over www/config.json.
+if [ -L "$CONFIG" ]; then
+    if [ "$(readlink "$CONFIG")" != "www/config.json" ]; then
+        if [ ! -e "$WWW_CONFIG" ] && [ -f "$CONFIG" ]; then
+            cp "$CONFIG" "$WWW_CONFIG"
+        fi
+        rm -f "$CONFIG"
+    fi
+elif [ -f "$CONFIG" ]; then
+    mv -f "$CONFIG" "$WWW_CONFIG"
+    info "Moved config.json to $WWW_CONFIG (config.json now links to it)."
+elif [ -e "$CONFIG" ]; then
+    error "$CONFIG is not a regular file; move it aside and rerun."
+    exit 1
+fi
+if [ ! -f "$WWW_CONFIG" ]; then
+    cp "$DASHBOARD_DIR/config.example.json" "$WWW_CONFIG"
     info "Created config.json from config.example.json: edit it (title, ping targets, thresholds)."
 fi
+[ -L "$CONFIG" ] || ln -s www/config.json "$CONFIG"
 
 # --- Configure uhttpd ---
 info "Configuring uhttpd dashboard instance..."
@@ -139,11 +174,11 @@ uci delete "uhttpd.$UCI_SECTION" 2>/dev/null || true
 uci set "uhttpd.$UCI_SECTION=uhttpd"
 uci add_list "uhttpd.$UCI_SECTION.listen_http=$LAN_IP:$PORT"
 uci add_list "uhttpd.$UCI_SECTION.listen_http=127.0.0.1:$PORT"
-uci set "uhttpd.$UCI_SECTION.home=$DASHBOARD_DIR"
+uci set "uhttpd.$UCI_SECTION.home=$WWW_DIR"
 uci set "uhttpd.$UCI_SECTION.lua_prefix=/api"
 uci set "uhttpd.$UCI_SECTION.lua_handler=$SCRIPT_DIR/handler.lua"
 uci set "uhttpd.$UCI_SECTION.max_requests=50"
-uci set "uhttpd.$UCI_SECTION.no_symlinks=0"
+uci set "uhttpd.$UCI_SECTION.no_symlinks=1"
 uci set "uhttpd.$UCI_SECTION.no_dirlists=1"
 
 uci commit uhttpd
@@ -171,6 +206,6 @@ fi
 
 info ""
 info "  Dashboard: http://$HOSTNAME:$PORT"
-info "  Config:    $DASHBOARD_DIR/config.json"
+info "  Config:    $DASHBOARD_DIR/config.json (-> www/config.json)"
 info "  History:   $DASHBOARD_DIR/logs/history.jsonl"
 info "  Uninstall: sh $0 --uninstall"

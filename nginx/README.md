@@ -37,12 +37,19 @@ both the bare domain and its wildcard at the machine:
 | `example.internal`   | the host's LAN IP |
 | `*.example.internal` | the host's LAN IP |
 
-### Linux (Debian/Ubuntu)
+### Linux (systemd)
 
 ```sh
 sudo sh install.sh myhost.services              # install or update
 sudo sh install.sh myhost.services --uninstall   # remove
 ```
+
+The config goes to `/etc/nginx/sites-enabled/` when nginx includes it
+(Debian/Ubuntu), otherwise to `/etc/nginx/conf.d/<domain>.conf` (Fedora, Arch,
+RHEL). Install fails and rolls back if `nginx -T` does not show the generated
+file loaded. `server_names_hash_bucket_size 64;` is added only when no other
+loaded file already sets it. Missing nginx is installed with `apt` only; on other
+distributions install it first.
 
 Uninstall validates and reloads nginx after removing the generated configuration,
 then removes only `index.html`. Extra files in the index directory are kept.

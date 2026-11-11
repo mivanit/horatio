@@ -17,7 +17,7 @@ import pytest
 from tests.support import ROOT
 
 MOCK: str = r"""#!/usr/bin/python3
-import json, os, pathlib, subprocess, sys
+import glob, json, os, pathlib, re, subprocess, sys
 root = pathlib.Path(os.environ["HORATIO_NGINX_TEST_ROOT"])
 executable = pathlib.Path(sys.argv[0])
 name = executable.name + ("-service" if executable.parent.name == "init.d" else "")
@@ -40,9 +40,18 @@ elif name == "nginx":
     if "-c" in args and not pathlib.Path(args[args.index("-c") + 1]).is_file():
         print("nginx: configuration file missing", file=sys.stderr)
         sys.exit(1)
-    if failure == "validate":
+    if failure == "validate" and "-t" in args:
         print("nginx: invalid port in upstream", file=sys.stderr)
         sys.exit(1)
+    if "-T" in args:
+        # Like nginx -T: each loaded file under a header, following includes.
+        def dump(path):
+            text = path.read_text()
+            print("# configuration file " + str(path) + ":\n" + text)
+            for pattern in re.findall(r"^\s*include\s+([^;]+);", text, re.M):
+                for found in sorted(glob.glob(os.path.join(root / "etc/nginx", pattern))):
+                    if os.path.isfile(found): dump(pathlib.Path(found))
+        dump(pathlib.Path(args[args.index("-c") + 1]) if "-c" in args else root / "etc/nginx/nginx.conf")
 elif name == "nginx-util":
     if failure == "generate":
         sys.exit(1)
@@ -518,6 +527,10 @@ http {
     ) -> None:
         if platform == "ubuntu":
             (self.bin / "systemctl").symlink_to(self.mock)
+            (self.nginx / "nginx.conf").write_text(
+                f"http {{\n    include {self.nginx}/conf.d/*.conf;\n"
+                f"    include {self.nginx}/sites-enabled/*;\n}}\n"
+            )
             self.conf: Path = self.nginx / "sites-enabled/example-internal"
             self.index: Path = self.root / "var/www/example-internal/index.html"
         else:
@@ -754,6 +767,48 @@ http {
         assert self.default_target.exists()
         assert list(self.nginx.glob(".horatio-*")) == []
 
+    def test_hash_bucket_size_is_not_duplicated_from_other_files(
+        self: TestNginxInstaller,
+    ) -> None:
+        self.prepare()
+        main: Path = self.nginx / "nginx.conf"
+        main.write_text("# server_names_hash_bucket_size 64;\n" + main.read_text())
+        self.conf.write_text(
+            "server_names_hash_bucket_size 64;\n"
+        )  # replaced, so ignored
+        result: subprocess.CompletedProcess[str] = self.run_install()
+        assert result.returncode == 0, result.stderr
+        assert "\nserver_names_hash_bucket_size 64;" in self.conf.read_text()
+        (self.nginx / "conf.d/other.conf").write_text(
+            "server_names_hash_bucket_size 64;\n"
+        )
+        result = self.run_install()
+        assert result.returncode == 0, result.stderr
+        assert "server_names_hash_bucket_size" not in self.conf.read_text()
+
+    def test_conf_d_layout_used_when_sites_enabled_is_not_included(
+        self: TestNginxInstaller,
+    ) -> None:
+        self.prepare()
+        (self.nginx / "nginx.conf").write_text(
+            f"http {{\n    include {self.nginx}/conf.d/*.conf;\n}}\n"
+        )
+        result: subprocess.CompletedProcess[str] = self.run_install()
+        assert result.returncode == 0, result.stderr
+        conf: Path = self.nginx / "conf.d/example-internal.conf"
+        assert "proxy_pass http://127.0.0.1:8080" in conf.read_text()
+        assert self.conf.read_text() == "# previous working config\n"
+
+    def test_unloaded_config_rolls_back(self: TestNginxInstaller) -> None:
+        self.prepare()
+        (self.nginx / "nginx.conf").write_text("http {\n}\n")
+        result: subprocess.CompletedProcess[str] = self.run_install()
+        assert result.returncode != 0
+        assert "does not load" in result.stderr
+        assert not (self.nginx / "conf.d/example-internal.conf").exists()
+        self.assert_restored()
+        assert not any((e["args"][0] == "reload-or-restart" for e in self.events()))
+
     def test_apk_installs_nginx_before_validating_or_changing_luci(
         self: TestNginxInstaller,
     ) -> None:
@@ -802,7 +857,9 @@ http {
             i for i, e in enumerate(events) if e["command"] == "nginx-util"
         )
         validation: int = next(
-            i for i, e in enumerate(events) if e["command"] == "nginx"
+            i
+            for i, e in enumerate(events)
+            if e["command"] == "nginx" and "-t" in e["args"]
         )
         assert generation < validation
         assert events[validation]["args"] == ["-t", "-c", str(self.nginx / "uci.conf")]
@@ -819,7 +876,9 @@ http {
         )
         assert result.returncode == 0, result.stderr
         validations: list[list[str]] = [
-            e["args"] for e in self.events() if e["command"] == "nginx"
+            e["args"]
+            for e in self.events()
+            if e["command"] == "nginx" and "-t" in e["args"]
         ]
         assert validations == [["-t", "-c", str(self.nginx / "nginx.conf")]]
 
@@ -854,9 +913,11 @@ http {
             HORATIO_UCI_ENABLED=""
         )
         assert result.returncode == 0, result.stderr
-        assert [e["args"] for e in self.events() if e["command"] == "nginx"] == [
-            ["-t", "-c", str(self.nginx / "nginx.conf")]
-        ]
+        assert [
+            e["args"]
+            for e in self.events()
+            if e["command"] == "nginx" and "-t" in e["args"]
+        ] == [["-t", "-c", str(self.nginx / "nginx.conf")]]
 
     def test_openwrt_waits_for_stop_and_http_readiness_before_committing(
         self: TestNginxInstaller,

@@ -15,11 +15,14 @@ PATH="$PATH:/usr/sbin:/sbin"
 [ "$(id --user)" -ne 0 ] || { echo "Run ./install.sh as your own user, not root or sudo." >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# The unit file's ExecStart= and ReadWritePaths= are word-split by systemd and the
+# The unit file's ExecStart= and Bind*Paths= are word-split by systemd and the
 # path goes through sed: whitespace, | and & would silently produce a broken unit.
-case "$SCRIPT_DIR" in
-    *[[:space:]\|\&]*) echo "Unsupported checkout path (whitespace, | or &): $SCRIPT_DIR" >&2; exit 1 ;;
-esac
+unit_safe_path() {   # <what> <path>
+    case "$2" in
+        *[[:space:]\|\&]*) echo "Unsupported $1 path (whitespace, | or &): $2" >&2; exit 1 ;;
+    esac
+}
+unit_safe_path checkout "$SCRIPT_DIR"
 SERVICE_FILE="horatio.service"
 
 WITH_COLLECTOR=0
@@ -120,6 +123,13 @@ echo "Syncing Python environment..."
 uv sync --project "$SCRIPT_DIR" --locked --link-mode copy
 [ -x "$SCRIPT_DIR/.venv/bin/python" ] || { echo "Error: .venv/bin/python missing after uv sync" >&2; exit 1; }
 
+# The unit's only writable path; it is a BindPaths= source, so it must exist.
+mkdir -p "$SCRIPT_DIR/logs"
+# The venv's interpreter prefix, bound read-only into the unit: a uv-managed Python
+# (~/.local/share/uv/python) is otherwise hidden by ProtectHome=.
+PYTHON_PREFIX="$("$SCRIPT_DIR/.venv/bin/python" -c 'import sys; print(sys.base_prefix)')"
+unit_safe_path Python "$PYTHON_PREFIX"
+
 echo "Downloading Chart.js..."
 # Pinned version + checksum: this file runs in the dashboard's own origin, so a
 # tampered or silently-upgraded download must never be served. Bump BOTH together
@@ -146,11 +156,13 @@ else
 fi
 
 echo "Installing $SERVICE_FILE..."
-# The template's placeholders /opt/horatio and User=horatio become this checkout
-# and the invoking user (never root: refused at the top).
+# The template's placeholders /opt/horatio, User=horatio and @PYTHON_PREFIX@ become
+# this checkout, the invoking user (never root: refused at the top) and the venv's
+# interpreter prefix.
 SERVICE_USER="$(id --user --name)"
 sed -e "s|/opt/horatio|$SCRIPT_DIR|g" \
     -e "s|^User=horatio|User=$SERVICE_USER|" \
+    -e "/^BindReadOnlyPaths=/s|@PYTHON_PREFIX@|$PYTHON_PREFIX|" \
     "$SCRIPT_DIR/$SERVICE_FILE" | sudo tee "/etc/systemd/system/$SERVICE_FILE" > /dev/null
 
 sudo systemctl daemon-reload

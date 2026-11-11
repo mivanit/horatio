@@ -184,6 +184,12 @@ DEFAULT_HISTORY_SAMPLE_COUNT: Final[int] = _cfg_int(
 DEFAULT_HISTORY_PROCESS_COUNT: Final[int] = _cfg_int(
     _history_cfg, "process_count", 10, 1, 50
 )
+# Upper bound on the window any history read accepts. A long window parses up to
+# HISTORY_MAX_TAIL_READ of JSON into memory (hundreds of MB of Python objects),
+# and /text keeps that result in _history_cache; a small box can lower it.
+HISTORY_MAX_HOURS: Final[float] = _cfg_num(
+    _history_cfg, "max_hours", 8760, 0.1, 8760, "history"
+)
 _processes_enabled: Any = _history_cfg.get("processes_enabled", False)
 if not isinstance(_processes_enabled, bool):
     logging.getLogger("dashboard").warning(
@@ -445,9 +451,10 @@ def get_sanitized_process_info(
     - For interpreter + script: include script path
     - Never include other arguments (may contain passwords, tokens, etc.)
     """
-    # PID 0 is the kernel scheduler - has no cmdline
+    # PID 0 has no cmdline; nethogs uses it for traffic it could not tie to a
+    # process ("unknown TCP/0/0"), so it is not the kernel's.
     if pid == 0:
-        return {"name": "kernel", "path": ""}
+        return {"name": "unattributed", "path": ""}
 
     e: OSError | IndexError | ValueError
     try:
@@ -1931,7 +1938,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Startup
     # Enforce 0600 on the password hash even if it was created/edited another way
     # (a group- or world-readable .password leaks the PBKDF2 hash for offline attack).
-    if PASSWORD_FILE.exists():
+    # Only when loose: the systemd unit mounts the checkout read-only, so the
+    # chmod fails there and should warn only when the file actually needs it.
+    if PASSWORD_FILE.exists() and PASSWORD_FILE.stat().st_mode & 0o077:
         e: OSError
         try:
             PASSWORD_FILE.chmod(0o600)
@@ -2358,17 +2367,24 @@ def _parse_since(since: str | None) -> float | None | Response:
     return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
 
 
+def _clamp_hours(hours: float) -> float:
+    """A requested history window, clamped to [0.1, history.max_hours]: too large
+    a window is served as the largest allowed one, not refused."""
+    return max(0.1, min(hours, HISTORY_MAX_HOURS))
+
+
 @APP.get("/api/history")
 async def get_history(hours: float = 24, since: str | None = None) -> Response:
     """Return historical data for the specified time range.
 
     Args:
-        hours: Number of hours of history to return (default 24, max 8760).
+        hours: Number of hours of history to return (default 24, max
+            history.max_hours, 8760 unless set).
         since: Only records strictly newer than this timestamp are returned
             (the client merges them and trims against ``cutoff``). Responses
             carry ``now`` (the server's clock) for the client's next since.
     """
-    hours = max(0.1, min(hours, 8760))
+    hours = _clamp_hours(hours)
     since_ts: float | None | Response = _parse_since(since)
     if isinstance(since_ts, Response):
         return since_ts
@@ -2435,7 +2451,7 @@ async def get_history_field(
             status_code=404,
             media_type="application/json",
         )
-    hours = max(0.1, min(hours, 8760))
+    hours = _clamp_hours(hours)
     since_ts: float | None | Response = _parse_since(since)
     if isinstance(since_ts, Response):
         return since_ts
@@ -3469,9 +3485,12 @@ async def network_processes(duration: int = 3) -> Response:
                 parts: list[str] = proc_info.rsplit("/", 2)
                 if len(parts) >= 3:
                     pid: int = int(parts[-2])
-                    program: str = (
-                        parts[0].split("/")[-1] if "/" in parts[0] else parts[0]
-                    )
+                    # The path is the fallback when the process exits before
+                    # /proc is read. nethogs -l (and some older builds) print the
+                    # whole command line here, whose arguments may hold secrets:
+                    # keep only the text before the first whitespace.
+                    exe_path: str = (parts[0].split() or [""])[0]
+                    program: str = exe_path.rsplit("/", 1)[-1]
                 else:
                     continue
 
@@ -3486,7 +3505,7 @@ async def network_processes(duration: int = 3) -> Response:
                 else:
                     # Get sanitized process info from /proc
                     info: dict[str, str] = get_sanitized_process_info(
-                        pid, program, parts[0]
+                        pid, program, exe_path
                     )
                     processes[pid] = {
                         "pid": pid,
@@ -3627,6 +3646,23 @@ MAIL_SPOOL: Final[str] = f"/var/mail/{getpass.getuser()}"
 MAIL_LIMIT: Final[int] = 10
 
 
+def _redact_cron_subject(subject: str) -> str:
+    """Reduce cron's "Cron <user@host> <command line>" subject to the program's
+    name: the command line can carry a token or password, and subjects are served
+    unauthenticated. Other subjects pass through unchanged."""
+    m: re.Match[str] | None = re.fullmatch(r"(Cron <[^>]*>)\s+(.*)", subject, re.S)
+    if m is None:
+        return subject
+    words: list[str] = [w.strip("\"'") for w in m.group(2).split()]
+    # Leading VAR=value words are environment assignments, not the program (and a
+    # usual place for a secret).
+    while words and re.match(r"[A-Za-z_]\w*=", words[0]):
+        words.pop(0)
+    if not words or not words[0]:
+        return m.group(1)
+    return f"{m.group(1)} {_sanitize_process_argv(words)['name']}"
+
+
 def _get_mail(path: str = MAIL_SPOOL, limit: int = MAIL_LIMIT) -> dict[str, Any]:
     """Message count and the newest ``limit`` subjects of an mbox spool (sync). Never raises."""
     result: dict[str, Any] = {
@@ -3662,7 +3698,8 @@ def _get_mail(path: str = MAIL_SPOOL, limit: int = MAIL_LIMIT) -> dict[str, Any]
                             if d is not None and d.datetime is not None
                             else None
                         ),
-                        "subject": str(msg.get("Subject", "")) or "(no subject)",
+                        "subject": _redact_cron_subject(str(msg.get("Subject", "")))
+                        or "(no subject)",
                     }
                 except Exception as e:
                     # Never skipped: the row itself says this message could not be
@@ -4884,9 +4921,10 @@ LIVE VIEW (tui.py)
          | simple (ascii with no colour)
   color  auto (default: on for unicode, off for ascii/simple) | on | 256 | 16 | off
          on is 24-bit ANSI; 256/16 for older terminals; turn it off when parsing
-  hours  history window (0.1 to 8760). Default: 1 to 3 hours, picked so the
-         sparklines have about one record per column (wider terminals and
-         slower recording intervals get the longer window)
+  hours  history window (0.1 to the config's history.max_hours, 8760 unless set).
+         Default: 1 to 3 hours, picked so the sparklines have about one record
+         per column (wider terminals and slower recording intervals get the
+         longer window)
   width  terminal width in columns, default 80 (60 to 400). The server can't see
          your terminal, so pass it:  curl "http://<host>:8080/text?width=$COLUMNS"
          At 160 or wider, the unicode report shows snapshot and history side by side.
@@ -4982,7 +5020,7 @@ async def text_view(
                 APP.state, "history_record_interval", DEFAULT_HISTORY_RECORD_INTERVAL
             ),
         )
-    hours = max(0.1, min(hours, 8760))
+    hours = _clamp_hours(hours)
     rows = max(1, min(rows, 500))
     requested_rows: int = rows
     async with _history_read_lock:

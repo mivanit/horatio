@@ -3,19 +3,31 @@ Description=Horatio: homelab dashboard (Glances + custom UI)
 After=network.target
 
 [Service]
-# install.sh rewrites the checkout path in the three path lines below and User=
-# at install time; /opt/horatio and User=horatio are placeholders. The venv's
-# own python is run, not `uv run`: uv writes to ~/.cache/uv on every start,
-# which ProtectSystem=strict forbids (EROFS, exit 2, restart loop).
+# install.sh fills in the placeholders at install time: /opt/horatio (the
+# checkout) in the path lines below, User=horatio, and @PYTHON_PREFIX@. The
+# venv's own python is run, not `uv run`: uv writes to ~/.cache/uv on every
+# start, which this sandbox forbids (EROFS, exit 2, restart loop).
 WorkingDirectory=/opt/horatio
 ExecStart=/opt/horatio/.venv/bin/python server.py
 Restart=always
 RestartSec=5
 User=horatio
 
-# Read-only filesystem except the app dir (logs, history JSONL, .password).
+# Writable: logs/ only (history.jsonl, server.log, glances.log). The rest of the
+# checkout is read-only because root runs code from it (collector/install.sh
+# copies collector/*.sh to /usr/local/bin; install.sh; .git/hooks), so a
+# writable checkout would let a compromised web process become root. .password
+# is written by `server.py --set-password` outside this unit.
 ProtectSystem=strict
-ReadWritePaths=/opt/horatio
+# /home, /root and /run/user become empty (~/.ssh, other checkouts, keyrings);
+# only the checkout and the venv's interpreter are bound back in. install.sh
+# fills @PYTHON_PREFIX@ with the interpreter's prefix: a uv-managed Python lives
+# in ~/.local/share/uv/python, which ProtectHome= would otherwise hide. logs/
+# must exist before start (install.sh creates it): a missing BindPaths= source
+# fails the unit.
+ProtectHome=tmpfs
+BindReadOnlyPaths=/opt/horatio @PYTHON_PREFIX@
+BindPaths=/opt/horatio/logs
 PrivateTmp=yes
 ProtectControlGroups=yes
 # Deliberately NO NoNewPrivileges= and NO seccomp-backed option (PrivateDevices,
@@ -23,8 +35,8 @@ ProtectControlGroups=yes
 # LockPersonality, MemoryDenyWriteExecute; see context_has_seccomp() in systemd's
 # src/core/exec-invoke.c): for a User= service any of those turns no_new_privs on,
 # and the kernel then ignores the file capabilities install.sh puts on nethogs,
-# which kills the Network Processes card. The four mount-namespace options above
-# are fine. The server itself runs with no capabilities; this bounding set is the
+# which kills the Network Processes card. The mount-namespace options above are
+# fine. The server itself runs with no capabilities; this bounding set is the
 # ceiling for a setcap'd child (nethogs, ping) and must stay a superset of the
 # setcap list in install.sh (a missing cap makes execve fail with EPERM). Not
 # AmbientCapabilities=, which would hand read-any-file + ptrace to the

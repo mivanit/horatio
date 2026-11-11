@@ -235,6 +235,7 @@ async function testIpInfoTimeout() {
       between(config, 'async function safeFetch', '// The CPU core temperatures') +
       between(app, 'function renderIpInfo', '// System Mail card') +
       between(app, 'async function fetchSlowData', '// One poll at a time') +
+      between(app, 'function guard', 'async function fetchDataOnce') +
       between(app, 'async function refreshData', '// Set up refresh button handlers') +
       "Object.keys(dataCache).filter(key => key !== 'ipInfo').forEach(key => updateCache(key, []));");
     return context;
@@ -737,6 +738,7 @@ async function testStaticInfoRecovery() {
   evaluate(context,
     between(config, 'const dataCache =', '// The CPU core temperatures') +
     between(app, 'async function fetchSlowData', '// One poll at a time') +
+    between(app, 'function guard', 'async function fetchDataOnce') +
     between(app, 'async function refreshData', '// Set up refresh button handlers') +
     "Object.keys(dataCache).filter(key => !['cpuInfo', 'systemInfo'].includes(key)).forEach(key => { dataCache[key].ttl = Infinity; updateCache(key, []); });");
   await context.fetchSlowData();
@@ -778,6 +780,35 @@ async function testStaticInfoRecovery() {
   assert.equal(calls['/api/4/system'], 4, 'manual system refresh bypasses the permanent cache');
 }
 
+async function testSlowPollRenderIsolation() {
+  const statuses = {}, rendered = [], errors = [];
+  const record = name => () => { rendered.push(name); };
+  const context = vm.createContext({
+    Date, API_BASE: '/api/4', IP_INFO_TIMEOUT_MS: 20000,
+    console: { error: (...args) => errors.push(args.map(String).join(' ')) },
+    // storage-health answers 200 with a null body.
+    async safeFetch(url) {
+      return { ok: true, data: url.endsWith('/fs') ? [] : url.endsWith('/uptime') ? '1h' : url.endsWith('health') ? null : {} };
+    },
+    updateCardNoData(id, ok) { statuses[id] = ok; },
+    renderGpuInfo() { throw new TypeError('bad GPU info'); },
+    renderHardware(data) { return data.status; },
+    renderCpuInfo: record('cpu'), renderSystemInfo: record('system'), renderDrives: record('drives'),
+    renderIpInfo: record('ip'), renderMail: record('mail'), renderDriveHealth: record('drive-health'),
+    diskCapture: { handleResponse: record('disk') }, networkCapture: { handleResponse: record('network') },
+  });
+  evaluate(context,
+    between(config, 'const dataCache =', '// The CPU core temperatures') +
+    between(app, 'async function fetchSlowData', '// One poll at a time') +
+    between(app, 'function guard', 'async function fetchDataOnce') +
+    "['diskProcesses', 'networkProcesses'].forEach(key => { dataCache[key].ttl = Infinity; updateCache(key, []); });");
+  await context.fetchSlowData();
+  assert.deepEqual(statuses, { 'gpu-info': false, hardware: false }, 'only the throwing cards are marked failed');
+  assert.deepEqual(rendered.sort(),
+    ['cpu', 'disk', 'drive-health', 'drives', 'ip', 'mail', 'network', 'system'], 'every other card still renders');
+  assert.equal(errors.length, 2);
+}
+
 async function testCaptureCacheAge() {
   let now = 103000, captureError = false;
   const calls = {};
@@ -802,7 +833,8 @@ async function testCaptureCacheAge() {
     between(config, 'const dataCache =', '// The CPU core temperatures') +
     between(config, 'function formatTimeAgo', 'function updateCacheDisplay') +
     between(app, 'function createCaptureState', '// Unified processes table state') +
-    between(app, 'async function fetchSlowData', '// One poll at a time'));
+    between(app, 'async function fetchSlowData', '// One poll at a time') +
+    between(app, 'function guard', 'async function fetchDataOnce'));
   await context.fetchSlowData();  // Initial captures complete three seconds after startup.
   const timestamp = name => evaluate(context, `${name}Capture.getTimestamp()`);
   const capturedAt = name => evaluate(context, `${name}Capture.lastCaptureTime`);
@@ -961,7 +993,7 @@ function testLiveSampleTimes() {
   const context = vm.createContext({
     ...dom, historyLength: 3, pollInterval: 2000, MIN_POLL_INTERVAL: 1000,
     isConnected: false, pollingInterval: null, Date: { now: () => now },
-    getCssColor: () => '#123456', localStorage: { setItem() {} },
+    getCssColor: () => '#123456', lsSet() {},
     createDropdownPicker: (_, options) => { picker = options; },
   });
   evaluate(context, between(charts, '// Data stores', '// Initialize charts'));
@@ -1036,7 +1068,7 @@ function testLiveSampleTimes() {
 (async () => {
   for (const test of [testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
-    testStaticInfoRecovery, testCaptureCacheAge, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes]) {
+    testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes]) {
     await test();
     console.log(`PASS ${test.name}`);
   }

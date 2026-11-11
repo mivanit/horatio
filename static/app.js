@@ -332,7 +332,7 @@ function updateGridColumns(grid, maxCols) {
 function initMaxColumns() {
   const btn = document.getElementById('max-columns');
   const grid = document.querySelector('.grid');
-  const saved = localStorage.getItem('maxColumns');
+  const saved = lsGet('maxColumns');
   let maxCols = saved ? parseInt(saved) : DEFAULT_MAX_COLUMNS;
 
   btn.textContent = maxCols;
@@ -345,7 +345,7 @@ function initMaxColumns() {
       onSelect: (val) => {
         maxCols = val;
         btn.textContent = val;
-        localStorage.setItem('maxColumns', val);
+        lsSet('maxColumns', val);
         updateGridColumns(grid, val);
       },
       custom: { type: 'int', min: 1, max: 32, placeholder: 'cols' },
@@ -997,7 +997,7 @@ function initProcessTableListeners() {
         currentValue: nethogsDuration,
         onSelect: (val) => {
           nethogsDuration = val;
-          localStorage.setItem('nethogsDuration', nethogsDuration);
+          lsSet('nethogsDuration', nethogsDuration);
           target.textContent = val + 's';
         },
         custom: { type: 'int', min: 1, max: 60, placeholder: 'secs' },
@@ -1012,7 +1012,7 @@ function initProcessTableListeners() {
         currentValue: diskDuration,
         onSelect: (val) => {
           diskDuration = val;
-          localStorage.setItem('diskDuration', diskDuration);
+          lsSet('diskDuration', diskDuration);
           diskTarget.textContent = val + 's';
         },
         custom: { type: 'int', min: 1, max: 10, placeholder: 'secs' },
@@ -1298,37 +1298,45 @@ async function fetchSlowData() {
     : safeFetch('/api/gpu-info', []);
 
   // Metadata must not wait for the longer public-IP lookup. Uptime is read
-  // once per slow poll and shares the metadata update.
+  // once per slow poll and shares the metadata update. safeFetch never
+  // rejects, and guard() keeps one card's render error from rejecting this
+  // promise and skipping every card below.
   const infoPromise = Promise.all([
     gpuInfoPromise, cpuInfoPromise, systemInfoPromise, safeFetch(API_BASE + '/uptime', '')
   ]).then(([gpuInfo, cpuInfo, systemInfo, uptime]) => {
-    if (gpuInfo.ok && !gpuInfo.cached) {
-      updateCache('gpuInfo', gpuInfo.data);
-      renderGpuInfo(gpuInfo.data);
-    } else if (!gpuInfo.ok && !getCache('gpuInfo')) {
-      document.getElementById('gpu-info-content').innerHTML = '<div class="info-item text-error">Error loading GPU info</div>';
-      updateCardNoData('gpu-info', false);
-    }
-
-    if (cpuInfo.ok) {
-      if (!cpuInfo.cached) {
-        updateCache('cpuInfo', cpuInfo.data);
-        renderCpuInfo(cpuInfo.data);
+    guard('gpu-info', () => {
+      if (gpuInfo.ok && !gpuInfo.cached) {
+        updateCache('gpuInfo', gpuInfo.data);
+        renderGpuInfo(gpuInfo.data);
+      } else if (!gpuInfo.ok && !getCache('gpuInfo')) {
+        document.getElementById('gpu-info-content').innerHTML = '<div class="info-item text-error">Error loading GPU info</div>';
+        updateCardNoData('gpu-info', false);
       }
-    } else {
-      document.getElementById('cpu-info-content').innerHTML = '<div class="info-item text-error">Error loading CPU info</div>';
-      updateCardNoData('cpu-info', false);
-    }
+    });
 
-    if (systemInfo.ok) {
-      if (!systemInfo.cached) updateCache('systemInfo', systemInfo.data);
-      if (!systemInfo.cached || (uptime.ok && uptime.data)) {
-        renderSystemInfo(systemInfo.data, uptime.ok && uptime.data ? uptime.data.replace(/"/g, '') : '--');
+    guard('cpu-info', () => {
+      if (cpuInfo.ok) {
+        if (!cpuInfo.cached) {
+          updateCache('cpuInfo', cpuInfo.data);
+          renderCpuInfo(cpuInfo.data);
+        }
+      } else {
+        document.getElementById('cpu-info-content').innerHTML = '<div class="info-item text-error">Error loading CPU info</div>';
+        updateCardNoData('cpu-info', false);
       }
-    } else {
-      document.getElementById('system-info-content').innerHTML = '<div class="info-item text-error">Error loading system info</div>';
-      updateCardNoData('system-info', false);
-    }
+    });
+
+    guard('system-info', () => {
+      if (systemInfo.ok) {
+        if (!systemInfo.cached) updateCache('systemInfo', systemInfo.data);
+        if (!systemInfo.cached || (uptime.ok && uptime.data)) {
+          renderSystemInfo(systemInfo.data, uptime.ok && uptime.data ? uptime.data.replace(/"/g, '') : '--');
+        }
+      } else {
+        document.getElementById('system-info-content').innerHTML = '<div class="info-item text-error">Error loading system info</div>';
+        updateCardNoData('system-info', false);
+      }
+    });
   });
 
   const [fs, ipInfo, mail, storageHealth, sensorsSnap] = await Promise.all([
@@ -1343,7 +1351,7 @@ async function fetchSlowData() {
     if (!fs.cached) {
       updateCache('drives', fs.data);
     }
-    renderDrives(fs.data);   // an empty list hides the card (Glances could not read the mounts)
+    guard('drive-usage', () => renderDrives(fs.data));   // an empty list hides the card (Glances could not read the mounts)
   } else if (!fs.ok) {
     const driveUsageContent = document.getElementById('drive-usage-content');
     driveUsageContent.innerHTML = '<div class="drive-usage-item text-error">Error loading drive info</div>';
@@ -1355,7 +1363,7 @@ async function fetchSlowData() {
     if (!ipInfo.cached) {
       updateCache('ipInfo', ipInfo.data);
     }
-    renderIpInfo(ipInfo.data);
+    guard('ip-info', () => renderIpInfo(ipInfo.data));
   } else if (!ipInfo.ok) {
     const ipContent = document.getElementById('ip-info-content');
     ipContent.innerHTML = '<div class="info-item text-error">Error loading IP info</div>';
@@ -1368,7 +1376,7 @@ async function fetchSlowData() {
     if (!mail.cached) {
       updateCache('mail', mail.data);
     }
-    renderMail(mail.data);
+    guard('mail', () => renderMail(mail.data));
   } else if (mail.errorType !== 'unavailable') {
     const mailContent = document.getElementById('mail-content');
     mailContent.innerHTML = '<div class="info-item text-error">Error loading mail</div>';
@@ -1380,8 +1388,8 @@ async function fetchSlowData() {
     if (!storageHealth.cached) {
       updateCache('storageHealth', storageHealth.data);
     }
-    renderHardware(storageHealth.data);
-    renderDriveHealth(storageHealth.data);
+    guard('hardware', () => renderHardware(storageHealth.data));
+    guard('drive-health', () => renderDriveHealth(storageHealth.data));
   } else if (storageHealth.errorType !== 'unavailable') {
     document.getElementById('hardware-content').innerHTML = '<div class="info-item text-error">Error loading hardware health</div>';
     updateCardNoData('hardware', false);
@@ -1392,7 +1400,7 @@ async function fetchSlowData() {
   // === DISK CAPTURE - runs independently, doesn't block above ===
   const useDiskCache = isCacheValid('diskProcesses');
   if (useDiskCache) {
-    diskCapture.handleResponse(getCache('diskProcesses'), dataCache.diskProcesses.lastUpdate);
+    guard('disk', () => diskCapture.handleResponse(getCache('diskProcesses'), dataCache.diskProcesses.lastUpdate));
   } else {
     if (!diskCapture.capturing) diskCapture.start();
     safeFetch(`/api/disk-processes?duration=${diskDuration}`, [], getDiskTimeout())
@@ -1418,7 +1426,7 @@ async function fetchSlowData() {
   // === NETWORK CAPTURE - runs independently, doesn't block above ===
   const useNetworkCache = isCacheValid('networkProcesses');
   if (useNetworkCache) {
-    networkCapture.handleResponse(getCache('networkProcesses'), dataCache.networkProcesses.lastUpdate);
+    guard('network', () => networkCapture.handleResponse(getCache('networkProcesses'), dataCache.networkProcesses.lastUpdate));
   } else {
     if (!networkCapture.capturing) networkCapture.start();
     safeFetch(`/api/network-processes?duration=${nethogsDuration}`, [], getNethogsTimeout())
@@ -2301,7 +2309,7 @@ pollSelectBtn.addEventListener('click', () => {
     onSelect: (val) => {
       pollInterval = Math.round(val * 1000);
       pollSelectBtn.textContent = val + 's';
-      localStorage.setItem('pollInterval', pollInterval);
+      lsSet('pollInterval', pollInterval);
 
       const timeCharts = [charts.cpu, charts.cpuCoresSpread, charts.mem, charts.swap, charts.gpu, charts.gpuMem, charts.net, charts.disk, charts.diskDrives, charts.ping];
       timeCharts.forEach(chart => chart.update());
@@ -2326,7 +2334,7 @@ processCountBtn.addEventListener('click', () => {
     onSelect: (val) => {
       topProcessesLimit = val;
       processCountBtn.textContent = val;
-      localStorage.setItem('topProcessesLimit', topProcessesLimit);
+      lsSet('topProcessesLimit', topProcessesLimit);
       updateProcessTableHeight();
       const refreshBtn = document.querySelector('[data-refresh="processes"]');
       if (refreshBtn) refreshData('processes', refreshBtn);
@@ -2344,7 +2352,7 @@ historyLengthBtn.addEventListener('click', () => {
     currentValue: historyLength,
     onSelect: (val) => {
       historyLengthBtn.textContent = val;
-      localStorage.setItem('historyLength', val);
+      lsSet('historyLength', val);
 
       resizeHistory(val);
 
@@ -2369,7 +2377,7 @@ historyLengthBtn.addEventListener('click', () => {
 
   // Restore saved card order
   function restoreCardOrder() {
-    const saved = localStorage.getItem('cardOrder');
+    const saved = lsGet('cardOrder');
     if (!saved) return;
     try {
       const order = JSON.parse(saved);
@@ -2392,12 +2400,12 @@ historyLengthBtn.addEventListener('click', () => {
   function saveCardOrder() {
     const cards = document.querySelectorAll('.grid .card[data-card-id]');
     const order = Array.from(cards).map(c => c.dataset.cardId);
-    localStorage.setItem('cardOrder', JSON.stringify(order));
+    lsSet('cardOrder', JSON.stringify(order));
   }
 
   // Reset card order to default and reset history length
   function resetCardOrder() {
-    localStorage.removeItem('cardOrder');
+    lsRemove('cardOrder');
     const grid = document.querySelector('.grid');
     const cards = Array.from(grid.querySelectorAll('.card[data-card-id]'));
     const cardMap = {};
@@ -2409,7 +2417,7 @@ historyLengthBtn.addEventListener('click', () => {
     // Reset history length to default
     const historyLengthInput = document.getElementById('history-length');
     historyLengthInput.textContent = DEFAULT_HISTORY_LENGTH;
-    localStorage.removeItem('historyLength');
+    lsRemove('historyLength');
     resizeHistory(DEFAULT_HISTORY_LENGTH);
 
     const timeCharts = [charts.cpu, charts.cpuCoresSpread, charts.mem, charts.swap, charts.gpu, charts.gpuMem, charts.net, charts.disk, charts.diskDrives, charts.ping];
@@ -3964,7 +3972,7 @@ document.getElementById('history-default-time-btn')?.addEventListener('click', (
     currentValue: defaultHistoryHours,
     onSelect: (val) => {
       defaultHistoryHours = val;
-      localStorage.setItem('defaultHistoryHours', val);
+      lsSet('defaultHistoryHours', val);
       // And every open card follows (the shared fetch cache dedupes the request).
       for (const [metric, entry] of historyCards) {
         const input = entry.card.querySelector('.history-range-input');
