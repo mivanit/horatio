@@ -89,6 +89,7 @@ check(cpu.physical_cores == 1 and cpu.logical_cores == 1, "missing cpuinfo keeps
 local df_header = "Filesystem           Type       1024-blocks Used Available Capacity Mounted on\n"
 local other_drives = "/dev/mmcblk0p1        ext4        1048576 262144 786432 25% /\n"
     .. "tmpfs                tmpfs       524288 0 524288 0% /tmp\n"
+    .. "/dev/sda1            ext4        1048576 0 1048576 0% /mnt/gone\n"
 replies = {
     ["df -k -T"] = df_header
         .. "/dev/mapper/encrypted-storage\n"
@@ -99,14 +100,18 @@ replies = {
         .. other_drives,
     ["readlink -f '/dev/mapper/encrypted-storage'"] = "/dev/dm-0\n",
     ["readlink -f '/dev/mmcblk0p1'"] = "/dev/mmcblk0p1\n",
+    ["readlink -f '/dev/sda1'"] = "/dev/sda1\n",
 }
 -- metrics.fs requires nixio at call time; a fake keyed by mount stands in for it.
+-- Unknown mounts fail the way nixio does: nil, errno, message.
 package.loaded.nixio = {fs = {statvfs = function(mount)
-    return ({["/mnt/data"] = {files = 1000, ffree = 750}, ["/"] = {files = 0, ffree = 0}})[mount]
+    local st = ({["/mnt/data"] = {files = 1000, ffree = 750}, ["/"] = {files = 0, ffree = 0}})[mount]
+    if st then return st end
+    return nil, 2, "No such file or directory"
 end}}
 local drives = metrics.fs()
 package.loaded.nixio = nil
-check(#drives == 2, "long and short device names survive df parsing; tmpfs stays excluded")
+check(#drives == 3, "long and short device names survive df parsing; tmpfs stays excluded")
 check(drives[1].device_name == "/dev/dm-0" and drives[1].mnt_point == "/mnt/data"
     and drives[1].size == 8589934592 and drives[1].used == 4294967296
     and drives[1].percent == 50,
@@ -117,6 +122,8 @@ check(drives[1].inodes_used == 250 and drives[1].inodes_percent == 25,
     "statvfs inode counts become inodes_used and inodes_percent")
 check(drives[2].inodes_used == nil and drives[2].inodes_percent == nil,
     "a filesystem with no inode table (files == 0) reports no inode usage")
+check(drives[3].mnt_point == "/mnt/gone" and drives[3].inodes_used == nil and drives[3].inodes_percent == nil,
+    "a failed statvfs leaves the row without inode usage")
 
 local function public_ip(first, dual)
     files[cache_path] = nil

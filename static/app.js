@@ -2957,7 +2957,7 @@ function extractHistoryValue(record, metric, rangeType = 'avg') {
 }
 
 // Create a history chart
-// unitType: 'percent' | 'gb' - for metrics with hasUnitToggle
+// unitType: 'percent' | 'gb' for hasUnitToggle metrics, the selected field's key for fieldSelect ones
 // The BMC's whole-box reading in the power snapshot; every other Watts row is a part of it.
 const POWER_TOTAL_KEY = 'Pwr Consumption';
 
@@ -3531,7 +3531,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
         filter: (item) => item.parsed.y != null,
         callbacks: {
           title: (ctx) => new Date(ctx[0].parsed.x).toLocaleString(),
-          label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)}${displayUnit}`,
+          label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(selectedField?.decimals ?? 1)}${displayUnit}`,
           // Stacked power: the rows are the parts, so add their sum.
           footer: (items) => metric === 'power' && mode === 'stack' && items.length > 1
             ? `total ${items.reduce((s, it) => s + it.parsed.y, 0).toFixed(0)}${displayUnit}` : ''

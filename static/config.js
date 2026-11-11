@@ -449,12 +449,13 @@ const HISTORY_METRICS = {
       { key: 'percent', label: 'Space %', unit: '%' },
       { key: 'gb', label: 'Space (GB)', unit: ' GB' },
       { key: 'inodes_percent', label: 'Inodes %', unit: '%' },
-      { key: 'inodes_used', label: 'Inodes used', unit: '' },
+      { key: 'inodes_used', label: 'Inodes used', unit: '', decimals: 0 },
     ],
   },
   ping: { name: 'Ping', color: getCssColor('--color-ping-0'), unit: ' ms', multiLine: true, hasMinMax: true },
   // Needs per-process logging on (History Settings); one line per process name.
-  // fieldSelect: a dropdown picks which per-process stat is drawn (the card's unitType holds its key).
+  // fieldSelect: a dropdown picks which stat is drawn (the card's unitType holds its key);
+  // an entry's optional decimals sets the tooltip precision (default 1).
   processes: {
     name: 'Top Processes', color: getCssColor('--color-accent'), unit: '%', perDevice: true, sideField: 'processes',
     fieldSelect: [
