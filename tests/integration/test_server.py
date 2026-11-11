@@ -28,7 +28,8 @@ SCHEMAS: dict[str, Callable[[Any], bool]] = {
     ),
     "/api/4/diskio": lambda d: isinstance(d, list) and all("disk_name" in e for e in d),
     "/api/4/fs": lambda d: (
-        isinstance(d, list) and all({"device_name", "mnt_point"} <= e.keys() for e in d)
+        isinstance(d, list)
+        and all({"device_name", "mnt_point", "inodes_percent"} <= e.keys() for e in d)
     ),
     "/api/4/sensors": lambda d: isinstance(d, list),
     "/api/4/load": lambda d: (

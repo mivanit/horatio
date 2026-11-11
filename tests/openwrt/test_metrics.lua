@@ -100,7 +100,12 @@ replies = {
     ["readlink -f '/dev/mapper/encrypted-storage'"] = "/dev/dm-0\n",
     ["readlink -f '/dev/mmcblk0p1'"] = "/dev/mmcblk0p1\n",
 }
+-- metrics.fs requires nixio at call time; a fake keyed by mount stands in for it.
+package.loaded.nixio = {fs = {statvfs = function(mount)
+    return ({["/mnt/data"] = {files = 1000, ffree = 750}, ["/"] = {files = 0, ffree = 0}})[mount]
+end}}
 local drives = metrics.fs()
+package.loaded.nixio = nil
 check(#drives == 2, "long and short device names survive df parsing; tmpfs stays excluded")
 check(drives[1].device_name == "/dev/dm-0" and drives[1].mnt_point == "/mnt/data"
     and drives[1].size == 8589934592 and drives[1].used == 4294967296
@@ -108,6 +113,10 @@ check(drives[1].device_name == "/dev/dm-0" and drives[1].mnt_point == "/mnt/data
     "long device retains identity, mount and exact 8 GiB capacity")
 check(drives[2].device_name == "/dev/mmcblk0p1" and drives[2].mnt_point == "/",
     "short device parsing is unchanged")
+check(drives[1].inodes_used == 250 and drives[1].inodes_percent == 25,
+    "statvfs inode counts become inodes_used and inodes_percent")
+check(drives[2].inodes_used == nil and drives[2].inodes_percent == nil,
+    "a filesystem with no inode table (files == 0) reports no inode usage")
 
 local function public_ip(first, dual)
     files[cache_path] = nil

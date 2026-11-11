@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from tests.support import describe
 
 
@@ -226,6 +228,39 @@ def test_null_metrics_unit() -> None:
     )
     assert pings["9.9.9.9"] == {"avg": 30.0, "min": 30.0, "max": 30.0, "loss": 0.4}, (
         f"aggregate_ping: 3/5 succeeded -> loss 0.4: {describe(pings['9.9.9.9'])}"
+    )
+
+
+def test_add_inode_usage_unit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inode usage from statvfs: math, no-inode-table filesystems, vanished mounts."""
+    import os
+
+    import server
+
+    def fake_statvfs(path: str) -> os.statvfs_result:
+        if path == "/gone":
+            raise FileNotFoundError(path)
+        files: int = {"/": 1000, "/boot/efi": 0}[path]
+        # Field order: bsize frsize blocks bfree bavail files ffree favail flag namemax
+        return os.statvfs_result(
+            (4096, 4096, 1, 1, 1, files, 750 if files else 0, 0, 0, 255)
+        )
+
+    monkeypatch.setattr(server.os, "statvfs", fake_statvfs)
+    rows: list[dict[str, Any]] = [
+        {"mnt_point": "/"},
+        {"mnt_point": "/boot/efi"},
+        {"mnt_point": "/gone"},
+    ]
+    server._add_inode_usage(rows)
+    assert (rows[0]["inodes_used"], rows[0]["inodes_percent"]) == (250, 25.0), describe(
+        rows[0]
+    )
+    assert (rows[1]["inodes_used"], rows[1]["inodes_percent"]) == (None, None), (
+        f"f_files=0 (vfat/btrfs) -> None: {describe(rows[1])}"
+    )
+    assert (rows[2]["inodes_used"], rows[2]["inodes_percent"]) == (None, None), (
+        f"vanished mount -> None, no raise: {describe(rows[2])}"
     )
 
 

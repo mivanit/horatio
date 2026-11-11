@@ -890,11 +890,12 @@ function renderDrives(data) {
         <div class="drive-usage-bar-container">
           <div class="drive-usage-bar" style="width: ${percent}%; background: ${color};"></div>
         </div>
-        <div class="drive-usage-percent">${percent.toFixed(1)}%</div>
+        <div class="drive-usage-percent">${percent.toFixed(1)}%${Number.isFinite(drive.inodes_percent) ? ` · inodes ${drive.inodes_percent.toFixed(1)}%` : ''}</div>
       </div>`;
     }).join('');
     updateCardNoData('drive-usage', true);
-    const maxDrivePercent = Math.max(...data.map(d => d.percent || 0));
+    // Running out of inodes fails writes just like running out of space.
+    const maxDrivePercent = Math.max(...data.map(d => Math.max(d.percent || 0, d.inodes_percent || 0)));
     updateCardWarning('drive-usage', maxDrivePercent, thresholds.disk_percent);
   } else {
     driveUsageCard.style.display = 'none';
@@ -2938,7 +2939,9 @@ function extractHistoryValue(record, metric, rangeType = 'avg') {
       return record.drives?.map(d => ({
         mount: d.mount,
         percent: d.percent,
-        gb: d.used_gb
+        gb: d.used_gb,
+        inodes_percent: d.inodes_percent,
+        inodes_used: d.inodes_used
       })) ?? null;
     case 'ping': {
       if (!record.ping) return null;
@@ -3067,7 +3070,9 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
         });
       });
     } else if (metric === 'drive-usage') {
-      // One line per drive (percentage or GB based on unitType)
+      // One line per drive, field from the dropdown (space %/GB, inodes %/count).
+      // Drives with no value in range (btrfs/vfat have no inodes; older records
+      // predate the field) are dropped so they don't leave empty legend entries.
       datasets = devices.map((device, i) => {
         const data = records.map(r => {
           const v = extractHistoryValue(r, metric);
@@ -3087,7 +3092,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
           borderWidth: 2,
           spanGaps: false
         };
-      });
+      }).filter(ds => ds.data.some(v => v != null));
     } else if (metric === 'processes') {
       // One line per process NAME (same-named pids summed: two wasmtime workers
       // are one line), for the 8 names with the largest total over the range;

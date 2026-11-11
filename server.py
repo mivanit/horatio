@@ -755,6 +755,27 @@ def _dedupe_fs_by_device(fs_entries: list[dict[str, Any]]) -> list[dict[str, Any
     return kept
 
 
+def _add_inode_usage(fs_entries: list[dict[str, Any]]) -> None:
+    """Set inodes_used/inodes_percent on each fs row, from statvfs of its mount.
+
+    Glances doesn't report inodes. None when the fs has no fixed inode table
+    (btrfs, vfat report f_files=0) or the mount is gone (OSError), so one vanished
+    mount can't fail the whole request.
+    """
+    fs: dict[str, Any]
+    for fs in fs_entries:
+        st: os.statvfs_result | None
+        try:
+            st = os.statvfs(fs["mnt_point"])
+        except OSError:
+            st = None
+        used: int | None = st.f_files - st.f_ffree if st and st.f_files else None
+        fs["inodes_used"] = used
+        fs["inodes_percent"] = (
+            round(used / st.f_files * 100, 1) if st and used is not None else None
+        )
+
+
 def compute_stats(samples: Sequence[object]) -> dict[str, float | None]:
     """min/avg/max over the finite samples, or all-None when there are none.
 
@@ -1417,6 +1438,7 @@ async def collect_history_sample(
                 # bind mounts mirroring /) so history drives + per-drive I/O labels
                 # match the live view. This fetch bypasses the proxy, so dedupe here.
                 fs_data = _dedupe_fs_by_device(fs_resp.json())
+                await asyncio.to_thread(_add_inode_usage, fs_data)
         except Exception as e:
             logger.warning("History: failed to fetch fs: %s", e)
 
@@ -1571,6 +1593,8 @@ async def collect_history_sample(
                         "used_gb": _gb(fs.get("used")),
                         "total_gb": _gb(fs.get("size")),
                         "percent": _round(fs.get("percent"), 1),
+                        "inodes_percent": _round(fs.get("inodes_percent"), 1),
+                        "inodes_used": fs.get("inodes_used"),
                     }
                 )
         if drives:
@@ -3575,6 +3599,7 @@ async def proxy_fs(request: Request) -> Response:
                     if device_name:
                         entry["device_name"] = os.path.realpath(device_name)
                 data = _dedupe_fs_by_device(data)
+                await asyncio.to_thread(_add_inode_usage, data)
                 return Response(content=json.dumps(data), media_type="application/json")
             return Response(
                 content=resp.content,

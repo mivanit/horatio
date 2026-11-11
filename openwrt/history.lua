@@ -122,7 +122,9 @@ local function build_record()
                 mount = d.mnt_point,
                 used_gb = round(d.used / (1024^3), 2),
                 total_gb = round(d.size / (1024^3), 2),
-                percent = d.percent
+                percent = d.percent,
+                inodes_percent = d.inodes_percent,
+                inodes_used = d.inodes_used
             }
         end
         record.drives = drives

@@ -444,9 +444,13 @@ const HISTORY_METRICS = {
     name: 'Drive Usage',
     color: getCssColor('--color-download'),
     unit: '%',
-    hasUnitToggle: true,
-    altUnit: ' GB',
-    perDevice: true
+    perDevice: true,
+    fieldSelect: [
+      { key: 'percent', label: 'Space %', unit: '%' },
+      { key: 'gb', label: 'Space (GB)', unit: ' GB' },
+      { key: 'inodes_percent', label: 'Inodes %', unit: '%' },
+      { key: 'inodes_used', label: 'Inodes used', unit: '' },
+    ],
   },
   ping: { name: 'Ping', color: getCssColor('--color-ping-0'), unit: ' ms', multiLine: true, hasMinMax: true },
   // Needs per-process logging on (History Settings); one line per process name.

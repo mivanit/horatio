@@ -367,6 +367,8 @@ function M.fs()
         fusectl=1, efivarfs=1
     }
 
+    -- Required here, not at load, so tests can swap in a fake via package.loaded.
+    local nixio = require("nixio")
     local filesystems = {}
     local first = true
     for line in output:gmatch("[^\n]+") do
@@ -376,12 +378,18 @@ function M.fs()
                 line:match("^(%S+)%s+(%S+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%%%s+(.+)$")
             if dev and mount and not skip_types[fstype] then
                 local resolved = (run_cmd("readlink -f '" .. dev:gsub("'", "'\\''") .. "'") or dev):gsub("%s+$", "")
+                -- df has no inode columns without BusyBox's FEATURE_DF_FANCY; statvfs
+                -- always works. files == 0 means no fixed inode table (jffs2, ubifs).
+                local st = nixio.fs.statvfs(mount)
+                local inodes_used = st and st.files > 0 and st.files - st.ffree or nil
                 filesystems[#filesystems + 1] = {
                     device_name = resolved,
                     mnt_point = mount,
                     used = (tonumber(used) or 0) * 1024,  -- 1-KiB blocks -> bytes
                     size = (tonumber(size) or 0) * 1024,
-                    percent = tonumber(pct) or 0
+                    percent = tonumber(pct) or 0,
+                    inodes_used = inodes_used,
+                    inodes_percent = inodes_used and round(inodes_used / st.files * 100, 1)
                 }
             end
         end
