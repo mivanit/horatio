@@ -114,11 +114,25 @@ fi
 # `timeout` exits 124 with no JSON at all, which the missing smart_status catches.
 # SATA/SAS/USB disks and NVMe namespaces; smartctl speaks both. No smartmontools
 # at all is an ALARM (the marker file below), not a quiet gap: every box has drives.
+# Per-drive limit: config `smart_timeout_s`, default 60. Drives run one at a time, so
+# the run's worst case grows with the drive count (horatio-collect.service has the sum).
+# A missing key or a value that is not a positive number means the default.
+read -r SMART_TIMEOUT < <(python3 -c '
+import json, sys
+try:
+    config = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    config = {}
+value = config.get("smart_timeout_s")
+ok = isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+print(value if ok else 60)
+' "${HEALTH_CONFIG:-/etc/horatio/config.json}")
+: "${SMART_TIMEOUT:=60}"
 if command -v smartctl > /dev/null; then
     for dev in /dev/sd? /dev/nvme?n?; do
         [ -b "$dev" ] || continue     # no match leaves the literal glob
         name=$(basename "$dev")
-        timeout 60 smartctl --nocheck=standby,3 --all --json "$dev" > "$tmp/smart_$name.json" 2> "$tmp/smart_$name.err"
+        timeout "$SMART_TIMEOUT" smartctl --nocheck=standby,3 --all --json "$dev" > "$tmp/smart_$name.json" 2> "$tmp/smart_$name.err"
         echo $? > "$tmp/smart_$name.rc"
     done
 else

@@ -4,6 +4,9 @@
 #                                collector when it is already installed on this box
 #   ./install.sh --collector     also install the root hardware collector (first time)
 #   ./install.sh --no-optional   do not offer nethogs / sysstat
+#   ./install.sh --grant-capabilities
+#                                let nethogs and pidstat see every process (README:
+#                                Process permissions); off by default
 #   ./install.sh --uninstall     remove the service, the collector and their snapshots
 #                                (the checkout, its config and history stay)
 set -euo pipefail
@@ -27,11 +30,13 @@ SERVICE_FILE="horatio.service"
 
 WITH_COLLECTOR=0
 OPTIONAL=1
+GRANT_CAPS=0
 UNINSTALL=0
 for arg in "$@"; do
     case "$arg" in
         --collector) WITH_COLLECTOR=1 ;;
         --no-optional) OPTIONAL=0 ;;
+        --grant-capabilities) GRANT_CAPS=1 ;;
         --uninstall) UNINSTALL=1 ;;
         *) echo "unknown option: $arg (see the header of this script)" >&2; exit 2 ;;
     esac
@@ -51,6 +56,11 @@ if [ "$UNINSTALL" = 1 ]; then
     if [ "$WITH_COLLECTOR" = 1 ]; then
         sudo bash "$SCRIPT_DIR/collector/install.sh" --uninstall
     fi
+    # Capabilities from --grant-capabilities live on the binaries; take them back.
+    for tool in nethogs pidstat; do
+        path=$(command -v "$tool") || continue
+        [ -z "$(getcap "$path" 2> /dev/null)" ] || sudo setcap -r "$path"
+    done
     echo "Done. The checkout, .venv, logs/ and config.json are untouched."
     exit 0
 fi
@@ -77,20 +87,13 @@ apt_or_tell() {   # <package>
         return 1
     fi
 }
-# nethogs needs all four capabilities (the unit's CapabilityBoundingSet= lists the same four).
-nethogs_ready() {
-    command -v nethogs > /dev/null && command -v getcap > /dev/null \
-        && [[ "$(getcap "$(command -v nethogs)")" == *cap_net_admin* ]]
-}
 if [ "$OPTIONAL" = 1 ]; then
-    if ! nethogs_ready; then
-        echo "=== Optional: the Network Processes card needs nethogs with capabilities ==="
-        read -p "Install and configure nethogs? [y/N] " -n 1 -r
+    if ! command -v nethogs > /dev/null; then
+        echo "=== Optional: the Network Processes card needs nethogs ==="
+        read -p "Install nethogs? [y/N] " -n 1 -r
         echo ""
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            command -v nethogs > /dev/null || apt_or_tell nethogs
-            command -v setcap > /dev/null || apt_or_tell libcap2-bin
-            sudo setcap cap_net_admin,cap_net_raw,cap_dac_read_search,cap_sys_ptrace+ep "$(command -v nethogs)"
+            apt_or_tell nethogs
         else
             echo "Skipped: the Network Processes card will show an error (offered again next run; --no-optional silences it)."
         fi
@@ -105,6 +108,29 @@ if [ "$OPTIONAL" = 1 ]; then
             echo "Skipped: the Disk I/O Processes card will show an error (offered again next run; --no-optional silences it)."
         fi
     fi
+fi
+
+# --- Process permissions (opt-in; README: Process permissions) ---
+# Without capabilities nethogs cannot capture packets at all and pidstat sees only
+# this user's processes. With them,
+# every local user who runs either tool sees every process, and a bug in it could
+# read any file, so only on request. The unit's CapabilityBoundingSet= allows these.
+if [ "$GRANT_CAPS" = 1 ]; then
+    command -v setcap > /dev/null || apt_or_tell libcap2-bin
+    if command -v nethogs > /dev/null; then
+        sudo setcap cap_net_admin,cap_net_raw,cap_dac_read_search,cap_sys_ptrace+ep "$(command -v nethogs)"
+        echo "Granted nethogs packet capture and process inspection (Network Processes sees every process)."
+    fi
+    # /proc/<pid>/io needs both: file read permission and ptrace-style access.
+    if command -v pidstat > /dev/null; then
+        sudo setcap cap_dac_read_search,cap_sys_ptrace+ep "$(command -v pidstat)"
+        echo "Granted pidstat process inspection (Disk I/O Processes sees every process)."
+    fi
+else
+    path=$(command -v nethogs) && [ -z "$(getcap "$path" 2> /dev/null)" ] \
+        && echo "Note: without capabilities nethogs cannot capture, so Network Processes shows an error; see --grant-capabilities (README: Process permissions)."
+    path=$(command -v pidstat) && [ -z "$(getcap "$path" 2> /dev/null)" ] \
+        && echo "Note: Disk I/O Processes shows only $(id --user --name)'s processes; see --grant-capabilities (README: Process permissions)."
 fi
 
 # --- System Mail card prerequisites (check only; MTA setup is outside this repo) ---

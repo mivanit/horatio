@@ -12,8 +12,8 @@ Backend: FastAPI wrapping a [Glances](https://github.com/nicolargo/glances) subp
 | Card | Needs |
 |---|---|
 | GPUs | an NVIDIA driver (`nvidia-smi`) |
-| Network Processes | `nethogs` with file capabilities (the installer offers to set it up) |
-| Disk I/O Processes | `sysstat` (`pidstat`) |
+| Network Processes | `nethogs`, plus `--grant-capabilities` (see [Process permissions](#process-permissions)) |
+| Disk I/O Processes | `sysstat` (`pidstat`); with `--grant-capabilities` it shows every process, not just the service user's |
 | System Mail | a local MTA delivering root's mail to the service user's spool: `postfix` ("Local only") plus `bsd-mailx`, with `root: <user>` in `/etc/aliases` and `newaliases` |
 | Hardware health, Drive Health, Fan Speeds, Temperatures, Power | the root collector (`--collector`): `smartmontools` (required: without it the Hardware card alarms); optionally `ipmitool` + a BMC for fans/temps/system watts, Intel RAPL for CPU/DRAM watts and `nvidia-smi` for GPU memory temperatures and thermal alarms, skipped when absent. See [`collector/README.md`](collector/README.md) |
 
@@ -26,7 +26,8 @@ cd ~/horatio
 ./install.sh --collector   # the same, plus the root hardware collector
 ```
 
-It offers nethogs and sysstat until they are installed (`--no-optional` silences the offers).
+It offers to install nethogs and sysstat until they are installed (`--no-optional` silences the offers);
+it grants them no extra permissions unless asked (see [Process permissions](#process-permissions)).
 Then edit `config.json` (created from `config.example.json`: title, ping targets, thresholds)
 and `sudo systemctl restart horatio`; with the collector, also the collector's config at
 `/etc/horatio/config.json` (see the collector README; it takes effect on the next 15-min run).
@@ -35,6 +36,27 @@ spaces in the path); the service file is rendered from `horatio.service` with th
 
 After install, `uv run python server.py --set-password` sets the password for the raw history
 download and the settings endpoint (stored hashed in `.password`).
+
+### Process permissions
+
+Seeing other users' processes needs root-level access that the dashboard does not have:
+nethogs must capture packets and map sockets to processes, and pidstat must read each
+process's I/O counters (`/proc/<pid>/io`, readable only by its owner). By default the
+installer grants neither, so the Network Processes card shows an error and the Disk I/O
+Processes card shows only the service user's processes.
+
+`./install.sh --grant-capabilities` attaches Linux file capabilities to the two binaries
+(`nethogs`: `cap_net_admin,cap_net_raw,cap_dac_read_search,cap_sys_ptrace`; `pidstat`:
+`cap_dac_read_search,cap_sys_ptrace`). The service then sees every process. The tradeoff:
+capabilities belong to the binary, not the service, so **every local user** who runs
+`nethogs` or `pidstat` gets them. Anyone with a login on the box can see every process's
+network and disk activity, and a bug in either tool could let them read any file
+(`cap_dac_read_search`). Nothing is exposed over the network. Reasonable when you are the
+only one with a login on the box; skip it otherwise.
+
+`./install.sh --uninstall` removes them; by hand, `sudo setcap -r "$(command -v nethogs)"`
+(likewise `pidstat`). Installs from before this flag existed gave nethogs its capabilities when you
+accepted the nethogs offer; those stay until removed.
 
 ### Update
 
@@ -45,7 +67,8 @@ git pull && ./install.sh
 Idempotent: re-syncs the venv, re-fetches Chart.js, re-renders the unit, restarts the service,
 and re-installs the collector when it is installed on this box (its first run is synchronous,
 a minute or three on a box with many drives). The optional-tool offers repeat until the tool
-is installed, or pass `--no-optional`. `config.json`, `/etc/horatio/config.json`, `.password`
+is installed, or pass `--no-optional`. Pass `--grant-capabilities` on updates only if you want to
+(re)apply the process permissions; a package upgrade of nethogs or sysstat drops them. `config.json`, `/etc/horatio/config.json`, `.password`
 and `logs/` are never touched.
 
 ## Uninstall
