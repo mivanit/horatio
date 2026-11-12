@@ -9,7 +9,7 @@ Nice=19
 IOSchedulingClass=idle
 # Every command in the script has its own timeout(1). Their worst-case sum is
 # 180 s (SEL) + 4 x 60 s + drives x smart_timeout_s (config, default 60): under
-# 20 min up to 13 drives at the default; lower smart_timeout_s on bigger boxes. A
+# 20 min up to 12 drives at the default; lower smart_timeout_s on bigger boxes. A
 # run past that is stuck in uninterruptible I/O that timeout could not kill. Without
 # this Type=oneshot has no start timeout and the timer's OnUnitActiveSec= would
 # never re-fire.

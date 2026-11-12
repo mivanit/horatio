@@ -7,7 +7,8 @@
 #   ./install.sh --grant-capabilities
 #                                let nethogs and pidstat see every process (README:
 #                                Process permissions); off by default
-#   ./install.sh --uninstall     remove the service, the collector and their snapshots
+#   ./install.sh --uninstall     remove the service, the collector, their snapshots and the
+#                                nethogs/pidstat capabilities
 #                                (the checkout, its config and history stay)
 set -euo pipefail
 
@@ -126,6 +127,8 @@ if [ "$GRANT_CAPS" = 1 ]; then
         sudo setcap cap_dac_read_search,cap_sys_ptrace+ep "$(command -v pidstat)"
         echo "Granted pidstat process inspection (Disk I/O Processes sees every process)."
     fi
+    command -v nethogs > /dev/null || command -v pidstat > /dev/null \
+        || echo "--grant-capabilities: neither nethogs nor pidstat is installed, nothing granted."
 else
     path=$(command -v nethogs) && [ -z "$(getcap "$path" 2> /dev/null)" ] \
         && echo "Note: without capabilities nethogs cannot capture, so Network Processes shows an error; see --grant-capabilities (README: Process permissions)."

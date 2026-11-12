@@ -18,8 +18,12 @@ local history = require("history")
 local dashboard_dir = script_dir .. ".."
 
 -- Config loading
+-- www/config.json is the file the page fetches; reading the same file keeps the two
+-- in step even when an editor (sed -i, save-by-rename) turns the checkout's
+-- config.json link into a separate copy. That link is the pre-www/ location.
 local function load_config()
-    local f = io.open(dashboard_dir .. "/config.json", "r")
+    local f = io.open(dashboard_dir .. "/www/config.json", "r")
+        or io.open(dashboard_dir .. "/config.json", "r")
     if not f then return {} end
     local content = f:read("*a")
     f:close()
@@ -140,7 +144,7 @@ routes["/history/settings"] = function(env)
     if env.REQUEST_METHOD == "POST" then
         send_json({
             error = "Settings update not supported",
-            detail = "The OpenWrt backend does not support runtime settings changes. Edit config.json and restart the service."
+            detail = "The OpenWrt backend does not support runtime settings changes. Edit www/config.json and restart the service."
         }, 501)
     else
         send_json(history.get_settings())

@@ -163,7 +163,7 @@ elif [ -e "$CONFIG" ]; then
 fi
 if [ ! -f "$WWW_CONFIG" ]; then
     cp "$DASHBOARD_DIR/config.example.json" "$WWW_CONFIG"
-    info "Created config.json from config.example.json: edit it (title, ping targets, thresholds)."
+    info "Created $WWW_CONFIG from config.example.json: edit it (title, ping targets, thresholds)."
 fi
 [ -L "$CONFIG" ] || ln -s www/config.json "$CONFIG"
 
@@ -206,6 +206,6 @@ fi
 
 info ""
 info "  Dashboard: http://$HOSTNAME:$PORT"
-info "  Config:    $DASHBOARD_DIR/config.json (-> www/config.json)"
+info "  Config:    $WWW_CONFIG (edit this one)"
 info "  History:   $DASHBOARD_DIR/logs/history.jsonl"
 info "  Uninstall: sh $0 --uninstall"

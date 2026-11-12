@@ -77,7 +77,8 @@ and `logs/` are never touched.
 ./install.sh --uninstall
 ```
 
-Removes the service, the collector's units, scripts and snapshots. The checkout, its
+Removes the service, the collector's units, scripts and snapshots, and the file
+capabilities on `nethogs` and `pidstat` (see [Process permissions](#process-permissions)). The checkout, its
 `config.json`, `logs/` and `/etc/horatio/config.json` stay; delete them by hand.
 
 ## Terminal
@@ -270,8 +271,10 @@ sh install.sh --uninstall
 Requires `uhttpd-mod-lua`, `luci-lib-jsonc`, and `luci-lib-nixio` (installed by the
 script). uhttpd serves only `www/`, never the checkout: the installer copies
 `index.html` and `static/` there, so rerun it after updating. The config lives at
-`www/config.json` (served as `/config.json`); `config.json` in the checkout root is
-a link to it, so edit either path. An existing `config.json` is moved into `www/`
+`www/config.json` (served as `/config.json`, read by the API); `config.json` in the
+checkout root is a link to it. Edit `www/config.json`: tools that replace the file
+(`sed -i`, save-by-rename editors) turn the link into a copy nobody reads, and the
+next install run moves that copy back into `www/`. An existing `config.json` is moved into `www/`
 on install, and uninstall leaves both in place. A kernel file lock serializes recording and
 rotation and releases automatically if a request worker exits. A successfully
 saved record whose rotation failed returns a warning; its original history is

@@ -34,10 +34,11 @@ ProtectControlGroups=yes
 # ProtectKernel*, ProtectClock, ProtectHostname, Restrict*, SystemCall*,
 # LockPersonality, MemoryDenyWriteExecute; see context_has_seccomp() in systemd's
 # src/core/exec-invoke.c): for a User= service any of those turns no_new_privs on,
-# and the kernel then ignores the file capabilities install.sh puts on nethogs,
-# which kills the Network Processes card. The mount-namespace options above are
+# and the kernel then ignores the file capabilities `install.sh --grant-capabilities`
+# puts on nethogs and pidstat, which kills the Network Processes card and limits
+# Disk I/O Processes to this user. The mount-namespace options above are
 # fine. The server itself runs with no capabilities; this bounding set is the
-# ceiling for a setcap'd child (nethogs, ping) and must stay a superset of the
+# ceiling for a setcap'd child (nethogs, pidstat, ping) and must stay a superset of the
 # setcap list in install.sh (a missing cap makes execve fail with EPERM). Not
 # AmbientCapabilities=, which would hand read-any-file + ptrace to the
 # unauthenticated web process.

@@ -1400,7 +1400,7 @@ async function fetchSlowData() {
   // === DISK CAPTURE - runs independently, doesn't block above ===
   const useDiskCache = isCacheValid('diskProcesses');
   if (useDiskCache) {
-    guard('disk', () => diskCapture.handleResponse(getCache('diskProcesses'), dataCache.diskProcesses.lastUpdate));
+    guard('processes', () => diskCapture.handleResponse(getCache('diskProcesses'), dataCache.diskProcesses.lastUpdate));
   } else {
     if (!diskCapture.capturing) diskCapture.start();
     safeFetch(`/api/disk-processes?duration=${diskDuration}`, [], getDiskTimeout())
@@ -1426,7 +1426,7 @@ async function fetchSlowData() {
   // === NETWORK CAPTURE - runs independently, doesn't block above ===
   const useNetworkCache = isCacheValid('networkProcesses');
   if (useNetworkCache) {
-    guard('network', () => networkCapture.handleResponse(getCache('networkProcesses'), dataCache.networkProcesses.lastUpdate));
+    guard('processes', () => networkCapture.handleResponse(getCache('networkProcesses'), dataCache.networkProcesses.lastUpdate));
   } else {
     if (!networkCapture.capturing) networkCapture.start();
     safeFetch(`/api/network-processes?duration=${nethogsDuration}`, [], getNethogsTimeout())

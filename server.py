@@ -3451,7 +3451,7 @@ async def network_processes(duration: int = 3) -> Response:
                     content=json.dumps(
                         {
                             "error": "nethogs requires capabilities",
-                            "detail": "Run: sudo setcap cap_net_admin,cap_net_raw,cap_dac_read_search,cap_sys_ptrace+ep $(which nethogs)",
+                            "detail": "Run ./install.sh --grant-capabilities (README: Process permissions)",
                         }
                     ),
                     media_type="application/json",
