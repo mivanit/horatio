@@ -19,5 +19,6 @@ The settings dialog loads but refuses to save.
 Run it locally with `make demo`: it writes gitignored copies of `index.html`,
 `static/` and Chart.js into `docs/` (`make demo-docs` alone does just that) and
 serves `docs/` at http://localhost:8000. On every push to `main`,
-`.github/workflows/pages.yml` builds and deploys it. That requires repo Settings →
+`.github/workflows/pages.yml` runs the checks (`check.yml`) and, once they pass,
+builds and deploys it. That requires repo Settings →
 Pages → Source set to "GitHub Actions".

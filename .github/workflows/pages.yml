@@ -1,8 +1,8 @@
 name: Demo site
 
 # Builds the static demo (docs/README.md) from this commit's frontend and
-# publishes it to GitHub Pages. Repo Settings -> Pages -> Source must be
-# "GitHub Actions".
+# publishes it to GitHub Pages, once the checks pass on that commit. Repo
+# Settings -> Pages -> Source must be "GitHub Actions".
 on:
   push:
     branches: [main]
@@ -11,12 +11,14 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: pages
-  cancel-in-progress: true
-
+# No run-wide concurrency: a newer push cancels this run's checks through
+# check.yml's own group, but a deploy already started is never cut off (deploy below).
 jobs:
+  checks:
+    uses: ./.github/workflows/check.yml
+
   build:
+    needs: checks
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -36,6 +38,9 @@ jobs:
     permissions:
       pages: write
       id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
