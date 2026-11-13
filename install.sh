@@ -20,10 +20,12 @@ PATH="$PATH:/usr/sbin:/sbin"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The unit file's ExecStart= and Bind*Paths= are word-split by systemd and the
-# path goes through sed: whitespace, | and & would silently produce a broken unit.
+# path goes through sed: whitespace, | and & would silently produce a broken unit,
+# as would systemd's own syntax: : separates Bind*Paths= source:target, % starts a
+# specifier, and \ is an escape (sed's too).
 unit_safe_path() {   # <what> <path>
     case "$2" in
-        *[[:space:]\|\&]*) echo "Unsupported $1 path (whitespace, | or &): $2" >&2; exit 1 ;;
+        *[[:space:]\|\&:%\\]*) echo "Unsupported $1 path (whitespace or one of | & : % \\): $2" >&2; exit 1 ;;
     esac
 }
 unit_safe_path checkout "$SCRIPT_DIR"
@@ -158,6 +160,14 @@ mkdir -p "$SCRIPT_DIR/logs"
 # (~/.local/share/uv/python) is otherwise hidden by ProtectHome=.
 PYTHON_PREFIX="$("$SCRIPT_DIR/.venv/bin/python" -c 'import sys; print(sys.base_prefix)')"
 unit_safe_path Python "$PYTHON_PREFIX"
+# The unit hides $HOME and binds this prefix back in read-only. A prefix that is
+# $HOME or one of its parents would bind the whole home back, undoing that silently.
+case "$HOME/" in
+    "$PYTHON_PREFIX"/*)
+        echo "Python is installed at $PYTHON_PREFIX, which contains your home folder;" >&2
+        echo "the service sandbox can't hide your home with it. Use a uv-managed Python: uv python install" >&2
+        exit 1 ;;
+esac
 
 echo "Downloading Chart.js..."
 # Pinned version + checksum: this file runs in the dashboard's own origin, so a

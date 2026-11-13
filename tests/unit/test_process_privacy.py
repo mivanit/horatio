@@ -221,6 +221,18 @@ class TestProcessPrivacy:
             ),
             (f"Cron <root@box> cd /srv && ./run {SECRET}", "Cron <root@box> cd"),
             (f"Cron <root@box> A={SECRET}", "Cron <root@box>"),
+            # Quoted values with spaces stay one word; the second half of a
+            # secret must not become the "program".
+            (f'Cron <u@h> TOKEN="hunter2 {SECRET}" cmd', "Cron <u@h> cmd"),
+            (f"Cron <u@h> TOKEN='a b {SECRET}' cmd", "Cron <u@h> cmd"),
+            (f'Cron <u@h> "TOKEN=a {SECRET}" cmd', "Cron <u@h> cmd"),
+            (f"Cron <u@h> A=x\\ {SECRET} cmd", "Cron <u@h> cmd"),
+            (f"Cron <u@h> python3 -X 'importtime {SECRET}' s.py", "Cron <u@h> s.py"),
+            (f"Cron <u@h> SECRET=$(cat /{SECRET}) cmd", "Cron <u@h>"),
+            (f"Cron <u@h> SECRET=`cat /{SECRET}` cmd", "Cron <u@h>"),
+            (f"Cron <u@h> TOKEN='{SECRET} cmd", "Cron <u@h>"),  # unbalanced quote
+            (f"Cron <u@h> cmd>/dev/null {SECRET}", "Cron <u@h> cmd"),
+            ('Cron <u@h> "/opt/my app/run" --x', "Cron <u@h> run"),
             ("SMART error (Health) on /dev/sda", "SMART error (Health) on /dev/sda"),
         ]
         subject: str

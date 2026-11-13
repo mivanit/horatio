@@ -32,7 +32,7 @@ Then edit `config.json` (created from `config.example.json`: title, ping targets
 and `sudo systemctl restart horatio`; with the collector, also the collector's config at
 `/etc/horatio/config.json` (see the collector README; it takes effect on the next 15-min run).
 Open `http://<host>:8080`, or from a terminal `curl http://<host>:8080/text` (`/help` lists the options and API). For a live terminal view, see [Terminal](#terminal). The checkout can live anywhere writable by the user who runs it (no
-spaces in the path); the service file is rendered from `horatio.service` with that path and user.
+whitespace or `: % \ | &` in the path); the service file is rendered from `horatio.service` with that path and user.
 
 After install, `uv run python server.py --set-password` sets the password for the raw history
 download and the settings endpoint (stored hashed in `.password`).

@@ -231,6 +231,12 @@ def _collect_sample_cap_checks() -> None:
     import server
 
     server.MAX_NETWORK_MBPS, server.MAX_DISK_IO_MBPS = 100.0, 200.0
+
+    # The fake drives aren't mounted on this machine; keep them.
+    def keep_all(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return rows
+
+    setattr(server, "_drop_hidden_mounts", keep_all)
     M: float = 1e6  # MB/s -> bytes/s
     calls: dict[str, int] = {"network": 0, "diskio": 0}
     # Per sample (3 samples), MB/s. eth0 spikes in (sample 2) and out (sample 3);

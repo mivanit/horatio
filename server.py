@@ -32,6 +32,7 @@ import math
 import os
 import re
 import secrets
+import shlex
 import socket
 import statistics
 import subprocess
@@ -762,6 +763,63 @@ def _dedupe_fs_by_device(fs_entries: list[dict[str, Any]]) -> list[dict[str, Any
     return kept
 
 
+def _visible_mounts(mountinfo: str) -> dict[str, str]:
+    """Mount point -> fs type of the mounts a path lookup can reach, from
+    /proc/self/mountinfo text.
+
+    The service's sandbox (ProtectHome=tmpfs) lays an empty tmpfs over /home; a
+    disk mounted at or under /home is still listed by psutil, but statvfs on it
+    reports the tmpfs, so Glances shows the wrong size. A mount is hidden when
+    another mount sits at its path or an enclosing one and is not one of its
+    ancestors (mountinfo's parent ids): mounted over it, not under it. Line order
+    can't be used: mounts made in the initramfs (/sys, /proc, a separate /usr) are
+    listed before / after the switch to the real root.
+    """
+    mounts: dict[
+        str, tuple[str, str, str]
+    ] = {}  # id -> (parent id, mount point, fs type)
+    line: str
+    for line in mountinfo.splitlines():
+        fields: list[str]
+        rest: list[str]
+        fields, rest = (part.split() for part in line.split(" - ", 1))
+        # Mount points escape space, tab, newline and backslash as \ooo.
+        mnt: str = re.sub(r"\\([0-7]{3})", lambda o: chr(int(o.group(1), 8)), fields[4])
+        mounts[fields[0]] = (fields[1], mnt, rest[0])
+
+    def ancestors(mount_id: str) -> set[str]:
+        seen: set[str] = set()
+        while mount_id in mounts and mount_id not in seen:
+            seen.add(mount_id)
+            mount_id = mounts[mount_id][0]
+        return seen
+
+    visible: dict[str, str] = {}
+    mount_id: str
+    for mount_id, (_, mnt, fstype) in mounts.items():
+        below: set[str] = ancestors(mount_id)
+        hidden: bool = any(
+            other not in below
+            and (path == mnt or mnt.startswith(path.rstrip("/") + "/"))
+            for other, (_, path, _) in mounts.items()
+        )
+        if not hidden:
+            visible[mnt] = fstype
+    return visible
+
+
+def _drop_hidden_mounts(fs_entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop fs rows whose mount is covered by another mount (see _visible_mounts):
+    their size and usage would be the covering fs's, not the disk's."""
+    with open("/proc/self/mountinfo") as f:
+        visible: dict[str, str] = _visible_mounts(f.read())
+    return [
+        fs
+        for fs in fs_entries
+        if visible.get(fs.get("mnt_point", "")) == fs.get("fs_type")
+    ]
+
+
 def _add_inode_usage(fs_entries: list[dict[str, Any]]) -> None:
     """Set inodes_used/inodes_percent on each fs row, from statvfs of its mount.
 
@@ -1444,7 +1502,7 @@ async def collect_history_sample(
                 # De-dupe duplicate-device entries (e.g. PrivateTmp /tmp, /var/tmp
                 # bind mounts mirroring /) so history drives + per-drive I/O labels
                 # match the live view. This fetch bypasses the proxy, so dedupe here.
-                fs_data = _dedupe_fs_by_device(fs_resp.json())
+                fs_data = _drop_hidden_mounts(_dedupe_fs_by_device(fs_resp.json()))
                 await asyncio.to_thread(_add_inode_usage, fs_data)
         except Exception as e:
             logger.warning("History: failed to fetch fs: %s", e)
@@ -3617,7 +3675,7 @@ async def proxy_fs(request: Request) -> Response:
                     device_name: str = entry.get("device_name", "")
                     if device_name:
                         entry["device_name"] = os.path.realpath(device_name)
-                data = _dedupe_fs_by_device(data)
+                data = _drop_hidden_mounts(_dedupe_fs_by_device(data))
                 await asyncio.to_thread(_add_inode_usage, data)
                 return Response(content=json.dumps(data), media_type="application/json")
             return Response(
@@ -3649,18 +3707,36 @@ MAIL_LIMIT: Final[int] = 10
 def _redact_cron_subject(subject: str) -> str:
     """Reduce cron's "Cron <user@host> <command line>" subject to the program's
     name: the command line can carry a token or password, and subjects are served
-    unauthenticated. Other subjects pass through unchanged."""
+    unauthenticated. Other subjects pass through unchanged.
+
+    Words are split the way the shell would (quotes, and operators like > and &&),
+    so a quoted value with spaces stays one word. Anything that can't be split
+    that way, $(...) and backticks, or a name that isn't a plain file name leaves
+    only "Cron <user@host>": the fallback hides the command rather than guess.
+    """
     m: re.Match[str] | None = re.fullmatch(r"(Cron <[^>]*>)\s+(.*)", subject, re.S)
     if m is None:
         return subject
-    words: list[str] = [w.strip("\"'") for w in m.group(2).split()]
+    command: str = m.group(2)
+    if "$(" in command or "`" in command:
+        return m.group(1)
+    lexer: shlex.shlex = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    words: list[str]
+    try:
+        words = list(lexer)
+    except ValueError:  # unbalanced quotes
+        return m.group(1)
     # Leading VAR=value words are environment assignments, not the program (and a
     # usual place for a secret).
     while words and re.match(r"[A-Za-z_]\w*=", words[0]):
         words.pop(0)
-    if not words or not words[0]:
+    if not words:
         return m.group(1)
-    return f"{m.group(1)} {_sanitize_process_argv(words)['name']}"
+    name: str = _sanitize_process_argv(words)["name"]
+    if not re.fullmatch(r"[\w.+-]+", name):
+        return m.group(1)
+    return f"{m.group(1)} {name}"
 
 
 def _get_mail(path: str = MAIL_SPOOL, limit: int = MAIL_LIMIT) -> dict[str, Any]:

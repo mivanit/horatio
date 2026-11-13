@@ -231,6 +231,37 @@ def test_null_metrics_unit() -> None:
     )
 
 
+def test_visible_mounts_unit() -> None:
+    """Mounts covered by another mount (the sandbox's tmpfs over /home) are not
+    visible; a parent never hides its children, whatever the line order."""
+    import server
+
+    def line(mount_id: int, parent: int, mnt: str, fstype: str) -> str:
+        return f"{mount_id} {parent} 8:1 / {mnt} rw - {fstype} /dev/x rw"
+
+    mountinfo: str = "\n".join(
+        [
+            # Made in the initramfs: listed before / (id 33), their parent.
+            line(28, 33, "/sys", "sysfs"),
+            line(29, 33, "/usr", "ext4"),
+            line(33, 2, "/", "ext4"),
+            line(40, 33, "/home", "ext4"),  # its own partition...
+            line(41, 40, "/home/miv/media", "xfs"),  # ...with a disk inside
+            line(42, 33, "/mnt/my\\040disk", "ext4"),  # space, escaped
+            line(43, 40, "/home", "tmpfs"),  # ProtectHome=tmpfs covers both
+            line(44, 43, "/home/miv/horatio", "ext4"),  # BindReadOnlyPaths=
+        ]
+    )
+    assert server._visible_mounts(mountinfo) == {
+        "/sys": "sysfs",
+        "/usr": "ext4",
+        "/": "ext4",
+        "/mnt/my disk": "ext4",
+        "/home": "tmpfs",
+        "/home/miv/horatio": "ext4",
+    }
+
+
 def test_add_inode_usage_unit(monkeypatch: pytest.MonkeyPatch) -> None:
     """Inode usage from statvfs: math, no-inode-table filesystems, vanished mounts."""
     import os
