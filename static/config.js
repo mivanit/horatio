@@ -343,7 +343,7 @@ function animateValue(element, newValue, suffix = '', decimals = 1) {
   function update(now) {
     const elapsed = now - start;
     // A frame's timestamp can predate `start`; a negative progress would overshoot backwards.
-  const progress = Math.min(Math.max(elapsed / duration, 0), 1);
+    const progress = Math.min(Math.max(elapsed / duration, 0), 1);
     const eased = 1 - Math.pow(1 - progress, 3); // easeOutCubic
     const value = current + (newValue - current) * eased;
     element.textContent = value.toFixed(decimals) + suffix;
