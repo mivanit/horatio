@@ -3,27 +3,38 @@
 # Chart.js at the version install.sh pins, and docs/demo/fake-api.js, which
 # answers the frontend's API calls in the browser. Usage:
 #   docs/build-demo.sh [outdir]      (default: _site)
+# Only outdir's index.html, static/ and demo/ are replaced, so outdir can be
+# docs/ itself (`make demo`; those copies are gitignored there).
 # HORATIO_DEMO_SKIP_CHARTJS=1 skips the Chart.js download (the offline tests).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-_site}"
 
-rm -rf "$OUT"
 mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd)"
+rm -rf "$OUT/index.html" "$OUT/static"
 cp "$ROOT/index.html" "$OUT/index.html"
 cp -RL "$ROOT/static" "$OUT/static"
 rm -f "$OUT/static/chart.umd.min.js"
-cp -R "$ROOT/docs/demo" "$OUT/demo"
+if [ "$OUT" != "$ROOT/docs" ]; then
+  rm -rf "$OUT/demo"
+  cp -R "$ROOT/docs/demo" "$OUT/demo"
+fi
 
 if [ "${HORATIO_DEMO_SKIP_CHARTJS:-}" != 1 ]; then
   # The version and checksum live in install.sh only, so the two cannot drift.
   version="$(sed -n 's/^CHARTJS_VERSION="\(.*\)"$/\1/p' "$ROOT/install.sh")"
   sha256="$(sed -n 's/^CHARTJS_SHA256="\(.*\)"$/\1/p' "$ROOT/install.sh")"
   [ -n "$version" ] && [ -n "$sha256" ] || { echo "error: Chart.js pin not found in install.sh" >&2; exit 1; }
-  curl -fsSL -o "$OUT/static/chart.umd.min.js" \
-    "https://cdn.jsdelivr.net/npm/chart.js@${version}/dist/chart.umd.min.js"
-  echo "${sha256}  $OUT/static/chart.umd.min.js" | sha256sum -c --status - \
+  chartjs="$OUT/static/chart.umd.min.js"
+  # A checkout that ran install.sh already has the pinned file; else download it.
+  if echo "${sha256}  $ROOT/static/chart.umd.min.js" | sha256sum -c --status - 2>/dev/null; then
+    cp "$ROOT/static/chart.umd.min.js" "$chartjs"
+  else
+    curl -fsSL -o "$chartjs" "https://cdn.jsdelivr.net/npm/chart.js@${version}/dist/chart.umd.min.js"
+  fi
+  echo "${sha256}  $chartjs" | sha256sum -c --status - \
     || { echo "error: Chart.js checksum mismatch" >&2; exit 1; }
 fi
 

@@ -16,6 +16,8 @@ The settings dialog loads but refuses to save.
   `outdir` (default `_site`), fetches Chart.js at the version `install.sh` pins,
   makes the asset paths relative and loads `fake-api.js` before the frontend.
 
-Run it locally with `make demo` (http://localhost:8000). On every push to `main`,
+Run it locally with `make demo`: it writes gitignored copies of `index.html`,
+`static/` and Chart.js into `docs/` (`make demo-docs` alone does just that) and
+serves `docs/` at http://localhost:8000. On every push to `main`,
 `.github/workflows/pages.yml` builds and deploys it. That requires repo Settings →
 Pages → Source set to "GitHub Actions".

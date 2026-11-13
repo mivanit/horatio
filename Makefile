@@ -5,7 +5,7 @@ LUA ?= lua5.1
 PYTEST_ARGS ?=
 
 .DEFAULT_GOAL := check
-.PHONY: format check-format typing test test-linux test-openwrt test-all check check-all demo
+.PHONY: format check-format typing test test-linux test-openwrt test-all check check-all demo demo-docs
 
 format:
 	$(UV) run --locked ruff check --fix .
@@ -36,6 +36,9 @@ check: check-format typing test
 check-all: check-format typing test-all
 
 # The static demo (docs/README.md): the real frontend with a fake in-browser backend.
-demo:
-	docs/build-demo.sh _site
-	python3 -m http.server -d _site 8000
+# demo-docs writes the frontend copies into docs/ (gitignored); demo also serves them.
+demo-docs:
+	docs/build-demo.sh docs
+
+demo: demo-docs
+	python3 -m http.server -d docs 8000

@@ -141,6 +141,11 @@ vm.runInContext(fs.readFileSync(apiPath, 'utf8'), context);
 
 def test_build(tmp_path: Path) -> None:
     out: Path = tmp_path / "site"
+    # `make demo` builds into docs/ itself: only the copies may be replaced.
+    out.mkdir()
+    (out / "README.md").write_text("keep me")
+    (out / "static").mkdir()
+    (out / "static" / "stale.js").write_text("")
     result: subprocess.CompletedProcess[str] = subprocess.run(
         [str(ROOT / "docs" / "build-demo.sh"), str(out)],
         capture_output=True,
@@ -157,3 +162,5 @@ def test_build(tmp_path: Path) -> None:
     )
     assert (out / "demo" / "fake-api.js").is_file()
     assert (out / "static" / "app.js").is_file()
+    assert (out / "README.md").read_text() == "keep me"
+    assert not (out / "static" / "stale.js").exists()
