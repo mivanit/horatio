@@ -3,6 +3,8 @@ Dashboard/logging of basic system info (cpu/ram/temps/disk io/network/etc) for h
 Backend: FastAPI wrapping a [Glances](https://github.com/nicolargo/glances) subprocess plus
 `nvidia-smi`, `ping`, `nethogs`, `pidstat`. Frontend: vanilla JS and Chart.js, no build step.
 
+[Live demo](https://mivanit.github.io/horatio/): the real frontend with synthetic data (see [`docs/`](docs/README.md)).
+
 # Requirements
 
 - Linux with systemd; [uv](https://docs.astral.sh/uv/). The optional-tool offers use

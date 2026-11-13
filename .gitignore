@@ -6,6 +6,8 @@ static/chart.umd.min.js
 config.json
 # OpenWrt web root: copies made by openwrt/install.sh plus the real config
 www/
+# the demo site, built by docs/build-demo.sh
+_site/
 collector/health-config.json
 nginx/*.services
 !nginx/example.services

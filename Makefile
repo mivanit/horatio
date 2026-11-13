@@ -5,7 +5,7 @@ LUA ?= lua5.1
 PYTEST_ARGS ?=
 
 .DEFAULT_GOAL := check
-.PHONY: format check-format typing test test-linux test-openwrt test-all check check-all
+.PHONY: format check-format typing test test-linux test-openwrt test-all check check-all demo
 
 format:
 	$(UV) run --locked ruff check --fix .
@@ -34,3 +34,8 @@ test-all: test-linux test-openwrt
 check: check-format typing test
 
 check-all: check-format typing test-all
+
+# The static demo (docs/README.md): the real frontend with a fake in-browser backend.
+demo:
+	docs/build-demo.sh _site
+	python3 -m http.server -d _site 8000
