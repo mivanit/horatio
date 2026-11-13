@@ -168,6 +168,20 @@ class TestProcessPrivacy:
                     if child.stdout is not None:
                         child.stdout.close()
 
+    def test_setproctitle_padding_does_not_expose_the_title(
+        self: TestProcessPrivacy,
+    ) -> None:
+        # setproctitle (celery, postgres) writes the title over argv and pads the
+        # rest with NULs; the title is one string holding the whole command line.
+        import server
+
+        title: str = f"celery worker --broker=redis://:{SECRET}@db"
+        raw: str
+        for raw in (title + "\0" * 40, title + "\0", title):
+            with patch.object(Path, "read_text", return_value=raw):
+                info: dict[str, str] = server.get_sanitized_process_info(1234)
+            assert info == {"name": "celery", "path": "celery"}, (raw.count("\0"), info)
+
     def test_nethogs_fallback_keeps_only_the_executable(
         self: TestProcessPrivacy,
     ) -> None:
@@ -233,6 +247,9 @@ class TestProcessPrivacy:
             (f"Cron <u@h> TOKEN='{SECRET} cmd", "Cron <u@h>"),  # unbalanced quote
             (f"Cron <u@h> cmd>/dev/null {SECRET}", "Cron <u@h> cmd"),
             ('Cron <u@h> "/opt/my app/run" --x', "Cron <u@h> run"),
+            (f"Cron <u@h> PW=${{PW:-hunter2 {SECRET} x}} ./backup.sh", "Cron <u@h>"),
+            (f"Cron <u@h> A=${{X:-a\t{SECRET}}} cmd", "Cron <u@h>"),
+            ("Cron <u@h> PW=$SECRET ./backup.sh", "Cron <u@h>"),
             ("SMART error (Health) on /dev/sda", "SMART error (Health) on /dev/sda"),
         ]
         subject: str

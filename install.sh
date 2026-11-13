@@ -302,13 +302,21 @@ uv sync --project "$SCRIPT_DIR" --locked --link-mode copy
 # The unit's only writable path; it is a BindPaths= source, so it must exist.
 mkdir -p "$SCRIPT_DIR/logs"
 # The venv's interpreter prefix, bound read-only into the unit: a uv-managed Python
-# (~/.local/share/uv/python) is otherwise hidden by ProtectHome=.
-PYTHON_PREFIX="$("$SCRIPT_DIR/.venv/bin/python" -c 'import sys; print(sys.base_prefix)')"
+# (~/.local/share/uv/python) is otherwise hidden by ProtectHome=. Taken from the
+# path the venv itself uses (pyvenv.cfg home = <prefix>/bin), not sys.base_prefix:
+# uv's venvs go through a minor-version link (cpython-3.12-... -> cpython-3.12.15-...)
+# that base_prefix resolves away, and binding only the target leaves the venv's
+# python missing inside the unit. systemd resolves the link at each start, so a
+# `uv python upgrade` that moves it is picked up on restart.
+PYTHON_HOME="$(sed -n 's/^home *= *//p' "$SCRIPT_DIR/.venv/pyvenv.cfg")"
+PYTHON_PREFIX="$(dirname "$PYTHON_HOME")"
 unit_safe_path Python "$PYTHON_PREFIX"
 # The unit hides $HOME and binds this prefix back in read-only. A prefix that is
-# $HOME or one of its parents would bind the whole home back, undoing that silently.
+# $HOME or one of its parents (including /) would bind the whole home back,
+# undoing that silently.
+prefix_dir="${PYTHON_PREFIX%/}/"   # / -> "/", so a root prefix matches too
 case "$HOME/" in
-    "$PYTHON_PREFIX"/*)
+    "$prefix_dir"*)
         echo "Python is installed at $PYTHON_PREFIX, which contains your home folder;" >&2
         echo "the service sandbox can't hide your home with it. Use a uv-managed Python: uv python install" >&2
         exit 1 ;;

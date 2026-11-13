@@ -10,11 +10,13 @@ set -euo pipefail
 # Byte-order globbing, so themes/index.json lists names as server.py's sorted() does.
 export LC_ALL=C
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Physical paths (pwd -P), so a symlinked spelling of the checkout or docs/ still
+# matches the guards below.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 OUT="${1:-_site}"
 
 mkdir -p "$OUT"
-OUT="$(cd "$OUT" && pwd)"
+OUT="$(cd "$OUT" && pwd -P)"
 # The checkout's own index.html and static/ are the sources, never the output.
 [ "$OUT" != "$ROOT" ] || { echo "error: outdir is the checkout itself" >&2; exit 1; }
 rm -rf "$OUT/index.html" "$OUT/static" "$OUT/themes"
@@ -44,7 +46,8 @@ if [ "${HORATIO_DEMO_SKIP_CHARTJS:-}" != 1 ]; then
   [ -n "$version" ] && [ -n "$sha256" ] || { echo "error: Chart.js pin not found in install.sh" >&2; exit 1; }
   chartjs="$OUT/static/chart.umd.min.js"
   # A checkout that ran install.sh already has the pinned file; else download it.
-  if echo "${sha256}  $ROOT/static/chart.umd.min.js" | sha256sum -c --status - 2>/dev/null; then
+  if [ -f "$ROOT/static/chart.umd.min.js" ] \
+    && echo "${sha256}  $ROOT/static/chart.umd.min.js" | sha256sum -c --status -; then
     cp "$ROOT/static/chart.umd.min.js" "$chartjs"
   else
     curl -fsSL -o "$chartjs" "https://cdn.jsdelivr.net/npm/chart.js@${version}/dist/chart.umd.min.js"

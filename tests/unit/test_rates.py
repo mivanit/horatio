@@ -55,19 +55,19 @@ def test_rate_clamp_unit() -> None:
     assert server._clamp_rate(4.5, 10.0) == 4.5, "_clamp_rate passes sane values"
 
     rc: server._RateCaps = server._RateCaps()
-    vals: list[float] = [
+    vals: list[float | None] = [
         rc.sample(v * 1e6, 10.0, ("network.in_mbps", "eth0"))
         for v in (4.0, 50.0, -1.0, 99.0)
     ]
     assert vals == [4.0, 10.0, 0.0, 10.0], (
         f"_RateCaps.sample: bytes/s -> MB/s, clamps without dropping: {str(vals)}"
     )
-    odd: list[float] = [
+    odd: list[float | None] = [
         rc.sample(v, 10.0, ("network.in_mbps", "eth0"))
         for v in (float("inf"), float("nan"), "x", None, True)
     ]
-    assert odd == [0.0] * 5, (
-        f"_RateCaps.sample: missing/non-finite/non-numeric -> 0: {str(odd)}"
+    assert odd == [None] * 5, (
+        f"_RateCaps.sample: missing/non-finite/non-numeric -> None (a gap): {str(odd)}"
     )
     assert rc.seen == {("network.in_mbps", "eth0"): 4} and rc.hits == {
         ("network.in_mbps", "eth0"): [50.0, 99.0]

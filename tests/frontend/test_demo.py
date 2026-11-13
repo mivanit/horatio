@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -172,15 +173,61 @@ def test_build(tmp_path: Path) -> None:
     assert not (out / "static" / "stale.js").exists()
 
 
-def test_build_refuses_checkout() -> None:
-    """Building into the checkout would replace index.html and static/ themselves."""
-    result: subprocess.CompletedProcess[str] = subprocess.run(
-        [str(ROOT / "docs" / "build-demo.sh"), str(ROOT)],
+def repo_copy(tmp_path: Path) -> Path:
+    """A copy of the checkout to run build-demo.sh in: a test that points it at
+    its own checkout must never be able to touch the real one."""
+    repo: Path = tmp_path / "repo"
+    shutil.copytree(
+        ROOT,
+        repo,
+        ignore=shutil.ignore_patterns(".git", ".venv", "logs", "_site", "__pycache__"),
+    )
+    name: str
+    for name in ("index.html", "static", "themes"):
+        built: Path = repo / "docs" / name  # a local `make demo` build's copies
+        if built.is_dir():
+            shutil.rmtree(built)
+        elif built.exists():
+            built.unlink()
+    return repo
+
+
+def build(script: Path, out: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(script), str(out)],
         capture_output=True,
         text=True,
         timeout=60,
         env={**os.environ, "HORATIO_DEMO_SKIP_CHARTJS": "1"},
     )
-    assert result.returncode != 0
-    assert "checkout itself" in result.stderr
-    assert (ROOT / "static" / "app.js").is_file()
+
+
+def test_build_refuses_checkout(tmp_path: Path) -> None:
+    """Building into the checkout would replace index.html and static/ themselves,
+    also when the checkout is named through a symlink."""
+    repo: Path = repo_copy(tmp_path)
+    link: Path = tmp_path / "checkout"
+    link.symlink_to(repo)
+    target: Path
+    for target in (repo, link):
+        result: subprocess.CompletedProcess[str] = build(
+            repo / "docs" / "build-demo.sh", target
+        )
+        assert result.returncode != 0, target
+        assert "checkout itself" in result.stderr
+        assert (repo / "static" / "app.js").is_file()
+        assert (repo / "index.html").is_file()
+
+
+def test_build_into_docs_via_symlink(tmp_path: Path) -> None:
+    """docs/ named through a symlink is still docs/: its demo/ is the source, not
+    a copy to replace."""
+    repo: Path = repo_copy(tmp_path)
+    link: Path = tmp_path / "docs-link"
+    link.symlink_to(repo / "docs")
+    result: subprocess.CompletedProcess[str] = build(
+        repo / "docs" / "build-demo.sh", link
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (repo / "docs" / "demo" / "fake-api.js").is_file()
+    assert (repo / "docs" / "index.html").is_file()

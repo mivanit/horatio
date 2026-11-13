@@ -15,11 +15,6 @@ section into the release.
 
 ## [Unreleased]
 
-- Themes can set the value scales (the CPU core bars and the process table's numbers)
-  with the `--scale-*` variables; every shipped theme does, so light and print read
-  properly. Classic, print and phosphor use the system's default fonts.
-- Fix: a number animating to a new value could briefly swing the wrong way.
-
 ## [0.1.0] - 2026-11-13
 
 First versioned release.
@@ -31,7 +26,8 @@ First versioned release.
 - Optional root hardware collector: SMART, RAID, ECC, IPMI fans/temps/power, RAPL.
 - `/text` console report and the `tui.py` live terminal view.
 - OpenWrt backend in Lua serving the same frontend.
-- Themes: the stylesheets in `themes/`, or your own, picked from the toolbar.
+- Themes picked from the toolbar: light, classic, high-contrast, print (also for e-ink)
+  and phosphor, or your own CSS file in `themes/` (see `themes/README.md`).
 - Demo site (`docs/`, deployed to GitHub Pages): the real frontend against a fake
   in-browser backend; `make demo` previews it locally.
 - Versioning: `VERSION`, `/api/version`, the version in the page footer with a reload

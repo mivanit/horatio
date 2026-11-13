@@ -479,10 +479,11 @@ def get_sanitized_process_info(
     try:
         cmdline_raw: str = Path(f"/proc/{pid}/cmdline").read_text()
         # Keep empty operands: dropping the value in `-W '' -c code` shifts
-        # -c into the warning option and makes its code look like a script.
-        cmdline: list[str] = (
-            cmdline_raw.removesuffix("\0").split("\0") if cmdline_raw else []
-        )
+        # -c into the warning option and makes its code look like a script. Strip
+        # every trailing NUL: setproctitle (celery, postgres) writes its title,
+        # often the full command line, over argv and pads the rest with NULs, so
+        # one NUL less would leave empty "arguments" and skip the split below.
+        cmdline: list[str] = cmdline_raw.rstrip("\0").split("\0") if cmdline_raw else []
 
         # Fallback: if only 1 element with spaces, it's space-separated (e.g., Firefox snap)
         if len(cmdline) == 1 and " " in cmdline[0]:
@@ -792,6 +793,13 @@ def _visible_mounts(mountinfo: str) -> dict[str, str]:
     ancestors (mountinfo's parent ids): mounted over it, not under it. Line order
     can't be used: mounts made in the initramfs (/sys, /proc, a separate /usr) are
     listed before / after the switch to the real root.
+
+    TODO: O(mounts^2) on the event loop: ~0.04 s at 500 mounts, fine for a
+    homelab, 0.7 s at 2000 (a busy Kubernetes node). Index by path and walk each
+    mount's ancestors, and run it in a thread, if that ever matters.
+    TODO: keyed by mount point and fs type only, so a disk covered by another of
+    the same type at the same path (ext4 over ext4 at /mnt) keeps its row and
+    shows the covering disk's numbers; matching the source device too would fix it.
     """
     mounts: dict[
         str, tuple[str, str, str]
@@ -857,6 +865,13 @@ def _add_inode_usage(fs_entries: list[dict[str, Any]]) -> None:
         fs["inodes_percent"] = (
             round(used / st.f_files * 100, 1) if st and used is not None else None
         )
+
+
+def _sum_known(values: list[float | None]) -> float | None:
+    """Sum of the known values; None when none is known, so a sample with no
+    readings is a gap in compute_stats rather than a fake 0."""
+    known: list[float] = [v for v in values if v is not None]
+    return sum(known) if known else None
 
 
 def compute_stats(samples: Sequence[object]) -> dict[str, float | None]:
@@ -1292,15 +1307,15 @@ async def collect_history_sample(
     cpu_samples: list[object] = []
     # Per-core CPU usage across the burst, keyed by core index: {idx: [total, ...]}
     percpu_samples: dict[int, list[object]] = {}
-    net_in_samples: list[float] = []
-    net_out_samples: list[float] = []
+    net_in_samples: list[float | None] = []
+    net_out_samples: list[float | None] = []
     # Caps each interface / drive rate sample and remembers which went over
     # (see _RateCaps); summarised into the record's `rate_capped` note.
     caps: _RateCaps = _RateCaps()
     # Disk I/O, one dict per sample iteration: {disk_name: (read_mbps, write_mbps)}.
     # Keyed per iteration (not per disk) so a device that appears or vanishes
     # mid-window cannot shift another device's samples out of alignment.
-    disk_iter_samples: list[dict[str, tuple[float, float]]] = []
+    disk_iter_samples: list[dict[str, tuple[float | None, float | None]]] = []
     # Per-core clocks, pooled over the burst (see aggregate_cpu_freq).
     freq_samples: list[float] = []
     processes_enabled: bool = APP.state.history_processes_enabled and not live
@@ -1354,26 +1369,29 @@ async def collect_history_sample(
                     # glitch is per interface, while the sum legitimately
                     # exceeds one link's rate (bridges, veths and tunnels count
                     # the same traffic again), so the total is never capped.
-                    total_in: float
-                    total_out: float
-                    total_in = total_out = 0.0
+                    rates_in: list[float | None] = []
+                    rates_out: list[float | None] = []
                     iface: dict[str, Any]
                     for iface in net_data:
                         name: str = iface.get("interface_name") or ""
                         if name.startswith("lo"):
                             continue
-                        total_in += caps.sample(
-                            iface.get("bytes_recv_rate_per_sec"),
-                            MAX_NETWORK_MBPS,
-                            ("network.in_mbps", name),
+                        rates_in.append(
+                            caps.sample(
+                                iface.get("bytes_recv_rate_per_sec"),
+                                MAX_NETWORK_MBPS,
+                                ("network.in_mbps", name),
+                            )
                         )
-                        total_out += caps.sample(
-                            iface.get("bytes_sent_rate_per_sec"),
-                            MAX_NETWORK_MBPS,
-                            ("network.out_mbps", name),
+                        rates_out.append(
+                            caps.sample(
+                                iface.get("bytes_sent_rate_per_sec"),
+                                MAX_NETWORK_MBPS,
+                                ("network.out_mbps", name),
+                            )
                         )
-                    net_in_samples.append(total_in)
-                    net_out_samples.append(total_out)
+                    net_in_samples.append(_sum_known(rates_in))
+                    net_out_samples.append(_sum_known(rates_out))
                 else:
                     logger.warning(
                         "Network API returned status %d", net_resp.status_code
@@ -1387,7 +1405,7 @@ async def collect_history_sample(
                     disk_data: list[dict[str, Any]] = disk_resp.json()
                     # Per-drive disk I/O; the whole-box totals are summed from
                     # these after the loop, once the mounted devices are known.
-                    this_iter: dict[str, tuple[float, float]] = {}
+                    this_iter: dict[str, tuple[float | None, float | None]] = {}
                     disk: dict[str, Any]
                     for disk in disk_data:
                         disk_name: str | None = disk.get("disk_name")
@@ -1615,11 +1633,13 @@ async def collect_history_sample(
     counted: set[str] = {d for d in seen_disks if d in disk_to_mount} or seen_disks
     # Each device is capped already; the total is their plain sum (a busy pool
     # legitimately exceeds one drive's ceiling).
-    disk_read_samples: list[float] = [
-        sum(v[0] for d, v in it.items() if d in counted) for it in disk_iter_samples
+    disk_read_samples: list[float | None] = [
+        _sum_known([v[0] for d, v in it.items() if d in counted])
+        for it in disk_iter_samples
     ]
-    disk_write_samples: list[float] = [
-        sum(v[1] for d, v in it.items() if d in counted) for it in disk_iter_samples
+    disk_write_samples: list[float | None] = [
+        _sum_known([v[1] for d, v in it.items() if d in counted])
+        for it in disk_iter_samples
     ]
     if disk_read_samples or disk_write_samples:
         disk_io: dict[str, Any] = {
@@ -1631,7 +1651,7 @@ async def collect_history_sample(
         # Per-drive disk I/O (only for mounted filesystems, like live chart)
         drives_io: list[dict[str, Any]] = []
         for disk_name in sorted(seen_disks & disk_to_mount.keys()):
-            samples: list[tuple[float, float]] = [
+            samples: list[tuple[float | None, float | None]] = [
                 it[disk_name] for it in disk_iter_samples if disk_name in it
             ]
             drives_io.append(
@@ -2207,10 +2227,10 @@ class _RateCaps:
 
     def sample(
         self: _RateCaps, bytes_per_sec: object, cap: float, series: tuple[str, str]
-    ) -> float:
+    ) -> float | None:
         n: float | None = _num(bytes_per_sec)
         if n is None:
-            return 0.0
+            return None  # Glances has no rate yet (its first reading, a new device)
         n /= 1e6
         self.seen[series] = self.seen.get(series, 0) + 1
         if n > cap:
@@ -3764,9 +3784,11 @@ def _redact_cron_subject(subject: str) -> str:
     except ValueError:  # unbalanced quotes
         return m.group(1)
     # Leading VAR=value words are environment assignments, not the program (and a
-    # usual place for a secret).
+    # usual place for a secret). One with $ may be ${X:-a b}, which the shell keeps
+    # as one word but shlex splits, so a piece of its value would become the program.
     while words and re.match(r"[A-Za-z_]\w*=", words[0]):
-        words.pop(0)
+        if "$" in words.pop(0):
+            return m.group(1)
     if not words:
         return m.group(1)
     name: str = _sanitize_process_argv(words)["name"]
