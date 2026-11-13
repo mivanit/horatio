@@ -58,6 +58,10 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 STATIC_DIR: Final[Path] = Path(__file__).parent / "static"
 INDEX_FILE: Final[Path] = Path(__file__).parent / "index.html"
+THEMES_DIR: Final[Path] = Path(__file__).parent / "themes"
+# Theme names as the page's loader (index.html) and openwrt/install.sh accept them;
+# "default" is the picker's no-theme entry, so a default.css could never be chosen.
+THEME_NAME_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9_-]+")
 LOGS_DIR: Final[Path] = Path(__file__).parent / "logs"
 HISTORY_FILE: Final[Path] = LOGS_DIR / "history.jsonl"
 # ~1 MiB covers ~3 days of records at the default 600s interval (~2.3 KB/record)
@@ -73,6 +77,20 @@ HISTORY_MAX_TAIL_READ: Final[int] = 64 * 1024 * 1024
 HISTORY_SIDE_FIELDS: Final[frozenset[str]] = frozenset({"processes", "temps"})
 PASSWORD_FILE: Final[Path] = Path(__file__).parent / ".password"
 CONFIG_FILE: Final[Path] = Path(__file__).parent / "config.json"
+
+
+def _read_stamp(path: Path) -> str | None:
+    """First line of a version file, or None when it is missing or empty."""
+    try:
+        return path.read_text().strip() or None
+    except OSError:
+        return None
+
+
+# VERSION is the release (README: Versions and updates); .build is the commit
+# install.sh saw (`git describe`), so a box tracking main tells its pulls apart.
+VERSION: Final[str] = _read_stamp(Path(__file__).parent / "VERSION") or "unknown"
+BUILD: Final[str | None] = _read_stamp(Path(__file__).parent / ".build")
 DEFAULT_PORT: Final[int] = 8080
 DEFAULT_GLANCES_PORT: Final[int] = 61208
 # All interfaces by default (the dashboard is meant to be reached from other
@@ -2128,8 +2146,26 @@ def setup_logging() -> None:
     logger.addHandler(console_handler)
 
 
-# Mount static files
-APP.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+class _RevalidatedStaticFiles(StaticFiles):
+    """StaticFiles with Cache-Control: no-cache. Without it browsers cache the JS
+    and CSS by heuristic, so an update keeps running the old frontend; with it
+    each load revalidates, and an unchanged file is a 304."""
+
+    def file_response(
+        self: _RevalidatedStaticFiles,
+        full_path: str | os.PathLike[str],
+        stat_result: os.stat_result,
+        scope: Scope,
+        status_code: int = 200,
+    ) -> Response:
+        response: Response = super().file_response(
+            full_path, stat_result, scope, status_code
+        )
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+APP.mount("/static", _RevalidatedStaticFiles(directory=STATIC_DIR), name="static")
 
 
 @APP.middleware("http")
@@ -3897,6 +3933,16 @@ GLANCES_PROXY_PLUGINS: Final[tuple[str, ...]] = (
 )
 
 
+@APP.get("/api/version")
+async def version() -> Response:
+    """The running release and, on a git checkout, the commit it was installed from."""
+    return Response(
+        content=json.dumps({"version": VERSION, "build": BUILD}),
+        media_type="application/json",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 @APP.get("/api/list-endpoints")
 async def list_endpoints() -> Response:
     """Return list of all API endpoints this server implements."""
@@ -3918,6 +3964,7 @@ async def list_endpoints() -> Response:
         "/mail",
         "/storage-health",
         "/sensors",
+        "/version",
         "/list-endpoints",
     ]
     return Response(
@@ -4969,7 +5016,7 @@ TEXT_USAGE: Final[str] = (
 )
 
 HELP_TEXT: Final[str] = """\
-Horatio: system monitor for this machine. Plain-text help, for people and agents.
+Horatio <version>: system monitor for this machine. Plain-text help, for people and agents.
 
 QUICK START
   curl "http://<host>:8080/text?width=$COLUMNS"   # colour report: live snapshot + history
@@ -5050,6 +5097,8 @@ JSON API (machine-readable; prefer these for exact values)
   GET /api/gpu-processes         live processes holding GPU memory, with per-GPU
                                  gpu_util_percent / gpu_mem_util_percent (null: no sample)
   GET /api/cpu-info              CPU model and core counts
+  GET /api/version               {version, build}: the running release and, on a
+                                 git checkout, the commit it was installed from
   GET /api/ping                  ping the configured targets now
   GET /api/sensors               fans/temps/power snapshot (root collector, when installed)
   GET /api/storage-health        drive SMART/RAID/ECC snapshot (root collector)
@@ -5057,6 +5106,7 @@ JSON API (machine-readable; prefer these for exact values)
                                  mem, memswap, load, network, diskio, fs, sensors, gpu
   GET /config.json               the config file as written: title, ping targets,
                                  thresholds, limits if set
+  GET /themes/index.json         names of the themes in themes/ (see themes/README.md)
 
 Dashboard: http://<host>:8080/   This page: /help
 """
@@ -5260,20 +5310,54 @@ def _base_url(request: Request) -> str:
 async def help_page(request: Request) -> Response:
     """Plain-text guide to /text and the JSON API, with this server's real
     address in the examples so they can be pasted as-is."""
-    body: str = HELP_TEXT.replace("http://<host>:8080", _base_url(request))
+    body: str = HELP_TEXT.replace("http://<host>:8080", _base_url(request)).replace(
+        "<version>", f"v{VERSION}", 1
+    )
     return Response(content=body, media_type="text/plain; charset=utf-8")
 
 
 @APP.get("/")
 async def index() -> FileResponse:
-    """Serve index.html."""
-    return FileResponse(INDEX_FILE)
+    """Serve index.html, revalidated on every load (see _RevalidatedStaticFiles)."""
+    return FileResponse(INDEX_FILE, headers={"Cache-Control": "no-cache"})
 
 
 @APP.get("/config.json")
 async def config_json() -> FileResponse:
     """Serve dashboard configuration."""
     return FileResponse(CONFIG_FILE)
+
+
+def _theme_names() -> list[str]:
+    """Stems of themes/*.css that the page can load, sorted; [] without the dir."""
+    return sorted(
+        path.stem
+        for path in THEMES_DIR.glob("*.css")
+        if THEME_NAME_RE.fullmatch(path.stem) and path.stem != "default"
+    )
+
+
+@APP.get("/themes/index.json")
+async def theme_index() -> Response:
+    """The theme picker's options. Not cached, so a newly added theme shows up."""
+    return Response(
+        content=json.dumps(_theme_names()),
+        media_type="application/json",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@APP.get("/themes/{name}.css")
+async def theme_css(name: str) -> Response:
+    """One theme stylesheet. The name rule rules out traversal; no-cache so an
+    edited theme shows on a plain reload."""
+    if name not in _theme_names() or not (THEMES_DIR / f"{name}.css").is_file():
+        return Response(status_code=404)
+    return FileResponse(
+        THEMES_DIR / f"{name}.css",
+        media_type="text/css",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @APP.exception_handler(Exception)

@@ -54,7 +54,7 @@ function liveContext(ids) {
   const context = vm.createContext({
     ...dom, statuses, errors, historyLength: 3, pollInterval: 2000, dataCache: {},
     thresholds: { gpu_util_percent: 80, gpu_memory_percent: 80, temp_celsius: 60, ping_ms: 100 },
-    GPU_COLORS: ['#123456'], getCssColor: () => '#123456',
+    GPU_COLORS: ['#123456'], getCssColor: () => '#123456', withAlpha: (c, a) => c + a,
     updateCardNoData: (id, ok) => { statuses[id] = ok; }, updateCardWarning() {},
     console: { error: (...args) => errors.push(args.map(String).join(' ')) },
     performance: { now: () => 0 }, requestAnimationFrame: callback => callback(500),
@@ -227,7 +227,7 @@ async function testIpInfoTimeout() {
       clearTimeout(timer) { timers.delete(timer); clearTimeout(timer); },
       updateCardNoData: (id, ok) => { statuses[id] = ok; }, updateCacheDisplay() {}, escapeHtml: String,
       renderGpuInfo() {}, renderDrives() {}, renderMail() {}, renderHardware() {},
-      renderDriveHealth() {}, renderSystemInfo() {},
+      renderDriveHealth() {}, renderSystemInfo() {}, checkVersion() {},
       diskCapture: { handleResponse() {} }, networkCapture: { handleResponse() {} },
     });
     evaluate(context,
@@ -733,7 +733,7 @@ async function testStaticInfoRecovery() {
     renderSystemInfo(data, uptime) { rendered.system.push({ data, uptime }); statuses['system-info'] = true; },
     updateCardNoData(id, ok) { statuses[id] = ok; },
     renderGpuInfo() {}, renderDrives() {}, renderIpInfo() {}, renderMail() {}, renderHardware() {}, renderDriveHealth() {},
-    diskCapture: { handleResponse() {} }, networkCapture: { handleResponse() {} },
+    checkVersion() {}, diskCapture: { handleResponse() {} }, networkCapture: { handleResponse() {} },
   });
   evaluate(context,
     between(config, 'const dataCache =', '// The CPU core temperatures') +
@@ -796,6 +796,7 @@ async function testSlowPollRenderIsolation() {
     renderCpuInfo: record('cpu'), renderSystemInfo: record('system'), renderDrives: record('drives'),
     renderIpInfo: record('ip'), renderMail: record('mail'), renderDriveHealth: record('drive-health'),
     diskCapture: { handleResponse: record('disk') }, networkCapture: { handleResponse: record('network') },
+    checkVersion: record('version'),
   });
   evaluate(context,
     between(config, 'const dataCache =', '// The CPU core temperatures') +
@@ -805,7 +806,8 @@ async function testSlowPollRenderIsolation() {
   await context.fetchSlowData();
   assert.deepEqual(statuses, { 'gpu-info': false, hardware: false }, 'only the throwing cards are marked failed');
   assert.deepEqual(rendered.sort(),
-    ['cpu', 'disk', 'drive-health', 'drives', 'ip', 'mail', 'network', 'system'], 'every other card still renders');
+    ['cpu', 'disk', 'drive-health', 'drives', 'ip', 'mail', 'network', 'system', 'version'],
+    'every other card still renders, and the version is checked');
   assert.equal(errors.length, 2);
 }
 
@@ -819,7 +821,7 @@ async function testCaptureCacheAge() {
     nethogsDuration: 3, diskDuration: 1, API_BASE: '/api/4',
     getDiskTimeout: () => 6500, getNethogsTimeout: () => 9500,
     renderUnifiedProcesses() {}, renderGpuInfo() {}, renderCpuInfo() {}, renderDrives() {}, renderIpInfo() {},
-    renderMail() {}, renderHardware() {}, renderDriveHealth() {}, renderSystemInfo() {},
+    renderMail() {}, renderHardware() {}, renderDriveHealth() {}, renderSystemInfo() {}, checkVersion() {},
     async safeFetch(url) {
       calls[url] = (calls[url] || 0) + 1;
       const data = url.includes('processes')
@@ -993,7 +995,7 @@ function testLiveSampleTimes() {
   const context = vm.createContext({
     ...dom, historyLength: 3, pollInterval: 2000, MIN_POLL_INTERVAL: 1000,
     isConnected: false, pollingInterval: null, Date: { now: () => now },
-    getCssColor: () => '#123456', lsSet() {},
+    getCssColor: () => '#123456', getCssNumber: (_, fallback) => fallback, lsSet() {},
     createDropdownPicker: (_, options) => { picker = options; },
   });
   evaluate(context, between(charts, '// Data stores', '// Initialize charts'));
@@ -1065,10 +1067,116 @@ function testLiveSampleTimes() {
   assert.deepEqual(plain(evaluate(context, 'bars.data.labels')), ['Core 0'], 'categorical charts retain their labels');
 }
 
+async function testVersionFooterAndUpdateBanner() {
+  const dom = makeDOM(['version-label', 'update-banner', 'update-banner-text']);
+  let answer = { ok: true, data: { version: '1.2.0', build: 'v1.2.0-0-gaaaaaaa' } };
+  const context = vm.createContext({ ...dom, async safeFetch() { return answer; } });
+  evaluate(context, between(app, "// The running backend's version", "document.getElementById('update-banner-reload')"));
+  const label = dom.elements.get('version-label'), banner = dom.elements.get('update-banner');
+  banner.hidden = true;
+  await context.checkVersion();
+  assert.equal(label.textContent, 'horatio v1.2.0');
+  assert.equal(label.title, 'build v1.2.0-0-gaaaaaaa');
+  await context.checkVersion();
+  assert.equal(banner.hidden, true, 'an unchanged version shows no banner');
+  answer = { ok: false, data: null, errorType: 'network' };
+  await context.checkVersion();
+  assert.equal(banner.hidden, true, 'a failed fetch (service restarting) is not an update');
+  answer = { ok: true, data: { version: '1.2.0', build: 'v1.2.0-3-gbbbbbbb' } };
+  await context.checkVersion();
+  assert.equal(banner.hidden, false, 'a new build on main is an update');
+  assert.match(dom.elements.get('update-banner-text').textContent, /v1\.2\.0-3-gbbbbbbb/);
+  answer = { ok: true, data: { version: '1.3.0', build: null } };
+  await context.checkVersion();
+  assert.match(dom.elements.get('update-banner-text').textContent, /Updated to v1\.3\.0/);
+  assert.equal(label.textContent, 'horatio v1.2.0', 'the footer keeps the version this page runs');
+  // Dismissed: stays hidden for that version, shows again for the next one.
+  evaluate(context, 'dismissedVersion = "1.3.0 null"');
+  banner.hidden = true;
+  await context.checkVersion();
+  assert.equal(banner.hidden, true);
+  answer = { ok: true, data: { version: '1.4.0', build: null } };
+  await context.checkVersion();
+  assert.equal(banner.hidden, false);
+}
+
+async function testThemes() {
+  // The <head> loader: a stored valid name becomes a stylesheet link ahead of
+  // the scripts; traversal, odd names and storage that throws write nothing.
+  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'index.html'), 'utf8');
+  const loader = /<script>(\(function \(\) \{[\s\S]*?horatioTheme[\s\S]*?\}\)\(\);)<\/script>/.exec(html);
+  assert(loader, 'theme loader in index.html');
+  assert(html.indexOf(loader[0]) < html.indexOf('<script src='), 'the theme loads before the scripts');
+  const written = stored => {
+    const out = [];
+    vm.runInNewContext(loader[1], {
+      localStorage: { getItem() { if (stored instanceof Error) throw stored; return stored; } },
+      document: { write: s => out.push(s) },
+    });
+    return out;
+  };
+  assert.deepEqual(written('classic'), ['<link rel="stylesheet" href="themes/classic.css">']);
+  for (const bad of ['../x', 'a.b', 'x y', '', null, new Error('blocked')]) {
+    assert.deepEqual(written(bad), [], String(bad));
+  }
+
+  // withAlpha takes any color the canvas understands, not just #rrggbb.
+  const canvasForm = { '#000': '#000000', '#abc': '#aabbcc', red: '#ff0000', '#123456': '#123456',
+    'rgb(1 2 3 / 50%)': 'rgba(1, 2, 3, 0.5)' };
+  const canvas = { value: '#000000', set fillStyle(c) { if (c in canvasForm) this.value = canvasForm[c]; },
+    get fillStyle() { return this.value; } };
+  const colors = vm.createContext({ document: { createElement: () => ({ getContext: () => canvas }) } });
+  evaluate(colors, between(config, '// `color` at the opacity', '// A unitless number'));
+  assert.equal(colors.withAlpha('#123456', '20'), 'rgba(18, 52, 86, 0.125)');
+  assert.equal(colors.withAlpha('#abc', 'ff'), 'rgba(170, 187, 204, 1)');
+  assert.equal(colors.withAlpha('red', '80'), 'rgba(255, 0, 0, 0.502)');
+  assert.equal(colors.withAlpha('rgb(1 2 3 / 50%)', '80'), 'rgba(1, 2, 3, 0.251)', 'alpha multiplies');
+
+  // The picker: options from themes/index.json; a change stores it and reloads.
+  const pickerContext = (stored, fetchImpl) => {
+    const dom = makeDOM(['theme-select']), store = new Map(stored ? [['horatioTheme', stored]] : []);
+    const state = { store, reloads: 0, picked: null, click: null, button: dom.elements.get('theme-select') };
+    state.button.addEventListener = (type, handler) => { state.click = handler; };
+    const context = vm.createContext({
+      ...dom, fetch: fetchImpl,
+      lsGet: key => store.get(key) ?? null, lsSet: (key, value) => store.set(key, String(value)),
+      lsRemove: key => store.delete(key), location: { reload: () => state.reloads++ },
+      createDropdownPicker: (el, options) => { state.picked = options; },
+    });
+    evaluate(context, between(app, '// Set up theme selector', '// Set up poll interval selector'));
+    return state;
+  };
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  const listing = async () => ({ ok: true, json: async () => ['classic', 'light', 'default', '../x', 3] });
+  let s = pickerContext('gone', listing);
+  await tick();
+  assert.equal(s.store.has('horatioTheme'), false, 'a deleted theme is forgotten');
+  assert.equal(s.button.textContent, 'default');
+  await s.click();
+  assert.deepEqual(plain(s.picked.options.map(o => o.value)), ['default', 'classic', 'light']);
+  assert.equal(s.picked.currentValue, 'default');
+  s.picked.onSelect('default');
+  assert.equal(s.reloads, 0, 'choosing the current theme does nothing');
+  s.picked.onSelect('classic');
+  assert.equal(s.store.get('horatioTheme'), 'classic');
+  assert.equal(s.reloads, 1);
+  s.picked.onSelect('default');
+  assert.equal(s.store.has('horatioTheme'), false);
+  assert.equal(s.reloads, 2);
+  // An unreadable list (offline, demo without it) keeps the choice and offers default.
+  s = pickerContext('classic', async () => { throw new Error('offline'); });
+  await tick();
+  assert.equal(s.store.get('horatioTheme'), 'classic');
+  assert.equal(s.button.textContent, 'classic');
+  await s.click();
+  assert.deepEqual(plain(s.picked.options.map(o => o.value)), ['default']);
+}
+
 (async () => {
-  for (const test of [testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
+  for (const test of [testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
-    testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes]) {
+    testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
+    testVersionFooterAndUpdateBanner]) {
     await test();
     console.log(`PASS ${test.name}`);
   }

@@ -1,0 +1,56 @@
+name: Release
+
+# A pushed vX.Y.Z tag (scripts/release.sh) becomes a GitHub release, with that
+# version's CHANGELOG.md section as its notes, once the checks pass on it.
+# `install.sh --update` and the OpenWrt tarball update read these releases.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Tag matches VERSION
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          version="${GITHUB_REF_NAME#v}"
+          [ "$(cat VERSION)" = "$version" ] \
+            || { echo "::error::tag $GITHUB_REF_NAME, but VERSION says $(cat VERSION)"; exit 1; }
+          grep -qx "version = \"$version\"" pyproject.toml \
+            || { echo "::error::pyproject.toml's version is not $version"; exit 1; }
+
+  checks:
+    needs: verify
+    uses: ./.github/workflows/check.yml
+
+  publish:
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v head="## [${GITHUB_REF_NAME#v}]" \
+            'index($0, head) == 1 { on = 1; next } on && /^## \[/ { exit } on' CHANGELOG.md > notes.md
+          grep -q '[^[:space:]]' notes.md \
+            || { echo "::error::CHANGELOG.md has no notes for ${GITHUB_REF_NAME#v}"; exit 1; }
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=()
+          [[ "$GITHUB_REF_NAME" != *-* ]] || prerelease=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md "${prerelease[@]}"

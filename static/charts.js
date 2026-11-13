@@ -113,6 +113,8 @@ function formatTimeLabel(secsAgo) {
 // Shared chart styling (read from CSS variables, eliminates hex duplication)
 // ============================================================================
 
+const CHART_FONT_SIZE = getCssNumber('--chart-font-size', 16);
+const CHART_RADIUS = getCssNumber('--chart-radius', 2);
 const CHART_TOOLTIP = {
   enabled: true,
   backgroundColor: getCssColor('--bg-card'),
@@ -120,11 +122,12 @@ const CHART_TOOLTIP = {
   borderWidth: 1,
   titleColor: getCssColor('--text-secondary'),
   bodyColor: getCssColor('--text-primary'),
-  bodyFont: { size: 16 },
+  bodyFont: { size: CHART_FONT_SIZE },
+  cornerRadius: CHART_RADIUS,
   padding: 10,
 };
 const CHART_GRID = { color: getCssColor('--border-color') };
-const CHART_TICK = { color: getCssColor('--text-muted'), font: { size: 16 } };
+const CHART_TICK = { color: getCssColor('--text-muted'), font: { size: CHART_FONT_SIZE } };
 const CHART_X_AXIS = {
   display: true,
   ticks: {
@@ -152,7 +155,7 @@ function makeDataset(color, data, label) {
   const ds = {
     data: data,
     borderColor: color,
-    backgroundColor: color + '20',
+    backgroundColor: withAlpha(color, '20'),
     fill: true,
     tension: 0.4,
     pointRadius: 0,
@@ -244,8 +247,8 @@ function chartConfigDual(color1, color2, data1, data2, label1, label2) {
 function cpuCoresConfig() {
   return buildChart({
     type: 'bar',
-    data: { labels: [], datasets: [{ data: [], backgroundColor: [], borderWidth: 0, borderRadius: 2 }] },
-    tooltip: { titleFont: { size: 16 }, displayColors: false, callbacks: { title: (ctx) => 'Core ' + ctx[0].label, label: (ctx) => ctx.parsed.y.toFixed(1) + '%' } },
+    data: { labels: [], datasets: [{ data: [], backgroundColor: [], borderWidth: 0, borderRadius: CHART_RADIUS }] },
+    tooltip: { titleFont: { size: CHART_FONT_SIZE }, displayColors: false, callbacks: { title: (ctx) => 'Core ' + ctx[0].label, label: (ctx) => ctx.parsed.y.toFixed(1) + '%' } },
     xAxis: CHART_X_AXIS_BAR,
     yAxis: makeYAxis({ max: 100, stepSize: 25, tickFormat: (v) => v + '%' })
   });
@@ -260,8 +263,8 @@ function cpuCoresSpreadConfig() {
       { label: 'min', data: history.cpuCoresMin, borderColor: 'transparent',
         backgroundColor: 'transparent', fill: false, tension: 0.4, pointRadius: 0, borderWidth: 0 },
       // Band ceiling, filled down to the min dataset (index -1) -> shaded region
-      { label: 'max', data: history.cpuCoresMax, borderColor: color + '55',
-        backgroundColor: color + '22', fill: '-1', tension: 0.4, pointRadius: 0, borderWidth: 1 },
+      { label: 'max', data: history.cpuCoresMax, borderColor: withAlpha(color, '55'),
+        backgroundColor: withAlpha(color, '22'), fill: '-1', tension: 0.4, pointRadius: 0, borderWidth: 1 },
       // Median line (solid)
       { label: 'median', data: history.cpuCoresMedian, borderColor: color,
         backgroundColor: 'transparent', fill: false, tension: 0.4, pointRadius: 0, pointHoverRadius: 4, borderWidth: 2 }
@@ -357,9 +360,9 @@ function tempsChartConfig() {
   return buildChart({
     type: 'bar',
     data: { labels: [], datasets: [
-      { data: [], backgroundColor: [], borderWidth: 0, borderRadius: 2 },
+      { data: [], backgroundColor: [], borderWidth: 0, borderRadius: CHART_RADIUS },
       { type: 'line', data: [], showLine: false, pointStyle: 'line', pointRadius: 10, pointHoverRadius: 10,
-        pointBorderWidth: 2, pointBorderColor: '#fff', pointHoverBorderColor: '#fff' },
+        pointBorderWidth: 2, pointBorderColor: getCssColor('--text-title'), pointHoverBorderColor: getCssColor('--text-title') },
     ] },
     tooltip: { displayColors: false, filter: (item) => item.datasetIndex === 0, callbacks: { label: (ctx) => {
       const c = ctx.chart._cores;
@@ -374,7 +377,7 @@ function tempsChartConfig() {
 function fansChartConfig() {
   return buildChart({
     type: 'bar',
-    data: { labels: [], datasets: [{ data: [], backgroundColor: getCssColor('--color-download'), borderWidth: 0, borderRadius: 2 }] },
+    data: { labels: [], datasets: [{ data: [], backgroundColor: getCssColor('--color-download'), borderWidth: 0, borderRadius: CHART_RADIUS }] },
     tooltip: { displayColors: false, callbacks: { label: (ctx) => ctx.parsed.y.toFixed(0) + ' RPM' } },
     xAxis: CHART_X_AXIS_BAR,
     yAxis: makeYAxis({ tickFormat: (v) => v >= 1000 ? (v/1000).toFixed(1) + 'k' : v })

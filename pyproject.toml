@@ -1,5 +1,5 @@
 [project]
-name = "dashboard"
+name = "horatio"
 version = "0.1.0"
 description = "Homelab status dashboard"
 requires-python = ">=3.10"

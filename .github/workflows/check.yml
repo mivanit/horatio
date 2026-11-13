@@ -4,12 +4,16 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  # release.yml runs these before publishing a tag.
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: checks-${{ github.event.pull_request.number || github.ref }}
+  # github.workflow is the caller's name when release.yml calls this, so the
+  # release's run and this file's own run for the same tag don't cancel each other.
+  group: checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

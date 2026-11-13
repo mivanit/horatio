@@ -22,6 +22,9 @@ uhttpd = {send = function(s) output[#output + 1] = s end}
 local script_dir = (arg and arg[0] or ""):match("(.*)[/\\][^/\\]*$") or "."
 script_dir = script_dir .. "/../../openwrt"
 dofile(script_dir .. "/handler.lua")
+local version_file = assert(io.open(script_dir .. "/../VERSION", "r"))
+local version = version_file:read("*l")
+version_file:close()
 
 local failed = 0
 for _, case in ipairs({
@@ -35,6 +38,9 @@ for _, case in ipairs({
     {"GET", "/4/mem", 200, "OK", {'"total":8589934592', '"used":4294967296'}},
     {"GET", "/4/memswap", 200, "OK", {'"total":2147483648', '"used":0'}},
     {"GET", "/4/fs", 200, "OK", {'"size":8589934592', '"used":4294967296'}},
+    -- Same contract as the Python backend; a router checkout has no build.
+    {"GET", "/version", 200, "OK", {'"version":"' .. version .. '"', '"build":null'}},
+    {"GET", "/list-endpoints", 200, "OK", {'"/version"'}},
 }) do
     output = {}
     handle_request({REQUEST_METHOD = case[1], PATH_INFO = case[2]})

@@ -408,12 +408,13 @@
     '/4/load', '/4/uptime', '/4/system', '/4/fs',
     '/cpu-info', '/gpu-info', '/ip-info', '/ping', '/gpu-processes', '/disk-processes', '/network-processes',
     '/processlist', '/history', '/history/settings', '/history/record', '/history/field/temps',
-    '/history/field/processes', '/mail', '/storage-health', '/sensors', '/list-endpoints',
+    '/history/field/processes', '/mail', '/storage-health', '/sensors', '/version', '/list-endpoints',
   ];
 
   // Path (after /api) -> (query, t) => body. A body of `undefined` is a 404.
   const GET = {
     '/list-endpoints': () => ({ endpoints: ENDPOINTS, backend: 'python' }),
+    '/version': () => ({ version: 'demo', build: null }),
     '/4/cpu': (q, t) => ({ total: state(t).cpu, cpucore: THREADS }),
     '/4/percpu': (q, t) => state(t).cores.map((total, cpu_number) => ({ cpu_number, total, key: 'cpu_number' })),
     '/4/mem': (q, t) => { const u = state(t).memUsed; return { total: MEM_TOTAL, used: u, free: MEM_TOTAL - u, percent: r1(u / MEM_TOTAL * 100) }; },

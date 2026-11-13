@@ -38,6 +38,8 @@ history.init(config, metrics, dashboard_dir)
 -- because luci.jsonc.stringify doesn't guarantee field ordering and may
 -- not handle all our edge cases (NaN, empty arrays vs objects).
 local json = {}
+-- Encodes as null: a nil field would drop the key from the object.
+json.null = {}
 
 local function json_escape(s)
     return s:gsub('\\', '\\\\'):gsub('"', '\\"')
@@ -47,7 +49,7 @@ end
 
 function json.encode(val)
     local t = type(val)
-    if val == nil then return "null"
+    if val == nil or val == json.null then return "null"
     elseif t == "boolean" then return val and "true" or "false"
     elseif t == "number" then
         if val ~= val or val == math.huge or val == -math.huge then return "null" end
@@ -160,6 +162,17 @@ routes["/history/record"] = function(env)
 end
 
 -- Meta
+-- The release from the checkout's VERSION, as the Python backend's /api/version.
+-- Read per request: an update replaces the file without restarting uhttpd's Lua state.
+-- No build: a router checkout may have been copied over without .git.
+routes["/version"] = function()
+    local f = io.open(dashboard_dir .. "/VERSION", "r")
+    local v = f and f:read("*l")
+    if f then f:close() end
+    v = v and v:match("^%s*(.-)%s*$")
+    send_json({ version = (v and v ~= "") and v or "unknown", build = json.null })
+end
+
 routes["/list-endpoints"] = function()
     local endpoint_list = {}
     for path, _ in pairs(routes) do

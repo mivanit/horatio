@@ -12,7 +12,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from tests.support import describe
+from tests.support import ROOT, describe
 
 # Expected response shapes per endpoint (path -> validator)
 SCHEMAS: dict[str, Callable[[Any], bool]] = {
@@ -161,6 +161,7 @@ CUSTOM_ENDPOINTS: list[str] = [
     "/api/mail",
     "/api/storage-health",
     "/api/sensors",
+    "/api/version",
 ]
 
 
@@ -185,6 +186,27 @@ def test_optional_gpu_endpoint(live_server: str) -> None:
     assert response.status_code == 200, response.text
     data: Any = response.json()
     assert SCHEMAS["/api/4/gpu"](data), describe(data)
+
+
+def test_version_and_revalidation(live_server: str) -> None:
+    response: httpx.Response = httpx.get(f"{live_server}/api/version", timeout=10)
+    assert response.status_code == 200
+    # The fixture copies VERSION but is not a git checkout, so there is no build.
+    assert response.json() == {
+        "version": (ROOT / "VERSION").read_text().strip(),
+        "build": None,
+    }
+    # An update must reach open browsers: the page and its assets revalidate.
+    for path in ("/", "/static/app.js", "/static/style.css"):
+        response = httpx.get(f"{live_server}{path}", timeout=10)
+        assert response.status_code == 200, path
+        assert response.headers.get("cache-control") == "no-cache", path
+    etag: str = response.headers["etag"]
+    response = httpx.get(
+        f"{live_server}/static/style.css", headers={"If-None-Match": etag}, timeout=10
+    )
+    assert response.status_code == 304
+    assert response.headers.get("cache-control") == "no-cache"
 
 
 @pytest.mark.parametrize(

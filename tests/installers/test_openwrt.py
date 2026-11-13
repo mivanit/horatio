@@ -11,6 +11,7 @@ import json
 import os
 import pwd
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,12 @@ class TestOpenWrtInstaller:
         (self.root / "static").mkdir()
         (self.root / "static/app.js").write_text("// app\n")
         (self.root / "index.html").write_text("<!doctype html>\n")
+        (self.root / "themes").mkdir()
+        (self.root / "themes/b-2.css").write_text(":root{}\n")
+        (self.root / "themes/a_1.css").write_text(":root{}\n")
+        (self.root / "themes/bad.name.css").write_text("")
+        (self.root / "themes/default.css").write_text("")
+        (self.root / "themes/README.md").write_text("")
         (self.root / ".git").mkdir()
         (self.root / ".git/config").write_text("[remote]\n")
         self.bin: Path = self.root / "bin"
@@ -444,7 +451,15 @@ class TestOpenWrtInstaller:
             "config.json",
             "index.html",
             "static",
+            "themes",
         ]
+        # Only loadable names are copied and listed for the picker.
+        assert sorted(path.name for path in (www / "themes").iterdir()) == [
+            "a_1.css",
+            "b-2.css",
+            "index.json",
+        ]
+        assert json.loads((www / "themes/index.json").read_text()) == ["a_1", "b-2"]
         assert (www / "index.html").read_text() == "<!doctype html>\n"
         assert (www / "static/app.js").read_text() == "// app\n"
         assert (www / "static/chart.umd.min.js").read_bytes() == ASSET
@@ -464,6 +479,27 @@ class TestOpenWrtInstaller:
         assert ["set", f"uhttpd.dashboard.home={self.root}"] not in self.uci_args()
         self.assert_served_tree(self.example)
         assert self.events("test-uhttpd-service")[0]["config"] == self.example
+
+    def test_served_asset_urls_carry_the_version(
+        self: TestOpenWrtInstaller,
+    ) -> None:
+        # uhttpd sends no Cache-Control: a versioned URL is what makes an update
+        # reach browsers that cached the old scripts.
+        (self.root / "VERSION").write_text("1.2.3\n")
+        (self.root / "index.html").write_text(
+            '<link rel="stylesheet" href="/static/style.css">\n'
+            '<link rel="icon" href="/static/favicon.svg">\n'
+            '<script src="/static/app.js"></script>\n'
+        )
+        result: subprocess.CompletedProcess[str] = self.run_install()
+        assert result.returncode == 0, result.stderr + result.stdout
+        served: str = (self.root / "www/index.html").read_text()
+        stamps: list[str] = re.findall(
+            r'"/static/(?:style\.css|app\.js)\?v=([^"]+)"', served
+        )
+        assert len(stamps) == 2 and stamps[0] == stamps[1], served
+        assert re.fullmatch(r"1\.2\.3-\d+", stamps[0]), stamps
+        assert '"/static/favicon.svg"' in served, "only scripts and styles"
 
     def test_existing_config_is_migrated_and_rerun_is_idempotent(
         self: TestOpenWrtInstaller,
@@ -496,6 +532,14 @@ class TestOpenWrtInstaller:
         result: subprocess.CompletedProcess[str] = self.run_install()
         assert result.returncode == 0, result.stderr + result.stdout
         self.assert_served_tree(custom)
+
+    def test_without_themes_the_picker_list_is_empty(
+        self: TestOpenWrtInstaller,
+    ) -> None:
+        shutil.rmtree(self.root / "themes")
+        result: subprocess.CompletedProcess[str] = self.run_install()
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert json.loads((self.root / "www/themes/index.json").read_text()) == []
 
     def test_uninstall_removes_served_copies_but_keeps_config(
         self: TestOpenWrtInstaller,

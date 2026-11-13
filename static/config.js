@@ -44,6 +44,32 @@ function getCssColor(varName) {
   return getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
 }
 
+// `color` at the opacity of two hex digits: withAlpha(c, '20') replaces appending '20'.
+// A theme may write any CSS color (rgb(), a name, #abc), which appending digits
+// breaks, so the canvas normalises it to #rrggbb or rgba() first.
+let _colorCtx;
+function withAlpha(color, alphaHex) {
+  const alpha = parseInt(alphaHex, 16) / 255;
+  if (_colorCtx === undefined) _colorCtx = document.createElement('canvas').getContext?.('2d') || null;
+  let c = color;
+  if (_colorCtx) {
+    _colorCtx.fillStyle = '#000';
+    _colorCtx.fillStyle = color;
+    c = _colorCtx.fillStyle;
+  }
+  let m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(c);
+  if (m) return `rgba(${parseInt(m[1], 16)}, ${parseInt(m[2], 16)}, ${parseInt(m[3], 16)}, ${+alpha.toFixed(3)})`;
+  m = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:[\s,/]+([\d.]+))?\s*\)$/.exec(c);
+  if (m) return `rgba(${m[1]}, ${m[2]}, ${m[3]}, ${+((m[4] === undefined ? 1 : +m[4]) * alpha).toFixed(3)})`;
+  return color;  // a color the canvas keeps in another space (oklch...): drawn opaque
+}
+
+// A unitless number from a CSS variable (chart font size, radii), or `fallback`.
+function getCssNumber(varName, fallback) {
+  const n = parseFloat(getCssColor(varName));
+  return Number.isFinite(n) ? n : fallback;
+}
+
 // Status colors (read from CSS variables)
 const COLORS = {
   success: getCssColor('--color-success'),
@@ -127,9 +153,26 @@ const cardStatus = {
   'drive-health': { ok: true, lastSuccess: Date.now() },
 };
 
-// Set Chart.js defaults
-Chart.defaults.font.family = "'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace";
-Chart.defaults.plugins.tooltip.animation = { duration: 100 };
+// Set Chart.js defaults from the theme, so charts that set no style of their own
+// (history charts, footers) still match it.
+Chart.defaults.font.family = getCssColor('--font-family') || 'monospace';
+Chart.defaults.font.size = getCssNumber('--chart-font-size', 16);
+Chart.defaults.color = getCssColor('--text-muted');
+Chart.defaults.borderColor = getCssColor('--border-color');
+Object.assign(Chart.defaults.plugins.tooltip, {
+  animation: { duration: 100 },
+  backgroundColor: getCssColor('--bg-card'),
+  borderColor: getCssColor('--border-color'),
+  borderWidth: 1,
+  titleColor: getCssColor('--text-secondary'),
+  bodyColor: getCssColor('--text-primary'),
+  footerColor: getCssColor('--text-muted'),
+  cornerRadius: getCssNumber('--chart-radius', 2),
+});
+// A theme's web font may arrive after the first draw; redraw once it has.
+document.fonts?.ready.then(() => {
+  if (typeof charts === 'object') Object.values(charts).forEach(c => c?.update?.('none'));
+});
 
 // Error toast handling
 let errorTimeout = null;
@@ -351,29 +394,19 @@ function pingBandPattern(entries) {   // entries: [{color, loss}]
 function pingRowsHTML(entries) {
   return entries.map(e => {
     const cur = e.down ? 'down' : (e.cur == null ? '—' : `${e.cur}ms`);
-    const curCol = e.down ? '#ef4444' : '#ccc';
     const rng = (e.down || e.min == null) ? '' : `[${e.min}ms, ${e.max}ms]`;
     const pct = e.pct == null ? '<span></span>'
       : `<span class="r" style="color:hsl(${_pingHue(e.pct)},75%,55%)">${e.pct}%</span>`;
     return `<span style="color:${e.color}">${e.name}</span>`
-         + `<span style="color:${curCol}">${cur}</span>`
-         + `<span style="color:#888">${rng}</span>${pct}`;
+         + `<span class="cur${e.down ? ' down' : ''}">${cur}</span>`
+         + `<span class="rng">${rng}</span>${pct}`;
   }).join('');
 }
 
 function _ensurePingTooltip() {
   let el = document.getElementById('ping-tooltip');
   if (el) return el;
-  const style = document.createElement('style');
-  style.textContent =
-    '#ping-tooltip{position:absolute;pointer-events:none;opacity:0;transition:opacity .08s;z-index:100;' +
-    'background:#0c0c0c;border:1px solid #444;border-radius:6px;padding:7px 9px;box-shadow:0 4px 14px rgba(0,0,0,.5)}' +
-    '#ping-tooltip .ttl{font:11px system-ui;color:#888;margin-bottom:4px}' +
-    '#ping-tooltip .grid{display:grid;grid-template-columns:auto auto auto auto;gap:3px 12px;' +
-    'font:12.5px ui-monospace,Menlo,monospace;white-space:nowrap}' +
-    '#ping-tooltip .r{text-align:right}' +
-    '#ping-tooltip .foot{font:11px system-ui;color:#777;margin-top:5px;border-top:1px solid #333;padding-top:4px}';
-  document.head.appendChild(style);
+  // Styled by #ping-tooltip in style.css, so themes reach it.
   el = document.createElement('div');
   el.id = 'ping-tooltip';
   document.body.appendChild(el);

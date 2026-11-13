@@ -292,9 +292,9 @@ const PROCESS_COLUMNS = [
     },
     color: (p) => {
       const s = p.status;
-      if (s === 'R') return '#22c55e';  // green - running
-      if (s === 'Z' || s === 'X') return '#ef4444';  // red - problem
-      if (s === 'D' || s === 'T' || s === 't') return '#f59e0b';  // orange - attention
+      if (s === 'R') return getCssColor('--color-proc-running');  // green - running
+      if (s === 'Z' || s === 'X') return COLORS.error;  // red - problem
+      if (s === 'D' || s === 'T' || s === 't') return COLORS.warning;  // orange - attention
       return null;  // S, I - no color (gray text)
     },
     cssClass: 'num-cell process-info-cell'
@@ -1447,6 +1447,9 @@ async function fetchSlowData() {
         networkCapture.setError();
       });
   }
+
+  // Runs on its own: the footer and the update banner (checkVersion, below).
+  checkVersion();
 }
 
 // One poll at a time: safeFetch's 5 s timeout is longer than the 2 s poll, so a
@@ -1616,7 +1619,7 @@ async function fetchDataOnce() {
             label: 'GPU ' + i,
             data: history.gpus[i],
             borderColor: GPU_COLORS[i % GPU_COLORS.length],
-            backgroundColor: GPU_COLORS[i % GPU_COLORS.length] + '20',
+            backgroundColor: withAlpha(GPU_COLORS[i % GPU_COLORS.length], '20'),
             fill: true,
             tension: 0.4,
             pointRadius: 0,
@@ -1627,7 +1630,7 @@ async function fetchDataOnce() {
             label: 'GPU ' + i,
             data: history.gpuMems[i],
             borderColor: GPU_COLORS[i % GPU_COLORS.length],
-            backgroundColor: GPU_COLORS[i % GPU_COLORS.length] + '20',
+            backgroundColor: withAlpha(GPU_COLORS[i % GPU_COLORS.length], '20'),
             fill: true,
             tension: 0.4,
             pointRadius: 0,
@@ -1828,7 +1831,7 @@ async function fetchDataOnce() {
                 label: drive.name + ' Read',
                 data: history.diskDriveReads[i],
                 borderColor: color,
-                backgroundColor: color + '20',
+                backgroundColor: withAlpha(color, '20'),
                 fill: false,
                 tension: 0.4,
                 pointRadius: 0,
@@ -1840,7 +1843,7 @@ async function fetchDataOnce() {
                 label: drive.name + ' Write',
                 data: history.diskDriveWrites[i],
                 borderColor: color,
-                backgroundColor: color + '10',
+                backgroundColor: withAlpha(color, '10'),
                 fill: false,
                 tension: 0.4,
                 pointRadius: 0,
@@ -2252,7 +2255,7 @@ function applyConfigToDom() {
     label: t.address,
     data: history.pings[i],
     borderColor: pingColors[i],
-    backgroundColor: pingColors[i] + '20',
+    backgroundColor: withAlpha(pingColors[i], '20'),
     fill: true,
     tension: 0.4,
     pointRadius: 0,
@@ -2293,6 +2296,47 @@ loadConfig().then(async () => {
 
 // Set up toggle button
 document.getElementById('toggle-btn').addEventListener('click', toggleConnection);
+
+// Set up theme selector. The theme loads in index.html's <head>, before these
+// scripts read their colors from CSS, so choosing one reloads the page.
+const THEME_KEY = 'horatioTheme';
+const themeSelectBtn = document.getElementById('theme-select');
+// Names in themes/ (themes/index.json), or null when the list can't be read.
+async function fetchThemeNames() {
+  try {
+    const response = await fetch('themes/index.json', { cache: 'no-store' });
+    const names = response.ok ? await response.json() : null;
+    return Array.isArray(names)
+      ? names.filter(n => typeof n === 'string' && /^[A-Za-z0-9_-]+$/.test(n) && n !== 'default')
+      : null;
+  } catch (e) {
+    return null;
+  }
+}
+function selectTheme(name) {
+  if (name === (lsGet(THEME_KEY) || 'default')) return;
+  if (name === 'default') lsRemove(THEME_KEY);
+  else lsSet(THEME_KEY, name);
+  location.reload();
+}
+themeSelectBtn.textContent = lsGet(THEME_KEY) || 'default';
+// A stored theme that was deleted draws the default look; forget it and say so.
+if (lsGet(THEME_KEY)) {
+  fetchThemeNames().then(names => {
+    if (names && !names.includes(lsGet(THEME_KEY))) {
+      lsRemove(THEME_KEY);
+      themeSelectBtn.textContent = 'default';
+    }
+  });
+}
+themeSelectBtn.addEventListener('click', async () => {
+  const names = await fetchThemeNames() || [];
+  createDropdownPicker(themeSelectBtn, {
+    options: ['default', ...names].map(n => ({ value: n, label: n })),
+    currentValue: lsGet(THEME_KEY) || 'default',
+    onSelect: selectTheme,
+  });
+});
 
 // Set up poll interval selector
 const pollSelectBtn = document.getElementById('poll-select');
@@ -2992,7 +3036,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
   if (isTriple) {
     // Triple-line chart (e.g., system load with 1m/5m/15m)
     const tripleLabels = metricInfo.labels || ['Line 1', 'Line 2', 'Line 3'];
-    const tripleColors = metricInfo.colors || ['#f59e0b', '#eab308', '#ca8a04'];
+    const tripleColors = metricInfo.colors || ['--color-warning', '--color-load-5m', '--color-load-15m'].map(getCssColor);
     datasets = tripleLabels.map((label, i) => {
       const data = records.map(r => {
         const v = extractHistoryValue(r, metric);
@@ -3007,7 +3051,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
         label: label,
         data: data,
         borderColor: tripleColors[i],
-        backgroundColor: tripleColors[i] + '20',
+        backgroundColor: withAlpha(tripleColors[i], '20'),
         fill: false,
         tension: 0,
         pointRadius: 2,
@@ -3092,7 +3136,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
           label: device,
           data: data,
           borderColor: colors[i % colors.length],
-          backgroundColor: colors[i % colors.length] + '20',
+          backgroundColor: withAlpha(colors[i % colors.length], '20'),
           fill: false,
           tension: 0,
           pointRadius: 2,
@@ -3149,7 +3193,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
           label: gpuName,
           data: data,
           borderColor: colors[i % colors.length],
-          backgroundColor: colors[i % colors.length] + '20',
+          backgroundColor: withAlpha(colors[i % colors.length], '20'),
           fill: false,
           tension: 0,
           pointRadius: 2,
@@ -3179,7 +3223,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
           label: gpuName,
           data: data,
           borderColor: colors[i % colors.length],
-          backgroundColor: colors[i % colors.length] + '20',
+          backgroundColor: withAlpha(colors[i % colors.length], '20'),
           fill: false,
           tension: 0,
           pointRadius: 2,
@@ -3241,7 +3285,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
           label: sensor,
           data: data,
           borderColor: color,
-          backgroundColor: stack ? color + '60' : sensor === `${band} max` ? color + '15' : 'transparent',
+          backgroundColor: stack ? withAlpha(color, '60') : sensor === `${band} max` ? withAlpha(color, '15') : 'transparent',
           fill: stack ? (i === 0 ? 'origin' : '-1') : false,
           tension: 0,
           pointRadius: stack ? 0 : 2,
@@ -3308,7 +3352,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
           label: label1 + ' Max',
           data: max1,
           borderColor: metricInfo.colors[0],
-          backgroundColor: metricInfo.colors[0] + '15',
+          backgroundColor: withAlpha(metricInfo.colors[0], '15'),
           fill: false, // Filled between min/max when both enabled
           tension: 0,
           pointRadius: 0,
@@ -3352,7 +3396,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
           label: label2 + ' Max',
           data: max2,
           borderColor: metricInfo.colors[1],
-          backgroundColor: metricInfo.colors[1] + '15',
+          backgroundColor: withAlpha(metricInfo.colors[1], '15'),
           fill: false, // Filled between min/max when both enabled
           tension: 0,
           pointRadius: 0,
@@ -3383,7 +3427,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
           label: label1,
           data: data1,
           borderColor: metricInfo.colors[0],
-          backgroundColor: metricInfo.colors[0] + '20',
+          backgroundColor: withAlpha(metricInfo.colors[0], '20'),
           fill: true,
           tension: 0,
           pointRadius: 2,
@@ -3395,7 +3439,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
           label: label2,
           data: data2,
           borderColor: metricInfo.colors[1],
-          backgroundColor: metricInfo.colors[1] + '20',
+          backgroundColor: withAlpha(metricInfo.colors[1], '20'),
           fill: true,
           tension: 0,
           pointRadius: 2,
@@ -3418,14 +3462,14 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
         const max = records.map(r => { const v = extractHistoryValue(r, metric, 'max'); return v ? v[t.address] : null; });
         datasets.push(
           { label: t.address + ' Min', data: min, borderColor: colors[i], backgroundColor: 'transparent', fill: false, tension: 0, pointRadius: 0, pointHoverRadius: 4, borderWidth: 1, borderDash: [4, 4], spanGaps: false, hidden: true, rangeType: 'min' },
-          { label: t.address + ' Max', data: max, borderColor: colors[i], backgroundColor: colors[i] + '15', fill: false, tension: 0, pointRadius: 0, pointHoverRadius: 4, borderWidth: 1, borderDash: [4, 4], spanGaps: false, hidden: true, rangeType: 'max' },
+          { label: t.address + ' Max', data: max, borderColor: colors[i], backgroundColor: withAlpha(colors[i], '15'), fill: false, tension: 0, pointRadius: 0, pointHoverRadius: 4, borderWidth: 1, borderDash: [4, 4], spanGaps: false, hidden: true, rangeType: 'max' },
           { label: t.address, data: avg, borderColor: colors[i], backgroundColor: 'transparent', fill: false, tension: 0, pointRadius: 2, pointHoverRadius: 6, borderWidth: 2, spanGaps: false, rangeType: 'avg' }
         );
       });
     } else {
       datasets = pt.map((t, i) => {
         const data = records.map(r => { const v = extractHistoryValue(r, metric); return v ? v[t.address] : null; });
-        return { label: t.address, data, borderColor: colors[i], backgroundColor: colors[i] + '20', fill: true, tension: 0, pointRadius: 2, pointHoverRadius: 6, borderWidth: 2, spanGaps: false };
+        return { label: t.address, data, borderColor: colors[i], backgroundColor: withAlpha(colors[i], '20'), fill: true, tension: 0, pointRadius: 2, pointHoverRadius: 6, borderWidth: 2, spanGaps: false };
       });
     }
     // Ping loss band: faint fill (partial) + colored stripes (full outage), one
@@ -3484,7 +3528,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
           label: metricInfo.name + ' Max',
           data: maxData,
           borderColor: metricInfo.color,
-          backgroundColor: metricInfo.color + '15',
+          backgroundColor: withAlpha(metricInfo.color, '15'),
           fill: showBand ? '-1' : false, // Filled between min/max when both enabled
           tension: 0,
           pointRadius: 0,
@@ -3515,7 +3559,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
         label: metricInfo.name,
         data: data,
         borderColor: metricInfo.color,
-        backgroundColor: metricInfo.color + '20',
+        backgroundColor: withAlpha(metricInfo.color, '20'),
         fill: true,
         tension: 0,
         pointRadius: 2,
@@ -4197,4 +4241,40 @@ document.querySelector('.history-controls-label')?.addEventListener('mousedown',
   if (e.button === 1) {
     e.preventDefault();
   }
+});
+
+// The running backend's version (/api/version), checked on each slow poll. The
+// first answer goes in the footer. A different version or build later means the
+// box was updated under this page, whose scripts are still the old ones: offer a
+// reload. The build matters for a box tracking main, where pulls between
+// releases keep the same version.
+let loadedVersion = null, dismissedVersion = null;
+const versionName = v => (/^\d/.test(v) ? 'v' : '') + v;  // 1.2.0 -> v1.2.0; 'demo' stays
+async function checkVersion() {
+  const r = await safeFetch('/api/version', null);
+  // Restarting mid-update, or a backend without the endpoint: not a change.
+  if (!r.ok || !r.data || typeof r.data.version !== 'string') return;
+  const seen = { version: r.data.version, build: r.data.build ?? null };
+  const key = seen.version + ' ' + seen.build;
+  if (loadedVersion === null) {
+    loadedVersion = seen;
+    const label = document.getElementById('version-label');
+    label.textContent = 'horatio ' + versionName(seen.version);
+    label.title = seen.build ? 'build ' + seen.build : '';
+    return;
+  }
+  if (key === loadedVersion.version + ' ' + loadedVersion.build || key === dismissedVersion) return;
+  document.getElementById('update-banner-text').textContent = seen.version === loadedVersion.version
+    ? `Updated (${seen.build || versionName(seen.version)}): reload to run it.`
+    : `Updated to ${versionName(seen.version)}: reload to run it.`;
+  const banner = document.getElementById('update-banner');
+  banner.dataset.version = key;
+  banner.hidden = false;
+}
+
+document.getElementById('update-banner-reload').addEventListener('click', () => location.reload());
+document.getElementById('update-banner-close').addEventListener('click', () => {
+  const banner = document.getElementById('update-banner');
+  dismissedVersion = banner.dataset.version;
+  banner.hidden = true;
 });

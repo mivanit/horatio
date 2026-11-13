@@ -14,9 +14,10 @@ def copy_application(destination: Path) -> Path:
     """Copy application code and example config, never the checkout's live state."""
     destination.mkdir(parents=True)
     name: str
-    for name in ("server.py", "tui.py", "index.html"):
+    for name in ("server.py", "tui.py", "index.html", "VERSION"):
         shutil.copy2(ROOT / name, destination / name)
     shutil.copytree(ROOT / "static", destination / "static")
+    shutil.copytree(ROOT / "themes", destination / "themes")
     shutil.copy2(ROOT / "config.example.json", destination / "config.json")
     return destination
 

@@ -3,7 +3,7 @@
 # Chart.js at the version install.sh pins, and docs/demo/fake-api.js, which
 # answers the frontend's API calls in the browser. Usage:
 #   docs/build-demo.sh [outdir]      (default: _site)
-# Only outdir's index.html, static/ and demo/ are replaced, so outdir can be
+# Only outdir's index.html, static/, themes/ and demo/ are replaced, so outdir can be
 # docs/ itself (`make demo`; those copies are gitignored there).
 # HORATIO_DEMO_SKIP_CHARTJS=1 skips the Chart.js download (the offline tests).
 set -euo pipefail
@@ -13,9 +13,20 @@ OUT="${1:-_site}"
 
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
-rm -rf "$OUT/index.html" "$OUT/static"
+rm -rf "$OUT/index.html" "$OUT/static" "$OUT/themes"
 cp "$ROOT/index.html" "$OUT/index.html"
 cp -RL "$ROOT/static" "$OUT/static"
+# Themes, and the list the picker fetches (server.py serves it from the dir).
+mkdir -p "$OUT/themes"
+theme_names=""
+for theme in "$ROOT"/themes/*.css; do
+  [ -f "$theme" ] || continue
+  name="$(basename "$theme" .css)"
+  [[ "$name" =~ ^[A-Za-z0-9_-]+$ && "$name" != default ]] || continue
+  cp -L "$theme" "$OUT/themes/$name.css"
+  theme_names="$theme_names${theme_names:+, }\"$name\""
+done
+printf '[%s]\n' "$theme_names" > "$OUT/themes/index.json"
 rm -f "$OUT/static/chart.umd.min.js"
 if [ "$OUT" != "$ROOT/docs" ]; then
   rm -rf "$OUT/demo"

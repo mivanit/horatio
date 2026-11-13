@@ -162,5 +162,9 @@ def test_build(tmp_path: Path) -> None:
     )
     assert (out / "demo" / "fake-api.js").is_file()
     assert (out / "static" / "app.js").is_file()
+    # The picker's list, and the themes it names, ship with the demo.
+    themes: list[str] = json.loads((out / "themes" / "index.json").read_text())
+    assert "light" in themes and "classic" in themes
+    assert all((out / "themes" / f"{name}.css").is_file() for name in themes)
     assert (out / "README.md").read_text() == "keep me"
     assert not (out / "static" / "stale.js").exists()

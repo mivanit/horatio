@@ -5,6 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Loading...</title>
   <link rel="stylesheet" href="/static/style.css">
+  <!-- The chosen theme (themes/README.md). Written by the parser, so it loads
+       before the scripts read colors from CSS; the name rule matches server.py. -->
+  <script>(function () {
+    var t; try { t = localStorage.getItem('horatioTheme'); } catch (e) {}
+    if (t && /^[A-Za-z0-9_-]+$/.test(t)) document.write('<link rel="stylesheet" href="themes/' + t + '.css">');
+  })();</script>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 </head>
 <body>
@@ -14,6 +20,8 @@
         <button class="reset-btn" id="reset-layout-btn" title="Reset cards to default layout">Reset Layout</button>
         <label class="poll-label">Columns:</label>
         <button class="dropdown-trigger" id="max-columns" title="Number of grid columns">3</button>
+        <label class="poll-label">Theme:</label>
+        <button class="dropdown-trigger" id="theme-select" title="Color theme (reloads the page)">default</button>
       </div>
       <div class="history-controls-group">
         <span class="history-controls-label">History</span>
@@ -381,6 +389,14 @@
       </div>
       <div class="table-container" id="processes-table"></div>
     </div>
+  </div>
+
+  <footer class="page-footer"><span id="version-label"></span></footer>
+  <!-- Shown when /api/version changes under an open page (the box was updated). -->
+  <div class="update-banner" id="update-banner" hidden>
+    <span id="update-banner-text"></span>
+    <button class="update-banner-reload" id="update-banner-reload">Reload</button>
+    <button class="update-banner-close" id="update-banner-close" title="Dismiss">×</button>
   </div>
 
   <script src="/static/chart.umd.min.js"></script>

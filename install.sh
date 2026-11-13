@@ -2,6 +2,9 @@
 # Horatio installer and updater. Idempotent: run it after every `git pull`.
 #   ./install.sh                 install or update the web service, and the hardware
 #                                collector when it is already installed on this box
+#   ./install.sh --update [vX.Y.Z|main]
+#                                move this checkout to the newest release (or the one
+#                                named, or main), then install it; other flags pass through
 #   ./install.sh --collector     also install the root hardware collector (first time)
 #   ./install.sh --no-optional   do not offer nethogs / sysstat
 #   ./install.sh --grant-capabilities
@@ -35,15 +38,148 @@ WITH_COLLECTOR=0
 OPTIONAL=1
 GRANT_CAPS=0
 UNINSTALL=0
-for arg in "$@"; do
-    case "$arg" in
+UPDATE=0
+UPDATE_REF=""
+PASSTHROUGH=()   # every flag but --update, for the updated installer
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --update)
+            UPDATE=1
+            if [ $# -gt 1 ] && [[ "$2" != -* ]]; then UPDATE_REF="$2"; shift; fi
+            shift
+            continue ;;
         --collector) WITH_COLLECTOR=1 ;;
         --no-optional) OPTIONAL=0 ;;
         --grant-capabilities) GRANT_CAPS=1 ;;
         --uninstall) UNINSTALL=1 ;;
-        *) echo "unknown option: $arg (see the header of this script)" >&2; exit 2 ;;
+        *) echo "unknown option: $1 (see the header of this script)" >&2; exit 2 ;;
     esac
+    PASSTHROUGH+=("$1")
+    shift
 done
+if [ "$UPDATE" = 1 ] && [ "$UNINSTALL" = 1 ]; then
+    echo "--update and --uninstall do not go together." >&2
+    exit 2
+fi
+
+# --- --update: move the checkout, then run the installer it now contains ---
+# Releases are vX.Y.Z tags (README: Versions and updates). A release checkout is a
+# detached HEAD; main is the development channel.
+die() { echo "Error: $*" >&2; exit 1; }
+# Compare two X.Y.Z[-pre] versions: prints -1, 0 or 1. A pre-release sorts before
+# its release; two pre-releases of one version compare equal.
+semver_cmp() {   # <a> <b>
+    local a="$1" b="$2" i x y
+    local -a pa pb
+    IFS=. read -r -a pa <<< "${a%%-*}"
+    IFS=. read -r -a pb <<< "${b%%-*}"
+    for i in 0 1 2; do
+        x=$((10#${pa[i]:-0})) y=$((10#${pb[i]:-0}))
+        if ((x < y)); then echo -1; return; fi
+        if ((x > y)); then echo 1; return; fi
+    done
+    if [[ "$a" == *-* && "$b" != *-* ]]; then echo -1
+    elif [[ "$a" != *-* && "$b" == *-* ]]; then echo 1
+    else echo 0
+    fi
+}
+SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+update_checkout() {
+    local git=(git -C "$SCRIPT_DIR")
+    command -v git > /dev/null || die "--update needs git."
+    "${git[@]}" rev-parse --git-dir > /dev/null 2>&1 \
+        || die "$SCRIPT_DIR is not a git checkout; clone https://github.com/mivanit/horatio instead."
+    local dirty
+    dirty="$("${git[@]}" status --porcelain --untracked-files=no)"
+    [ -z "$dirty" ] || die "tracked files have local changes; commit or stash them first:"$'\n'"$dirty"
+    # A checkout on another branch is someone's work in progress: never move it.
+    local branch
+    branch="$("${git[@]}" symbolic-ref --quiet --short HEAD)" || branch=""
+    [ -z "$branch" ] || [ "$branch" = main ] \
+        || die "on branch '$branch'; --update only moves main or a release checkout (git checkout main)."
+
+    echo "Fetching releases..."
+    "${git[@]}" fetch --quiet --tags origin
+    if "${git[@]}" show-ref --verify --quiet refs/heads/main \
+        && [ -n "$("${git[@]}" rev-list origin/main..main)" ]; then
+        die "local main has commits that are not on origin/main; push or drop them first."
+    fi
+
+    local old_version old_commit old_desc old_ref
+    old_version="$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")"
+    [[ "$old_version" =~ $SEMVER_RE ]] || die "VERSION is not a version: '$old_version'"
+    old_commit="$("${git[@]}" rev-parse HEAD)"
+    old_desc="$("${git[@]}" describe --tags --always)"
+    old_ref="$("${git[@]}" describe --tags --exact-match HEAD 2> /dev/null)" || old_ref="$old_commit"
+
+    local ref="$UPDATE_REF" target named=1
+    if [ "$ref" = main ]; then
+        target=origin/main
+        if [ "$branch" = main ] && [ "$old_commit" = "$("${git[@]}" rev-parse origin/main)" ]; then
+            echo "Already on the newest main ($old_desc)."
+            exit 0
+        fi
+    else
+        if [ -z "$ref" ]; then
+            named=0
+            ref="$("${git[@]}" tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)" || true
+            [ -n "$ref" ] || die "origin has no releases (vX.Y.Z tags) yet; follow main with --update main."
+        fi
+        [[ "$ref" == v* ]] || ref="v$ref"
+        "${git[@]}" rev-parse --quiet --verify "refs/tags/$ref" > /dev/null \
+            || die "no release $ref (list them: git tag -l 'v*')."
+        target="$ref"
+        if [ "$("${git[@]}" rev-parse "$ref^{commit}")" = "$old_commit" ]; then
+            echo "Already at $ref."
+            exit 0
+        fi
+    fi
+    local new_version
+    new_version="$("${git[@]}" show "$target:VERSION" 2> /dev/null | tr -d '[:space:]')" || new_version=""
+    [[ "$new_version" =~ $SEMVER_RE ]] || die "$target has no VERSION file; it predates --update."
+
+    case "$(semver_cmp "$new_version" "$old_version")" in
+        0)
+            # Same release number, other commits: main between releases.
+            [ "$named" = 1 ] || die "this checkout is v$old_version plus unreleased commits ($old_desc), and the newest release is $ref. Switch to it with --update $ref, or stay on main with --update main." ;;
+        -1)
+            [ "$named" = 1 ] || die "the newest release $ref is older than this checkout's v$old_version ($old_desc). To go back anyway: --update $ref"
+            echo "Warning: downgrading v$old_version -> v$new_version. History and config written by v$old_version may not read back." >&2 ;;
+    esac
+    # A new MAJOR version means a breaking change or a step by hand: show what changed.
+    if (( 10#${new_version%%.*} > 10#${old_version%%.*} )); then
+        echo "=== Major update v$old_version -> v$new_version: read these before relying on the box ==="
+        "${git[@]}" show "$target:CHANGELOG.md" 2> /dev/null | awk -v old="## [$old_version]" '
+            /^## \[/ { if (index($0, old) == 1) exit; show = ($0 !~ /Unreleased/) }
+            show' || true
+        echo "==="
+    fi
+
+    if [ "$target" = origin/main ]; then
+        if "${git[@]}" show-ref --verify --quiet refs/heads/main; then
+            "${git[@]}" checkout --quiet main
+            "${git[@]}" merge --quiet --ff-only origin/main
+        else
+            "${git[@]}" checkout --quiet -b main --track origin/main
+        fi
+    else
+        "${git[@]}" checkout --quiet --detach "$target"
+    fi
+    echo "Updated v$old_version ($old_desc) -> v$new_version ($("${git[@]}" describe --tags --always)). Changes: CHANGELOG.md"
+    if [[ "$old_ref" == v* ]]; then
+        echo "To go back: ./install.sh --update $old_ref"
+    else
+        echo "To go back: git checkout $old_ref && ./install.sh"
+    fi
+    echo "Running the updated installer..."
+    # The new installer does the install: it matches the code it installs. Nothing
+    # after this line runs from the old script, which git has replaced on disk.
+    exec "$SCRIPT_DIR/install.sh" ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
+}
+if [ "$UPDATE" = 1 ]; then
+    update_checkout
+fi
+
 # The collector counts as installed here when its timer unit exists.
 if [ -e /etc/systemd/system/horatio-collect.timer ]; then
     WITH_COLLECTOR=1
@@ -147,6 +283,13 @@ if [[ ! -x /usr/sbin/sendmail || ! -x /usr/bin/mail ]]; then
     echo "  The card will show 'No mail spool yet'. It needs a local-only MTA (postfix) delivering"
     echo "  root's mail to this user's spool via /etc/aliases (README: System Mail card)."
     echo ""
+fi
+
+# The commit being installed, for /api/version: the sandboxed service never runs git.
+if command -v git > /dev/null && git -C "$SCRIPT_DIR" rev-parse --git-dir > /dev/null 2>&1; then
+    git -C "$SCRIPT_DIR" describe --tags --always --dirty > "$SCRIPT_DIR/.build"
+else
+    rm -f "$SCRIPT_DIR/.build"
 fi
 
 echo "Syncing Python environment..."

@@ -2,6 +2,8 @@
 logs/
 static/chart.umd.min.js
 .password
+# the installed commit (git describe), written by install.sh for /api/version
+.build
 # per-machine configs: created from the *.example.json files by install.sh
 config.json
 # OpenWrt web root: copies made by openwrt/install.sh plus the real config
@@ -10,9 +12,15 @@ www/
 _site/
 docs/index.html
 docs/static/
+docs/themes/
 collector/health-config.json
 nginx/*.services
 !nginx/example.services
 __pycache__/
 *.pyc
 .pytest_cache/
+# themes/ ships these; any other theme is the machine's own
+themes/*
+!themes/README.md
+!themes/light.css
+!themes/classic.css

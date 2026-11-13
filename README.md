@@ -63,15 +63,45 @@ accepted the nethogs offer; those stay until removed.
 ### Update
 
 ```bash
-git pull && ./install.sh
+./install.sh --update            # to the newest release; see Versions and updates
 ```
 
-Idempotent: re-syncs the venv, re-fetches Chart.js, re-renders the unit, restarts the service,
+On a checkout that follows main (or one from before `--update` existed, once), the same is
+`git pull && ./install.sh`. Either way the install is idempotent: re-syncs the venv, re-fetches Chart.js, re-renders the unit, restarts the service,
 and re-installs the collector when it is installed on this box (its first run is synchronous,
 a minute or three on a box with many drives). The optional-tool offers repeat until the tool
 is installed, or pass `--no-optional`. Pass `--grant-capabilities` on updates only if you want to
 (re)apply the process permissions; a package upgrade of nethogs or sysstat drops them. `config.json`, `/etc/horatio/config.json`, `.password`
 and `logs/` are never touched.
+
+## Versions and updates
+
+`VERSION` holds the release; releases are `vX.Y.Z` tags with notes in
+[`CHANGELOG.md`](CHANGELOG.md), which also says what MAJOR, MINOR and PATCH mean here
+(MAJOR: something on the box has to change by hand). The page footer shows the running
+version; when the box is updated under an open page, a banner offers a reload, since the
+page's scripts are still the old ones. `GET /api/version` gives `{version, build}`, where
+`build` is the commit `install.sh` installed (`git describe`), or null.
+
+`./install.sh --update` fetches tags, checks out the newest `vX.Y.Z` (pre-releases only when
+named) and runs that version's installer; flags such as `--collector` pass through. It
+prints how to go back. It refuses to move local work: changes to tracked files, a branch
+other than main, or commits on main that origin lacks. It also refuses a downgrade unless the
+version is named, and a checkout on main past the newest release, unless you pick:
+
+```bash
+./install.sh --update v1.2.0     # that release, older ones included (with a warning)
+./install.sh --update main       # follow main: the development channel
+```
+
+A release checkout is a detached HEAD, so plain `git pull` fails there; use `--update`. A
+MAJOR update prints the changelog in between before installing.
+
+To cut a release, from a clean main: add the changes under `## [Unreleased]` in
+`CHANGELOG.md`, then `scripts/release.sh X.Y.Z` (bumps `VERSION` and `pyproject.toml`,
+relocks, dates the changelog section, commits and tags) and
+`git push origin main vX.Y.Z`. CI ([`release.yml`](.github/workflows/release.yml)) checks the
+tag against `VERSION`, runs the checks, and publishes the GitHub release.
 
 ## Uninstall
 
@@ -123,7 +153,13 @@ curl http://<host>:8080/text?style=simple         # plain ASCII, for scripts and
 | `thresholds.power_max_watts`, `power_psu_watts`, `power_warn_fraction` | the power bar's right edge, its dashed PSU line, and the orange threshold as a fraction of the PSU |
 | `limits.network_mbps`, `limits.disk_io_mbps` | ceilings (MB/s) for each network interface and each drive, because Glances' rates occasionally come out absurd (default 1250, i.e. 10 Gbit/s, and 15000). A sample over the cap counts as the cap, so a spike is shortened, not removed. Totals are the sums of the capped interfaces / drives and are not capped themselves (bridges, veths and tunnels count the same traffic more than once). Applies to the live cards, history and `/text`, not to the raw `/api/4/*` endpoints or to history on the OpenWrt backend. A record that hit a cap lists it under `rate_capped` (`metric`, `interface` or `device` + `drive`, `samples` of `of`, `raw_max`, `cap`) and the server logs it; each record notes the caps it was taken under in `rate_caps`. The server reads the limits at startup (restart after changing them); the page reads them on load. Records without `rate_caps` (recorded before the caps) are clamped when read; records with it are served as recorded, so a changed cap applies to new records only |
 
-Runtime settings (poll interval, chart length, grid columns, card order) live in the browser.
+Runtime settings (poll interval, chart length, grid columns, card order, theme) live in the browser.
+
+**Themes**: the toolbar's Theme picker lists the CSS files in `themes/`. `light` and `classic`
+ship with Horatio, and any other `themes/<name>.css` you add appears too. A theme overrides the
+color, font and shape variables in `static/style.css` and can restyle any selector. See
+[themes/README.md](themes/README.md) for how to write one (it is written so you can hand it to
+an agent along with a description of the look you want).
 History recording settings can also be changed from the page with the password; they revert to
 `config.json` on restart.
 
@@ -159,6 +195,7 @@ again, don't put this on anything besides a trusted LAN!
 | `GET /api/4/fs`              | Glances filesystems, deduplicated by device (bind mounts collapse) |
 | `GET /api/processlist`       | Process list with arguments stripped (the one the UI uses) |
 | `GET /api/list-endpoints`    | Which file-backed endpoints exist on this box (mail, storage-health, sensors) |
+| `GET /api/version`           | `{version, build}`: the running release and, on a git checkout, the commit `install.sh` installed (null otherwise) |
 | `GET /api/gpu-info`          | NVIDIA GPU details                          |
 | `GET /api/cpu-info`          | CPU details from /proc/cpuinfo              |
 | `GET /api/gpu-processes`     | GPU process list: per (GPU, pid) memory plus `gpu_util_percent` / `gpu_mem_util_percent` from `nvidia-smi pmon` (null when the driver had no sample for that pid, pmon is unavailable or slow, or the GPU is past pmon's four) |
@@ -176,6 +213,7 @@ again, don't put this on anything besides a trusted LAN!
 | `GET /api/history/settings`  | Current recording settings                  |
 | `POST /api/history/settings` | Update recording settings (password)        |
 | `GET /config.json`           | The config                                  |
+| `GET /themes/index.json`     | Theme names for the picker (`themes/*.css`) |
 | `GET /text`                  | Console report: `curl "http://<host>:8080/text?width=$COLUMNS"` (query: `view` latest/history/both, `style` unicode/ascii/simple, `color` auto/on/256/16/off, `hours` default 1-3 by width and record interval, `width` default 80, `height`, `live`, `table`, `rows`) |
 | `GET /tui.py`                | The live terminal client, served so it runs without a checkout |
 | `GET /help`                  | Plain-text guide to `/text` and the JSON API, written for people and agents |
@@ -186,11 +224,13 @@ again, don't put this on anything besides a trusted LAN!
 horatio/
 ├── server.py                    # FastAPI server + Glances subprocess + history recorder
 ├── tests/                       # pytest suites, browser fixtures, and native Lua checks
-├── scripts/                     # development helpers (native Lua/Nixio build)
+├── scripts/                     # release.sh, and development helpers (native Lua/Nixio build)
 ├── index.html, static/          # Frontend: app.js (polling, cards, history), config.js, charts.js, util.js, style.css
+├── themes/                      # optional stylesheets for the Theme picker (README.md: how to write one)
 ├── config.example.json          # -> config.json (per machine, gitignored)
 ├── horatio.service              # systemd unit template (path and user rendered by install.sh)
-├── install.sh                   # install / update / --collector / --uninstall
+├── install.sh                   # install / --update / --collector / --uninstall
+├── VERSION, CHANGELOG.md        # the release number and what each release changed
 ├── collector/                   # root collectors, their units, config example, alarm table
 ├── nginx/                       # optional reverse proxy with subdomains per service
 ├── openwrt/                     # Lua backend serving the same frontend on OpenWrt routers
@@ -267,12 +307,22 @@ reading `/proc` and `/sys` directly:
 ```bash
 cd openwrt
 sh install.sh             # install and start on port 8080 (LAN only)
+sh install.sh --update    # to the newest release (or --update vX.Y.Z), then reinstall
 sh install.sh --uninstall
 ```
 
+`--update` works on a git checkout (with `git` installed) like the Linux one, minus
+`--update main`. On a copy without `.git` it asks GitHub for the newest release, downloads
+its tarball over HTTPS (needs `libustream-mbedtls` and `ca-bundle`, on stock images), checks
+its `VERSION`, and copies it over the checkout; `www/`, `config.json` and `logs/` are not in a
+release and stay. Files a release deleted stay behind in the checkout, harmless since uhttpd
+serves only `www/`. The installer stamps the asset URLs in `www/index.html` with the version
+(`?v=`), as uhttpd sends no cache headers and browsers would keep the old scripts.
+
 Requires `uhttpd-mod-lua`, `luci-lib-jsonc`, and `luci-lib-nixio` (installed by the
 script). uhttpd serves only `www/`, never the checkout: the installer copies
-`index.html` and `static/` there, so rerun it after updating. The config lives at
+`index.html`, `static/` and `themes/` there (and lists the themes in `www/themes/index.json`),
+so rerun it after updating or adding a theme. The config lives at
 `www/config.json` (served as `/config.json`, read by the API); `config.json` in the
 checkout root is a link to it. Edit `www/config.json`: tools that replace the file
 (`sed -i`, save-by-rename editors) turn the link into a copy nobody reads, and the
