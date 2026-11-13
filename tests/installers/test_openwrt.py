@@ -521,17 +521,50 @@ class TestOpenWrtInstaller:
         assert result.returncode == 0, result.stderr + result.stdout
         self.assert_served_tree(edited)
 
-    def test_regular_root_config_replaces_stale_served_copy(
+    def two_configs(self: TestOpenWrtInstaller, root_newer: bool) -> None:
+        """A tool replaced the config.json link with a copy: two configs, one newer."""
+        (self.root / "www").mkdir()
+        (self.root / "www/config.json").write_text('{"title": "www"}')
+        (self.root / "config.json").write_text('{"title": "root"}')
+        newer: Path = self.root / ("config.json" if root_newer else "www/config.json")
+        older: Path = self.root / ("www/config.json" if root_newer else "config.json")
+        os.utime(older, (1_000_000, 1_000_000))
+        os.utime(newer, (2_000_000, 2_000_000))
+
+    def test_newer_root_copy_wins_and_served_copy_is_kept_as_bak(
         self: TestOpenWrtInstaller,
     ) -> None:
-        # An editor that replaces the link leaves a regular file; it is the newest.
-        (self.root / "www").mkdir()
-        (self.root / "www/config.json").write_text('{"title": "stale"}')
-        custom: dict[str, Any] = {"title": "Newest"}
-        (self.root / "config.json").write_text(json.dumps(custom))
+        # Edited through a tool that replaced the link: those edits are the latest.
+        self.two_configs(root_newer=True)
         result: subprocess.CompletedProcess[str] = self.run_install()
         assert result.returncode == 0, result.stderr + result.stdout
-        self.assert_served_tree(custom)
+        self.assert_served_tree({"title": "root"})
+        assert json.loads((self.root / "config.json.bak").read_text()) == {
+            "title": "www"
+        }
+
+    def test_newer_served_copy_wins_and_stray_copy_is_kept_as_bak(
+        self: TestOpenWrtInstaller,
+    ) -> None:
+        # Edited www/config.json after the link was replaced: a rerun keeps it.
+        self.two_configs(root_newer=False)
+        result: subprocess.CompletedProcess[str] = self.run_install()
+        assert result.returncode == 0, result.stderr + result.stdout
+        self.assert_served_tree({"title": "www"})
+        assert json.loads((self.root / "config.json.bak").read_text()) == {
+            "title": "root"
+        }
+
+    def test_identical_copies_merge_without_bak(
+        self: TestOpenWrtInstaller,
+    ) -> None:
+        (self.root / "www").mkdir()
+        (self.root / "www/config.json").write_text('{"title": "same"}')
+        (self.root / "config.json").write_text('{"title": "same"}')
+        result: subprocess.CompletedProcess[str] = self.run_install()
+        assert result.returncode == 0, result.stderr + result.stdout
+        self.assert_served_tree({"title": "same"})
+        assert not (self.root / "config.json.bak").exists()
 
     def test_without_themes_the_picker_list_is_empty(
         self: TestOpenWrtInstaller,

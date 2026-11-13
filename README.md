@@ -325,8 +325,9 @@ script). uhttpd serves only `www/`, never the checkout: the installer copies
 so rerun it after updating or adding a theme. The config lives at
 `www/config.json` (served as `/config.json`, read by the API); `config.json` in the
 checkout root is a link to it. Edit `www/config.json`: tools that replace the file
-(`sed -i`, save-by-rename editors) turn the link into a copy nobody reads, and the
-next install run moves that copy back into `www/`. An existing `config.json` is moved into `www/`
+(`sed -i`, save-by-rename editors) turn the link into a copy nobody reads. If both
+copies exist, the next install run keeps the newer one, saves the other as
+`config.json.bak`, and says so. An existing `config.json` is moved into `www/`
 on install, and uninstall leaves both in place. A kernel file lock serializes recording and
 rotation and releases automatically if a request worker exits. A successfully
 saved record whose rotation failed returns a warning; its original history is

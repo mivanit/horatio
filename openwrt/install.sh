@@ -292,10 +292,11 @@ printf '[%s]\n' "$theme_names" > "$WWW_DIR/themes/index.json"
 
 # Config must exist before uhttpd loads the Lua handler at startup. Preserve
 # the machine's existing config on updates, as the Linux installer does. The
-# frontend fetches /config.json from www/; the Lua handler and the documented
-# edit path use DASHBOARD_DIR/config.json, a link outside the web root.
-# A regular file there is the newest edit (first migration, or an editor that
-# replaced the link), so it wins over www/config.json.
+# frontend and the Lua handler read www/config.json; DASHBOARD_DIR/config.json is a
+# link to it, outside the web root. A regular file there is either a pre-www/
+# config (first migration) or a copy left by a tool that replaced the link
+# (sed -i, rsync, save-by-rename editors). Either copy may hold the latest edits,
+# so the newer one is kept and the other is saved as config.json.bak, never lost.
 if [ -L "$CONFIG" ]; then
     if [ "$(readlink "$CONFIG")" != "www/config.json" ]; then
         if [ ! -e "$WWW_CONFIG" ] && [ -f "$CONFIG" ]; then
@@ -304,8 +305,17 @@ if [ -L "$CONFIG" ]; then
         rm -f "$CONFIG"
     fi
 elif [ -f "$CONFIG" ]; then
-    mv -f "$CONFIG" "$WWW_CONFIG"
-    info "Moved config.json to $WWW_CONFIG (config.json now links to it)."
+    if [ ! -e "$WWW_CONFIG" ] || cmp -s "$CONFIG" "$WWW_CONFIG" 2>/dev/null; then
+        mv -f "$CONFIG" "$WWW_CONFIG"
+        info "Moved config.json to $WWW_CONFIG (config.json now links to it)."
+    elif [ "$CONFIG" -nt "$WWW_CONFIG" ]; then
+        mv -f "$WWW_CONFIG" "$CONFIG.bak"
+        mv -f "$CONFIG" "$WWW_CONFIG"
+        warn "Two configs: kept the newer $CONFIG as $WWW_CONFIG; the older one is now $CONFIG.bak."
+    else
+        mv -f "$CONFIG" "$CONFIG.bak"
+        warn "Two configs: kept the newer $WWW_CONFIG; the stray copy at $CONFIG is now $CONFIG.bak."
+    fi
 elif [ -e "$CONFIG" ]; then
     error "$CONFIG is not a regular file; move it aside and rerun."
     exit 1
