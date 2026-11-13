@@ -47,21 +47,35 @@ function getCssColor(varName) {
 // `color` at the opacity of two hex digits: withAlpha(c, '20') replaces appending '20'.
 // A theme may write any CSS color (rgb(), a name, #abc), which appending digits
 // breaks, so the canvas normalises it to #rrggbb or rgba() first.
-let _colorCtx;
 function withAlpha(color, alphaHex) {
   const alpha = parseInt(alphaHex, 16) / 255;
+  const rgba = cssRgb(color);
+  if (!rgba) return color;  // a color the canvas keeps in another space (oklch...): drawn opaque
+  return `rgba(${rgba[0]}, ${rgba[1]}, ${rgba[2]}, ${+(rgba[3] * alpha).toFixed(3)})`;
+}
+
+// [r, g, b, alpha] of any CSS color, or null for one the canvas can't express
+// as #rrggbb / rgba() (or without a canvas, for anything but #rrggbb).
+let _colorCtx;
+function cssRgb(color) {
   if (_colorCtx === undefined) _colorCtx = document.createElement('canvas').getContext?.('2d') || null;
+  if (!color) return null;
   let c = color;
   if (_colorCtx) {
+    // The canvas ignores a color it can't parse, so try it over two different
+    // starting values: an invalid one leaves them different.
     _colorCtx.fillStyle = '#000';
     _colorCtx.fillStyle = color;
     c = _colorCtx.fillStyle;
+    _colorCtx.fillStyle = '#fff';
+    _colorCtx.fillStyle = color;
+    if (_colorCtx.fillStyle !== c) return null;
   }
   let m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(c);
-  if (m) return `rgba(${parseInt(m[1], 16)}, ${parseInt(m[2], 16)}, ${parseInt(m[3], 16)}, ${+alpha.toFixed(3)})`;
+  if (m) return [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16), 1];
   m = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:[\s,/]+([\d.]+))?\s*\)$/.exec(c);
-  if (m) return `rgba(${m[1]}, ${m[2]}, ${m[3]}, ${+((m[4] === undefined ? 1 : +m[4]) * alpha).toFixed(3)})`;
-  return color;  // a color the canvas keeps in another space (oklch...): drawn opaque
+  if (m) return [+m[1], +m[2], +m[3], m[4] === undefined ? 1 : +m[4]];
+  return null;
 }
 
 // A unitless number from a CSS variable (chart font size, radii), or `fallback`.
@@ -328,7 +342,8 @@ function animateValue(element, newValue, suffix = '', decimals = 1) {
 
   function update(now) {
     const elapsed = now - start;
-    const progress = Math.min(elapsed / duration, 1);
+    // A frame's timestamp can predate `start`; a negative progress would overshoot backwards.
+  const progress = Math.min(Math.max(elapsed / duration, 0), 1);
     const eased = 1 - Math.pow(1 - progress, 3); // easeOutCubic
     const value = current + (newValue - current) * eased;
     element.textContent = value.toFixed(decimals) + suffix;

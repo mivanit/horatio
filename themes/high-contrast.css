@@ -52,6 +52,22 @@
 
   --shadow-color: rgba(0, 0, 0, 0);
   --chart-font-size: 18;
+
+  /* Value scales (CPU core bars, process table). Full brightness. */
+  --scale-low: #00ff00;
+  --scale-mid: #ffff00;
+  --scale-high: #ff3030;
+  --scale-idle: #008000;
+  --scale-info-low: #a0a0a0;
+  --scale-info-high: #00ffff;
+  --scale-mem-0: #60a060;
+  --scale-mem-1: #00c000;
+  --scale-mem-2: #00ff00;
+  --scale-mem-3: #ffff00;
+  --scale-mem-4: #ffc000;
+  --scale-mem-5: #ff8000;
+  --scale-mem-6: #ff4040;
+  --scale-mem-7: #ff0000;
 }
 
 body { font-size: 110%; }

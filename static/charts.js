@@ -274,56 +274,58 @@ function cpuCoresSpreadConfig() {
   });
 }
 
+// Value scales (CPU core bars, process table). Their colors are --scale-* in
+// style.css, read on first use; the fallbacks are the default theme's.
+const MEMORY_STEPS_MB = [100, 512, 1024, 2048, 4096, 8192, 16384];
+let _scales;
+function scaleColors() {
+  if (_scales) return _scales;
+  const rgb = (name, fallback) => cssRgb(getCssColor(name)) || fallback;
+  const defaultMemory = ['#4a7a5a', '#5a9a5a', '#7ab856', '#eed535', '#ffb020', '#ff8830', '#ff5540', '#ff3030'];
+  _scales = {
+    low: rgb('--scale-low', [34, 197, 94]),
+    mid: rgb('--scale-mid', [245, 158, 11]),
+    high: rgb('--scale-high', [239, 68, 68]),
+    idle: getCssColor('--scale-idle') || '#166534',
+    infoLow: rgb('--scale-info-low', [100, 116, 139]),
+    infoHigh: rgb('--scale-info-high', [59, 130, 246]),
+    memory: defaultMemory.map((fallback, i) => getCssColor(`--scale-mem-${i}`) || fallback),
+  };
+  return _scales;
+}
+
+function mixRgb(from, to, ratio) {
+  return `rgb(${[0, 1, 2].map(i => Math.round(from[i] + (to[i] - from[i]) * ratio)).join(', ')})`;
+}
+
+// Low to mid to high (green, yellow, red by default)
 function getCoreColor(percent) {
-  // Green to yellow to red gradient
-  if (percent < 50) {
-    const ratio = percent / 50;
-    const r = Math.round(34 + (245 - 34) * ratio);
-    const g = Math.round(197 + (158 - 197) * ratio);
-    const b = Math.round(94 + (11 - 94) * ratio);
-    return `rgb(${r}, ${g}, ${b})`;
-  } else {
-    const ratio = (percent - 50) / 50;
-    const r = Math.round(245 + (239 - 245) * ratio);
-    const g = Math.round(158 + (68 - 158) * ratio);
-    const b = Math.round(11 + (68 - 11) * ratio);
-    return `rgb(${r}, ${g}, ${b})`;
-  }
+  const s = scaleColors();
+  return percent < 50 ? mixRgb(s.low, s.mid, percent / 50) : mixRgb(s.mid, s.high, (percent - 50) / 50);
 }
 
 function getNetworkRateColor(kbps) {
-  // Dark green for very low rates (< 1 KB/s)
-  if (kbps < 1) return '#166534';
+  // Idle color for very low rates (< 1 KB/s)
+  if (kbps < 1) return scaleColors().idle;
   // Map network rate to 0-100 scale: 1 KB/s = 0%, 10 MB/s+ = 100%
   const percent = Math.min(100, (kbps / 10000) * 100);
   return getCoreColor(percent);
 }
 
-// Blue gradient for informational metrics (threads, cpu time)
-// Not red/green since high values aren't necessarily bad
+// Muted to vivid (gray-blue to blue by default) for informational metrics
+// (threads, cpu time): not the low-to-high scale, since high isn't bad here.
 function getInfoColor(value, maxValue) {
   if (!value) return null;
-  const percent = Math.min(100, (value / maxValue) * 100);
-  // Muted gray-blue to vibrant blue
-  // 0%: #64748b (slate-500), 100%: #3b82f6 (blue-500)
-  const r = Math.round(100 - (100 - 59) * (percent / 100));
-  const g = Math.round(116 - (116 - 130) * (percent / 100));
-  const b = Math.round(139 + (246 - 139) * (percent / 100));
-  return `rgb(${r}, ${g}, ${b})`;
+  const s = scaleColors();
+  return mixRgb(s.infoLow, s.infoHigh, Math.min(100, (value / maxValue) * 100) / 100);
 }
 
-// Memory color based on absolute bytes (same for RAM and GPU)
+// Memory color in 8 steps of absolute size (same for RAM and GPU)
 function getMemoryColor(bytes) {
   if (!bytes) return null;
   const mb = bytes / (1024 * 1024);
-  if (mb < 100) return '#4a7a5a';      // dim sage
-  if (mb < 512) return '#5a9a5a';      // muted green
-  if (mb < 1024) return '#7ab856';     // soft lime
-  if (mb < 2048) return '#eed535';     // yellow
-  if (mb < 4096) return '#ffb020';     // amber
-  if (mb < 8192) return '#ff8830';     // orange
-  if (mb < 16384) return '#ff5540';    // coral
-  return '#ff3030';                     // red
+  const step = MEMORY_STEPS_MB.findIndex(limit => mb < limit);
+  return scaleColors().memory[step === -1 ? MEMORY_STEPS_MB.length : step];
 }
 
 function gpuChartConfig() {

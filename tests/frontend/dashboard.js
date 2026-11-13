@@ -1121,7 +1121,7 @@ async function testThemes() {
   }
 
   // withAlpha takes any color the canvas understands, not just #rrggbb.
-  const canvasForm = { '#000': '#000000', '#abc': '#aabbcc', red: '#ff0000', '#123456': '#123456',
+  const canvasForm = { '#000': '#000000', '#fff': '#ffffff', '#abc': '#aabbcc', red: '#ff0000', '#123456': '#123456',
     'rgb(1 2 3 / 50%)': 'rgba(1, 2, 3, 0.5)' };
   const canvas = { value: '#000000', set fillStyle(c) { if (c in canvasForm) this.value = canvasForm[c]; },
     get fillStyle() { return this.value; } };
@@ -1131,6 +1131,44 @@ async function testThemes() {
   assert.equal(colors.withAlpha('#abc', 'ff'), 'rgba(170, 187, 204, 1)');
   assert.equal(colors.withAlpha('red', '80'), 'rgba(255, 0, 0, 0.502)');
   assert.equal(colors.withAlpha('rgb(1 2 3 / 50%)', '80'), 'rgba(1, 2, 3, 0.251)', 'alpha multiplies');
+  assert.equal(colors.cssRgb('not-a-color'), null, 'the canvas ignored it');
+  assert.equal(colors.cssRgb(''), null);
+  assert.equal(colors.withAlpha('not-a-color', '20'), 'not-a-color');
+
+  // Value scales: the default colors without a theme, a theme's when it sets them.
+  const scaleSource = between(charts, '// Value scales', 'function gpuChartConfig');
+  const scales = vars => {
+    const context = vm.createContext({ getCssColor: name => vars[name] || '', cssRgb: colors.cssRgb });
+    evaluate(context, scaleSource);
+    return context;
+  };
+  let s = scales({});
+  assert.equal(s.getCoreColor(0), 'rgb(34, 197, 94)');
+  assert.equal(s.getCoreColor(50), 'rgb(245, 158, 11)');
+  assert.equal(s.getCoreColor(100), 'rgb(239, 68, 68)');
+  assert.equal(s.getNetworkRateColor(0.5), '#166534');
+  assert.equal(s.getInfoColor(5, 10), 'rgb(80, 123, 193)');
+  assert.equal(s.getMemoryColor(50 * 2 ** 20), '#4a7a5a');
+  assert.equal(s.getMemoryColor(3000 * 2 ** 20), '#ffb020');
+  assert.equal(s.getMemoryColor(20000 * 2 ** 20), '#ff3030');
+  s = scales({ '--scale-low': '#123456', '--scale-high': 'red', '--scale-mem-7': '#000000' });
+  assert.equal(s.getCoreColor(0), 'rgb(18, 52, 86)');
+  assert.equal(s.getCoreColor(100), 'rgb(255, 0, 0)');
+  assert.equal(s.getMemoryColor(20000 * 2 ** 20), '#000000');
+
+  // A frame stamped before the animation started must not swing the number backwards.
+  const shown = makeDOM(['n']).elements.get('n');
+  shown.dataset.value = '10';
+  let nextFrame = null;
+  const animation = vm.createContext({
+    performance: { now: () => 0 }, requestAnimationFrame: callback => { nextFrame = callback; },
+  });
+  evaluate(animation, between(config, 'function animateValue', '// GPU colors'));
+  animation.animateValue(shown, 20, '%', 1);
+  const shownAt = t => { const frame = nextFrame; nextFrame = null; frame(t); return shown.textContent; };
+  assert.equal(shownAt(-500), '10.0%', 'a frame stamped before the start shows the old value');
+  assert.equal(shownAt(400), '20.0%');
+  assert.equal(nextFrame, null, 'and the animation ends');
 
   // The picker: options from themes/index.json; a change stores it and reloads.
   const pickerContext = (stored, fetchImpl) => {
@@ -1148,7 +1186,7 @@ async function testThemes() {
   };
   const tick = () => new Promise(resolve => setImmediate(resolve));
   const listing = async () => ({ ok: true, json: async () => ['classic', 'light', 'default', '../x', 3] });
-  let s = pickerContext('gone', listing);
+  s = pickerContext('gone', listing);
   await tick();
   assert.equal(s.store.has('horatioTheme'), false, 'a deleted theme is forgotten');
   assert.equal(s.button.textContent, 'default');

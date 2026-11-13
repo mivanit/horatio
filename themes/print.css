@@ -51,7 +51,7 @@
   --color-load-15m: #a0a0a0;
   --color-accent: #000000;
 
-  --font-family: Georgia, 'Times New Roman', serif;
+  --font-family: serif;
   --radius-xs: 0;
   --radius-sm: 0;
   --radius: 0;
@@ -59,6 +59,22 @@
   --radius-xl: 0;
   --shadow-color: rgba(0, 0, 0, 0);
   --chart-radius: 0;
+
+  /* Value scales (CPU core bars, process table). Grey to black: more ink means more load. */
+  --scale-low: #b0b0b0;
+  --scale-mid: #707070;
+  --scale-high: #000000;
+  --scale-idle: #d0d0d0;
+  --scale-info-low: #a0a0a0;
+  --scale-info-high: #000000;
+  --scale-mem-0: #c8c8c8;
+  --scale-mem-1: #b0b0b0;
+  --scale-mem-2: #989898;
+  --scale-mem-3: #808080;
+  --scale-mem-4: #606060;
+  --scale-mem-5: #404040;
+  --scale-mem-6: #202020;
+  --scale-mem-7: #000000;
 }
 
 /* E-ink redraws slowly and smears fades: no animation, no transitions. */

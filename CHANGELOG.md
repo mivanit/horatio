@@ -15,6 +15,11 @@ section into the release.
 
 ## [Unreleased]
 
+- Themes can set the value scales (the CPU core bars and the process table's numbers)
+  with the `--scale-*` variables; every shipped theme does, so light and print read
+  properly. Classic, print and phosphor use the system's default fonts.
+- Fix: a number animating to a new value could briefly swing the wrong way.
+
 ## [0.1.0] - 2026-11-13
 
 First versioned release.

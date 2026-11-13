@@ -39,6 +39,13 @@ Groups:
 - **Shape**: `--radius-xs` to `--radius-xl`, `--shadow-color`.
 - **Charts**: `--chart-font-size` and `--chart-radius`, unitless numbers
   (write `12`, not `12px`).
+- **Value scales** (`--scale-*`): the colors for "how much" on the CPU core
+  bars and the process table's numbers. Load, CPU and rates blend
+  `--scale-low` → `--scale-mid` → `--scale-high`; a rate under 1 KB/s is
+  `--scale-idle`; CPU time and threads blend `--scale-info-low` →
+  `--scale-info-high`; memory uses `--scale-mem-0` to `--scale-mem-7`, one per
+  size step. Blends need colors the canvas can read as RGB (hex, `rgb()`,
+  names).
 - **`color-scheme`**: `dark` by default; a light theme sets `light` so that
   native inputs and scrollbars match.
 
@@ -84,8 +91,4 @@ To square every corner, including round dots and pills,
 ## Not themeable
 
 - The favicon.
-- The value scales in `static/charts.js` (`getCoreColor`, `getNetworkRateColor`,
-  `getInfoColor`, `getMemoryColor`). They color the per-core CPU bars and the
-  process table's numbers. They are fixed and tuned for dark backgrounds, so on
-  a light theme some of those numbers have weak contrast.
 - The terminal view (`/text`, `tui.py`).

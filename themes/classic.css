@@ -49,7 +49,7 @@
   --color-load-15m: #604000;
   --color-accent: #000080;
 
-  --font-family: Tahoma, 'MS Sans Serif', Geneva, 'Segoe UI', sans-serif;
+  --font-family: sans-serif;
   --radius-xs: 0;
   --radius-sm: 0;
   --radius: 0;
@@ -62,6 +62,22 @@
   /* Bevels: light top-left, dark bottom-right (raised), reversed (sunken). */
   --bevel-raised: inset -1px -1px #000, inset 1px 1px #fff, inset -2px -2px #808080, inset 2px 2px #dfdfdf;
   --bevel-sunken: inset -1px -1px #fff, inset 1px 1px #808080, inset -2px -2px #dfdfdf, inset 2px 2px #000;
+
+  /* Value scales (CPU core bars, process table). Saturated darks that read on grey. */
+  --scale-low: #008000;
+  --scale-mid: #b08000;
+  --scale-high: #c00000;
+  --scale-idle: #607860;
+  --scale-info-low: #606060;
+  --scale-info-high: #000080;
+  --scale-mem-0: #507050;
+  --scale-mem-1: #008000;
+  --scale-mem-2: #408000;
+  --scale-mem-3: #808000;
+  --scale-mem-4: #a06000;
+  --scale-mem-5: #c04000;
+  --scale-mem-6: #c02000;
+  --scale-mem-7: #c00000;
 }
 
 /* Square everything, including round status dots and pills. */

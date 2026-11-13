@@ -76,6 +76,25 @@
   --radius-xl: 12px;                /* cards, pills */
   --shadow-color: rgba(0, 0, 0, 0.5);
 
+  /* Value scales (read by JS): CPU core bars and the process table's numbers.
+     Load and rates run low -> mid -> high; idle is a rate under 1 KB/s;
+     info (CPU time, threads) runs info-low -> info-high; memory has one color
+     per size step: <100 MB, <512 MB, <1, <2, <4, <8, <16 GB, and above. */
+  --scale-low: #22c55e;
+  --scale-mid: #f59e0b;
+  --scale-high: #ef4444;
+  --scale-idle: #166534;
+  --scale-info-low: #64748b;
+  --scale-info-high: #3b82f6;
+  --scale-mem-0: #4a7a5a;
+  --scale-mem-1: #5a9a5a;
+  --scale-mem-2: #7ab856;
+  --scale-mem-3: #eed535;
+  --scale-mem-4: #ffb020;
+  --scale-mem-5: #ff8830;
+  --scale-mem-6: #ff5540;
+  --scale-mem-7: #ff3030;
+
   /* Charts (read by JS; unitless numbers) */
   --chart-font-size: 16;
   --chart-radius: 2;

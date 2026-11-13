@@ -49,4 +49,20 @@
   --color-accent: #2563eb;
 
   --shadow-color: rgba(15, 23, 42, 0.15);
+
+  /* Value scales (CPU core bars, process table). Darker than the default so the numbers read on white. */
+  --scale-low: #16a34a;
+  --scale-mid: #d97706;
+  --scale-high: #dc2626;
+  --scale-idle: #a3c9ae;
+  --scale-info-low: #94a3b8;
+  --scale-info-high: #2563eb;
+  --scale-mem-0: #9db8a6;
+  --scale-mem-1: #6f9f6f;
+  --scale-mem-2: #4d8a2a;
+  --scale-mem-3: #a68a00;
+  --scale-mem-4: #c27c0e;
+  --scale-mem-5: #d9620f;
+  --scale-mem-6: #dc3a2a;
+  --scale-mem-7: #c81e1e;
 }

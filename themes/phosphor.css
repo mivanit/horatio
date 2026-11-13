@@ -50,7 +50,6 @@
   --color-load-15m: #88cc00;
   --color-accent: #33ff66;
 
-  --font-family: 'VT323', 'IBM Plex Mono', 'Fira Code', 'DejaVu Sans Mono', monospace;
   --radius-xs: 0;
   --radius-sm: 0;
   --radius: 0;
@@ -58,6 +57,22 @@
   --radius-xl: 0;
   --shadow-color: rgba(51, 255, 102, 0.25);
   --chart-radius: 0;
+
+  /* Value scales (CPU core bars, process table). Phosphor green up through amber to red. */
+  --scale-low: #33ff66;
+  --scale-mid: #ffcc00;
+  --scale-high: #ff3333;
+  --scale-idle: #12702c;
+  --scale-info-low: #178a36;
+  --scale-info-high: #00e5ff;
+  --scale-mem-0: #178a36;
+  --scale-mem-1: #1fa843;
+  --scale-mem-2: #33ff66;
+  --scale-mem-3: #ccff00;
+  --scale-mem-4: #ffcc00;
+  --scale-mem-5: #ff9900;
+  --scale-mem-6: #ff5533;
+  --scale-mem-7: #ff3333;
 }
 
 /* Phosphor bloom on text, and on the charts (a canvas takes CSS filters). */
