@@ -15,7 +15,7 @@ section into the release.
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-11-12
+## [0.1.0] - 2026-11-13
 
 First versioned release.
 
