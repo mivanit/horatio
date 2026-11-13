@@ -158,6 +158,7 @@ def test_main_between_releases_needs_an_explicit_choice(repos: Repos) -> None:
     result = repos.update("v0.1.0")
     assert result.returncode == 0, result.stderr
     assert repos.head() == "v0.1.0" and repos.ran() == ""
+    assert "To go back: git checkout main && ./install.sh" in result.stdout
 
 
 def test_downgrade_only_when_named(repos: Repos) -> None:

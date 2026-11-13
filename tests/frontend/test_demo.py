@@ -109,6 +109,8 @@ vm.runInContext(fs.readFileSync(apiPath, 'utf8'), context);
   const since = new Date((hist.now - 1800) * 1000).toISOString();
   const delta = route('GET', '/api/history', new URLSearchParams({ hours: '24', since }))[1];
   assert(delta.count >= 2 && delta.count <= 3, `since= returns only newer records, got ${delta.count}`);
+  const year = route('GET', '/api/history', new URLSearchParams('hours=8760'))[1];
+  assert.equal(year.now - year.cutoff, 30 * 86400, 'a range past the 30 days held is clamped to them');
   const temps = route('GET', '/api/history/field/temps', new URLSearchParams('hours=1'))[1];
   assert(temps.records.every(r => r.temps && r.timestamp));
   // Endpoint list as the server's.
@@ -168,3 +170,17 @@ def test_build(tmp_path: Path) -> None:
     assert all((out / "themes" / f"{name}.css").is_file() for name in themes)
     assert (out / "README.md").read_text() == "keep me"
     assert not (out / "static" / "stale.js").exists()
+
+
+def test_build_refuses_checkout() -> None:
+    """Building into the checkout would replace index.html and static/ themselves."""
+    result: subprocess.CompletedProcess[str] = subprocess.run(
+        [str(ROOT / "docs" / "build-demo.sh"), str(ROOT)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "HORATIO_DEMO_SKIP_CHARTJS": "1"},
+    )
+    assert result.returncode != 0
+    assert "checkout itself" in result.stderr
+    assert (ROOT / "static" / "app.js").is_file()

@@ -178,8 +178,14 @@ update_checkout() {   # [vX.Y.Z]
         mkdir "$work/tree"
         # gzip | tar rather than tar -z, which some BusyBox builds lack.
         gzip -dc "$work/release.tar.gz" | tar -xf - -C "$work/tree" || die "Could not unpack $ref."
+        # GitHub's archive holds one horatio-X.Y.Z/ directory. Match directories only:
+        # a BusyBox tar without pax support unpacks pax_global_header as a file.
         src=""
-        for dir in "$work/tree"/*; do src="$dir"; done   # GitHub's horatio-X.Y.Z/
+        for dir in "$work/tree"/*/; do
+            [ -z "$src" ] || die "The $ref download has more than one top directory."
+            src="${dir%/}"
+        done
+        [ -d "$src" ] || die "The $ref download is empty."
         [ "$(read_version "$src")" = "$new_version" ] \
             || die "The $ref download does not contain VERSION $new_version; nothing was changed."
         for local_state in config.json www logs .password; do

@@ -1,0 +1,75 @@
+/* Print: white paper, black ink, greys only. For screenshots in reports,
+   printing, and e-ink displays (no color, no fades). See themes/README.md. */
+:root {
+  color-scheme: light;
+
+  --bg-body: #ffffff;
+  --bg-card: #ffffff;
+  --bg-elevated: #f2f2f2;
+  --bg-input: #ffffff;
+  --bg-input-hover: #e6e6e6;
+  --bg-bar: #e6e6e6;
+
+  /* Also the chart grid: light so the data lines carry the ink; edges are set below. */
+  --border-color: #c8c8c8;
+  --border-subtle: #999999;
+  --border-strong: #000000;
+  --border-strong-hover: #000000;
+
+  --text-primary: #000000;
+  --text-secondary: #000000;
+  --text-muted: #333333;
+  --text-dim: #555555;
+  --text-faint: #777777;
+  --text-title: #000000;
+  --text-bad: #000000;
+  --text-input: #000000;
+
+  /* Status is carried by weight and fill, not hue: black is bad, grey is fine. */
+  --color-success: #555555;
+  --color-error: #000000;
+  --color-error-light: #333333;
+  --color-warning: #000000;
+  --color-partial: #444444;
+  --color-proc-running: #000000;
+
+  /* Series alternate black and mid-grey so neighbours stay apart. */
+  --color-download: #000000;
+  --color-upload: #808080;
+  --color-read: #000000;
+  --color-write: #808080;
+  --color-gpu: #000000;
+  --color-cpu-cores: #000000;
+  --color-cpu-freq: #555555;
+  --color-gpu-mem: #808080;
+  --color-swap: #555555;
+  --color-ping-0: #000000;
+  --color-ping-1: #808080;
+  --color-ping-2: #b0b0b0;
+  --color-temp-mid: #808080;
+  --color-load-5m: #555555;
+  --color-load-15m: #a0a0a0;
+  --color-accent: #000000;
+
+  --font-family: Georgia, 'Times New Roman', serif;
+  --radius-xs: 0;
+  --radius-sm: 0;
+  --radius: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --shadow-color: rgba(0, 0, 0, 0);
+  --chart-radius: 0;
+}
+
+/* E-ink redraws slowly and smears fades: no animation, no transitions. */
+*, *::before, *::after { transition: none !important; animation: none !important; }
+
+.card { border-color: #000000; }
+.card h2 { color: #000000; font-weight: 700; }
+/* A card over its threshold gets a heavy frame instead of a tint. */
+.card.warning { background: #ffffff; border-width: 3px; }
+
+@media print {
+  .top-controls, .drag-handle, .history-btn, .refresh-btn, .refresh-btn-small { display: none; }
+  .card { break-inside: avoid; }
+}

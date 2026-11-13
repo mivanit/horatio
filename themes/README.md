@@ -15,8 +15,11 @@ in the toolbar lists every theme here; each browser remembers its own choice
   files, since uhttpd won't serve them).
 - **Iterating**: the server sends themes with `Cache-Control: no-cache`, so a
   plain reload shows an edit. On OpenWrt, use a hard reload.
-- **Shipped examples**: `light.css` changes only variables; `classic.css`
-  (a 1990s desktop) also restyles selectors.
+- **Shipped examples**: `light.css` changes only variables. The others also
+  restyle selectors: `classic.css` (a 1990s desktop), `high-contrast.css`
+  (black and white, heavy edges), `print.css` (black ink on white, no motion;
+  for reports, printing and e-ink), and `phosphor.css` (a green-screen
+  terminal with scanlines and glowing chart lines).
 
 ## Variables
 

@@ -24,3 +24,6 @@ themes/*
 !themes/README.md
 !themes/light.css
 !themes/classic.css
+!themes/high-contrast.css
+!themes/print.css
+!themes/phosphor.css

@@ -72,6 +72,11 @@ class Router:
             **(extra or {}),
         }
         with tarfile.open(self.tmp / "release.tar.gz", "w:gz") as tar:
+            # What a BusyBox tar without pax support leaves of GitHub's global
+            # header: a file that sorts after horatio-<version>/.
+            stray: tarfile.TarInfo = tarfile.TarInfo("pax_global_header")
+            stray.size = 3
+            tar.addfile(stray, io.BytesIO(b"abc"))
             for path, text in files.items():
                 data: bytes = text.encode()
                 info: tarfile.TarInfo = tarfile.TarInfo(f"horatio-{version}/{path}")

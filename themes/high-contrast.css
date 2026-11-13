@@ -1,0 +1,75 @@
+/* High contrast: pure black and white, saturated series colors, heavy edges.
+   For bright rooms, projectors and low vision. See themes/README.md. */
+:root {
+  color-scheme: dark;
+
+  --bg-body: #000000;
+  --bg-card: #000000;
+  --bg-elevated: #000000;
+  --bg-input: #000000;
+  --bg-input-hover: #333333;
+  --bg-bar: #333333;
+
+  /* Also the chart grid: kept grey so data lines stand out; edges are set below. */
+  --border-color: #777777;
+  --border-subtle: #ffffff;
+  --border-strong: #ffffff;
+  --border-strong-hover: #ffff00;
+
+  --text-primary: #ffffff;
+  --text-secondary: #ffffff;
+  --text-muted: #e0e0e0;
+  --text-dim: #d0d0d0;
+  --text-faint: #c0c0c0;
+  --text-title: #ffffff;
+  --text-bad: #ff5050;
+  --text-input: #ffffff;
+
+  --color-success: #00ff00;
+  --color-error: #ff3030;
+  --color-error-light: #ff6060;
+  --color-warning: #ffff00;
+  --color-partial: #ffd000;
+  --color-proc-running: #00ff00;
+
+  /* Fully saturated and far apart in hue, so series stay distinct. */
+  --color-download: #00ffff;
+  --color-upload: #ff8000;
+  --color-read: #00ff00;
+  --color-write: #ff3030;
+  --color-gpu: #ff00ff;
+  --color-cpu-cores: #00ffff;
+  --color-cpu-freq: #4090ff;
+  --color-gpu-mem: #ff60c0;
+  --color-swap: #c080ff;
+  --color-ping-0: #ffff00;
+  --color-ping-1: #ff00ff;
+  --color-ping-2: #00ffff;
+  --color-temp-mid: #ffd000;
+  --color-load-5m: #ffd000;
+  --color-load-15m: #ff8000;
+  --color-accent: #ffff00;
+
+  --shadow-color: rgba(0, 0, 0, 0);
+  --chart-font-size: 18;
+}
+
+body { font-size: 110%; }
+
+/* Heavy edges on everything that has one. */
+.card { border-width: 2px; }
+.card.warning { border-width: 3px; }
+.reset-btn, .dropdown-trigger, .dropdown-trigger-small, .toggle-btn,
+.history-btn, .history-icon-btn, .history-settings-btn, .refresh-btn,
+.refresh-btn-small, .range-toggle, .mode-toggle-btn, .unit-toggle-btn,
+.dropdown-picker, .history-settings-popup, .status-tooltip,
+#data-tip-tooltip, #ping-tooltip, .toast {
+  border-width: 2px;
+  border-color: #ffffff;
+}
+.card { border-color: #ffffff; }
+.card.warning { border-color: var(--color-warning); }
+.card h2 { color: #ffffff; font-weight: 700; }
+
+/* Keyboard focus you can see across the room. */
+:focus-visible { outline: 3px solid #ffff00; outline-offset: 2px; }

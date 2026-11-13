@@ -7,12 +7,16 @@
 # docs/ itself (`make demo`; those copies are gitignored there).
 # HORATIO_DEMO_SKIP_CHARTJS=1 skips the Chart.js download (the offline tests).
 set -euo pipefail
+# Byte-order globbing, so themes/index.json lists names as server.py's sorted() does.
+export LC_ALL=C
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-_site}"
 
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
+# The checkout's own index.html and static/ are the sources, never the output.
+[ "$OUT" != "$ROOT" ] || { echo "error: outdir is the checkout itself" >&2; exit 1; }
 rm -rf "$OUT/index.html" "$OUT/static" "$OUT/themes"
 cp "$ROOT/index.html" "$OUT/index.html"
 cp -RL "$ROOT/static" "$OUT/static"
@@ -56,10 +60,12 @@ html="$OUT/index.html"
 grep -q '"/static/' "$html" || { echo "error: no /static/ references in index.html" >&2; exit 1; }
 grep -q '<script src="/static/chart.umd.min.js"></script>' "$html" \
   || { echo "error: Chart.js script tag not found in index.html" >&2; exit 1; }
-sed -i \
-  -e 's#<script src="/static/chart.umd.min.js"></script>#<script src="demo/fake-api.js"></script>\n  &#' \
+# Portable sed: no -i, and the inserted tag shares Chart.js's line.
+sed \
+  -e 's#<script src="/static/chart.umd.min.js"></script>#<script src="demo/fake-api.js"></script>&#' \
   -e 's#"/static/#"static/#g' \
-  "$html"
+  "$html" > "$html.tmp"
+mv "$html.tmp" "$html"
 if grep -q '"/static/' "$html"; then
   echo "error: absolute /static/ references left in $html" >&2
   exit 1

@@ -168,13 +168,15 @@ update_checkout() {
     echo "Updated v$old_version ($old_desc) -> v$new_version ($("${git[@]}" describe --tags --always)). Changes: CHANGELOG.md"
     if [[ "$old_ref" == v* ]]; then
         echo "To go back: ./install.sh --update $old_ref"
+    elif [ "$branch" = main ] && [ "$target" != origin/main ]; then
+        echo "To go back: git checkout main && ./install.sh"   # main itself did not move
     else
         echo "To go back: git checkout $old_ref && ./install.sh"
     fi
     echo "Running the updated installer..."
     # The new installer does the install: it matches the code it installs. Nothing
     # after this line runs from the old script, which git has replaced on disk.
-    exec "$SCRIPT_DIR/install.sh" ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
+    exec bash "$SCRIPT_DIR/install.sh" ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}
 }
 if [ "$UPDATE" = 1 ]; then
     update_checkout
@@ -286,9 +288,9 @@ if [[ ! -x /usr/sbin/sendmail || ! -x /usr/bin/mail ]]; then
 fi
 
 # The commit being installed, for /api/version: the sandboxed service never runs git.
-if command -v git > /dev/null && git -C "$SCRIPT_DIR" rev-parse --git-dir > /dev/null 2>&1; then
-    git -C "$SCRIPT_DIR" describe --tags --always --dirty > "$SCRIPT_DIR/.build"
-else
+# Best effort: a git problem here must not stop the install, only blank the build.
+if ! { command -v git > /dev/null \
+        && git -C "$SCRIPT_DIR" describe --tags --always --dirty > "$SCRIPT_DIR/.build" 2> /dev/null; }; then
     rm -f "$SCRIPT_DIR/.build"
 fi
 

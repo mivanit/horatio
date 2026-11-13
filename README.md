@@ -155,8 +155,8 @@ curl http://<host>:8080/text?style=simple         # plain ASCII, for scripts and
 
 Runtime settings (poll interval, chart length, grid columns, card order, theme) live in the browser.
 
-**Themes**: the toolbar's Theme picker lists the CSS files in `themes/`. `light` and `classic`
-ship with Horatio, and any other `themes/<name>.css` you add appears too. A theme overrides the
+**Themes**: the toolbar's Theme picker lists the CSS files in `themes/`. `light`, `classic`,
+`high-contrast`, `print` (also for e-ink) and `phosphor` ship with Horatio, and any other `themes/<name>.css` you add appears too. A theme overrides the
 color, font and shape variables in `static/style.css` and can restyle any selector. See
 [themes/README.md](themes/README.md) for how to write one (it is written so you can hand it to
 an agent along with a description of the look you want).

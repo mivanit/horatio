@@ -82,7 +82,13 @@
   ];
 
   // Everything that moves, at time t (epoch seconds). Live polls and history share it.
+  // A history record asks for its own t several times (snapshots, processes): keep the last.
+  let lastT = null, lastState = null;
   function state(t) {
+    if (t !== lastT) { lastState = computeState(t); lastT = t; }
+    return lastState;
+  }
+  function computeState(t) {
     const d = diurnal(t);
     // The training job runs in multi-hour stretches; the backup nightly 02:00-02:40.
     const training = noise('job', t, 5400) > 0.3;
@@ -364,7 +370,8 @@
   const SIDE_FIELDS = ['processes', 'temps'];
   function history(query, field) {
     const t = now();
-    const hours = clamp(Number(query.get('hours')) || 24, 0.1, 8760);
+    // Clamped like the server's history.max_hours (CONFIG.history below).
+    const hours = clamp(Number(query.get('hours')) || 24, 0.1, 24 * HISTORY_DAYS);
     const cutoff = t - hours * 3600;
     const since = query.get('since') ? Date.parse(query.get('since')) / 1000 : null;
     const records = recordsBetween(since != null && since > cutoff ? since : cutoff, t);
@@ -411,7 +418,7 @@
     '/history/field/processes', '/mail', '/storage-health', '/sensors', '/version', '/list-endpoints',
   ];
 
-  // Path (after /api) -> (query, t) => body. A body of `undefined` is a 404.
+  // Path (after /api) -> (query, t) => body, served with status 200.
   const GET = {
     '/list-endpoints': () => ({ endpoints: ENDPOINTS, backend: 'python' }),
     '/version': () => ({ version: 'demo', build: null }),
@@ -477,8 +484,9 @@
   };
   SIDE_FIELDS.forEach(f => { GET['/history/field/' + f] = q => history(q, f); });
 
+  // Path (after /api) -> () => [status, body].
   const POST = {
-    '/history/record': () => ({ status: 'skipped', reason: 'demo' }),
+    '/history/record': () => [200, { status: 'skipped', reason: 'demo' }],
     '/history/settings': () => [403, { error: 'This is a read-only demo: settings cannot be saved.' }],
   };
 
@@ -502,10 +510,8 @@
     if (path === '/config.json') return method === 'GET' ? [200, CONFIG] : [405, { error: 'Method not allowed' }];
     if (!path.startsWith('/api/')) return null;
     const sub = path.slice(4);
-    const handler = (method === 'POST' ? POST : GET)[sub];
-    if (!handler) return [404, { error: 'Not found' }];
-    const out = handler(query, now());
-    return Array.isArray(out) && out.length === 2 && typeof out[0] === 'number' ? out : [200, out];
+    if (method === 'POST') return POST[sub] ? POST[sub]() : [404, { error: 'Not found' }];
+    return GET[sub] ? [200, GET[sub](query, now())] : [404, { error: 'Not found' }];
   }
 
   const realFetch = globalThis.fetch && globalThis.fetch.bind(globalThis);

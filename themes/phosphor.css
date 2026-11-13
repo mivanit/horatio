@@ -1,0 +1,100 @@
+/* Phosphor: a green-screen terminal. Green on black, monospace, glowing text,
+   scanlines; chart series keep their own colors so the lines stay readable.
+   See themes/README.md. */
+:root {
+  color-scheme: dark;
+
+  --bg-body: #000000;
+  --bg-card: #020a03;
+  --bg-elevated: #041207;
+  --bg-input: #020a03;
+  --bg-input-hover: #0a2a10;
+  --bg-bar: #0a2a10;
+
+  --border-color: #0f5a1c;
+  --border-subtle: #0f5a1c;
+  --border-strong: #1f8f33;
+  --border-strong-hover: #33ff66;
+
+  --text-primary: #33ff66;
+  --text-secondary: #2bd957;
+  --text-muted: #1fa843;
+  --text-dim: #178a36;
+  --text-faint: #12702c;
+  --text-title: #66ff8c;
+  --text-bad: #ff4040;
+  --text-input: #33ff66;
+
+  --color-success: #33ff66;
+  --color-error: #ff3333;
+  --color-error-light: #ff6666;
+  --color-warning: #ffcc00;
+  --color-partial: #ccff00;
+  --color-proc-running: #33ff66;
+
+  /* Bright, terminal-palette series: the glow below makes them read as light. */
+  --color-download: #00e5ff;
+  --color-upload: #ffb000;
+  --color-read: #33ff66;
+  --color-write: #ff3366;
+  --color-gpu: #d070ff;
+  --color-cpu-cores: #00ffcc;
+  --color-cpu-freq: #66b3ff;
+  --color-gpu-mem: #ff66cc;
+  --color-swap: #b080ff;
+  --color-ping-0: #ffcc00;
+  --color-ping-1: #d070ff;
+  --color-ping-2: #00e5ff;
+  --color-temp-mid: #ccff00;
+  --color-load-5m: #ccff00;
+  --color-load-15m: #88cc00;
+  --color-accent: #33ff66;
+
+  --font-family: 'VT323', 'IBM Plex Mono', 'Fira Code', 'DejaVu Sans Mono', monospace;
+  --radius-xs: 0;
+  --radius-sm: 0;
+  --radius: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --shadow-color: rgba(51, 255, 102, 0.25);
+  --chart-radius: 0;
+}
+
+/* Phosphor bloom on text, and on the charts (a canvas takes CSS filters). */
+body { text-shadow: 0 0 4px rgba(51, 255, 102, 0.55); }
+.chart-container canvas,
+.history-chart-container canvas { filter: drop-shadow(0 0 3px rgba(51, 255, 102, 0.35)); }
+
+/* Scanlines and a vignette over the whole screen; clicks pass through. */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10000;
+  background:
+    repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0) 0, rgba(0, 0, 0, 0) 2px, rgba(0, 0, 0, 0.28) 3px),
+    radial-gradient(ellipse at center, rgba(0, 0, 0, 0) 60%, rgba(0, 0, 0, 0.55) 100%);
+}
+
+/* Terminal chrome: prompts and brackets instead of boxes. */
+.card { box-shadow: 0 0 12px rgba(51, 255, 102, 0.12) inset; }
+.card h2 { text-transform: lowercase; letter-spacing: 0; }
+.card h2::before { content: '> '; color: var(--text-muted); }
+h1::before { content: '~$ '; color: var(--text-muted); }
+h1::after { content: '_'; animation: phosphor-blink 1s steps(1) infinite; }
+@keyframes phosphor-blink { 50% { opacity: 0; } }
+
+.reset-btn, .dropdown-trigger, .toggle-btn, .history-settings-btn {
+  text-transform: lowercase;
+}
+.reset-btn::before, .toggle-btn::before { content: '['; }
+.reset-btn::after, .toggle-btn::after { content: ']'; }
+
+.dropdown-picker-item:hover, .dropdown-picker-item.active {
+  background: var(--text-primary);
+  color: #000000;
+  text-shadow: none;
+}
+
+::selection { background: #33ff66; color: #000000; }

@@ -26,5 +26,8 @@ First versioned release.
 - Optional root hardware collector: SMART, RAID, ECC, IPMI fans/temps/power, RAPL.
 - `/text` console report and the `tui.py` live terminal view.
 - OpenWrt backend in Lua serving the same frontend.
+- Themes: the stylesheets in `themes/`, or your own, picked from the toolbar.
+- Demo site (`docs/`, deployed to GitHub Pages): the real frontend against a fake
+  in-browser backend; `make demo` previews it locally.
 - Versioning: `VERSION`, `/api/version`, the version in the page footer with a reload
   prompt after an update, and `install.sh --update` on Linux and OpenWrt.
