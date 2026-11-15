@@ -227,7 +227,7 @@ async function testIpInfoTimeout() {
       clearTimeout(timer) { timers.delete(timer); clearTimeout(timer); },
       updateCardNoData: (id, ok) => { statuses[id] = ok; }, updateCacheDisplay() {}, escapeHtml: String,
       renderGpuInfo() {}, renderDrives() {}, renderMail() {}, renderHardware() {},
-      renderDriveHealth() {}, renderSystemInfo() {}, checkVersion() {},
+      renderDriveHealth() {}, renderSystemInfo() {},
       diskCapture: { handleResponse() {} }, networkCapture: { handleResponse() {} },
     });
     evaluate(context,
@@ -733,7 +733,7 @@ async function testStaticInfoRecovery() {
     renderSystemInfo(data, uptime) { rendered.system.push({ data, uptime }); statuses['system-info'] = true; },
     updateCardNoData(id, ok) { statuses[id] = ok; },
     renderGpuInfo() {}, renderDrives() {}, renderIpInfo() {}, renderMail() {}, renderHardware() {}, renderDriveHealth() {},
-    checkVersion() {}, diskCapture: { handleResponse() {} }, networkCapture: { handleResponse() {} },
+    diskCapture: { handleResponse() {} }, networkCapture: { handleResponse() {} },
   });
   evaluate(context,
     between(config, 'const dataCache =', '// The CPU core temperatures') +
@@ -796,7 +796,6 @@ async function testSlowPollRenderIsolation() {
     renderCpuInfo: record('cpu'), renderSystemInfo: record('system'), renderDrives: record('drives'),
     renderIpInfo: record('ip'), renderMail: record('mail'), renderDriveHealth: record('drive-health'),
     diskCapture: { handleResponse: record('disk') }, networkCapture: { handleResponse: record('network') },
-    checkVersion: record('version'),
   });
   evaluate(context,
     between(config, 'const dataCache =', '// The CPU core temperatures') +
@@ -806,13 +805,12 @@ async function testSlowPollRenderIsolation() {
   await context.fetchSlowData();
   assert.deepEqual(statuses, { 'gpu-info': false, hardware: false }, 'only the throwing cards are marked failed');
   assert.deepEqual(rendered.sort(),
-    ['cpu', 'disk', 'drive-health', 'drives', 'ip', 'mail', 'network', 'system', 'version'],
-    'every other card still renders, and the version is checked');
+    ['cpu', 'disk', 'drive-health', 'drives', 'ip', 'mail', 'network', 'system'], 'every other card still renders');
   assert.equal(errors.length, 2);
 }
 
 async function testCaptureCacheAge() {
-  let now = 103000, captureError = false;
+  let now = 103000, captureError = false, captureDelay = 0;
   const calls = {};
   const context = vm.createContext({
     Date: { now: () => now }, console: { error() {}, warn() {} },
@@ -821,9 +819,10 @@ async function testCaptureCacheAge() {
     nethogsDuration: 3, diskDuration: 1, API_BASE: '/api/4',
     getDiskTimeout: () => 6500, getNethogsTimeout: () => 9500,
     renderUnifiedProcesses() {}, renderGpuInfo() {}, renderCpuInfo() {}, renderDrives() {}, renderIpInfo() {},
-    renderMail() {}, renderHardware() {}, renderDriveHealth() {}, renderSystemInfo() {}, checkVersion() {},
+    renderMail() {}, renderHardware() {}, renderDriveHealth() {}, renderSystemInfo() {},
     async safeFetch(url) {
       calls[url] = (calls[url] || 0) + 1;
+      if (url.includes('network-processes')) now += captureDelay;  // the tick's captures take time
       const data = url.includes('processes')
         ? captureError ? { error: 'capture failed' } : [{ pid: 100, name: 'worker' }]
         : url.endsWith('/fs') ? [] : url.endsWith('/uptime') ? '1h' : {};
@@ -840,24 +839,41 @@ async function testCaptureCacheAge() {
   await context.fetchSlowData();  // Initial captures complete three seconds after startup.
   const timestamp = name => evaluate(context, `${name}Capture.getTimestamp()`);
   const capturedAt = name => evaluate(context, `${name}Capture.lastCaptureTime`);
-  now = 130000;  // The regular slow poll reuses a still-valid 27-second-old result.
-  assert.equal(timestamp('network'), '27s ago');
+  const url = name => `/api/${name}-processes?duration=${name === 'network' ? 3 : 1}`;
+  now = 120000;  // A manual refresh of another card reuses a still-valid 17-second-old result.
+  assert.equal(timestamp('network'), '17s ago');
   await context.fetchSlowData();
   for (const name of ['network', 'disk']) {
-    assert.equal(timestamp(name), '27s ago', 'cache reuse preserves the capture age');
+    assert.equal(timestamp(name), '17s ago', 'cache reuse preserves the capture age');
     assert.equal(capturedAt(name), 103000);
-    const url = `/api/${name}-processes?duration=${name === 'network' ? 3 : 1}`;
-    assert.equal(calls[url], 1, 'the cached poll did not perform another capture');
+    assert.equal(calls[url(name)], 1, 'the cached poll did not perform another capture');
   }
+  now = 133000;  // The next regular slow poll (30 s after the capture started) captures again.
+  await context.fetchSlowData();
+  for (const name of ['network', 'disk']) {
+    assert.equal(calls[url(name)], 2, 'every slow poll gets a fresh capture');
+  }
+  // A capture's age counts from its start: a long capture must not leave a
+  // result the following poll still treats as fresh (that would halve the cadence).
+  captureDelay = 10000;
   now = 163000;
   await context.fetchSlowData();
+  captureDelay = 0;
+  assert.equal(now, 173000, 'the capture advanced the clock');
+  assert.equal(timestamp('network'), '10s ago', 'the timestamp counts from the capture start');
+  assert.equal(capturedAt('disk'), 163000);
+  now = 193000;  // 30 s after that capture started, 20 s after it ended.
+  await context.fetchSlowData();
+  for (const name of ['network', 'disk']) {
+    assert.equal(calls[url(name)], 4, 'the poll after a long capture still re-captures');
+  }
   assert.equal(timestamp('network'), '0s ago', 'a fresh capture advances the timestamp');
   assert.equal(capturedAt('disk'), now);
   captureError = true;
-  now = 200000;
+  now = 240000;
   await context.fetchSlowData();
   for (const name of ['network', 'disk']) {
-    assert.equal(capturedAt(name), 163000, 'errors do not replace the last successful capture');
+    assert.equal(capturedAt(name), 193000, 'errors do not replace the last successful capture');
     assert.equal(evaluate(context, `${name}Capture.error`), true);
     assert.equal(evaluate(context, `${name}Capture.capturing`), false);
   }
@@ -1067,37 +1083,20 @@ function testLiveSampleTimes() {
   assert.deepEqual(plain(evaluate(context, 'bars.data.labels')), ['Core 0'], 'categorical charts retain their labels');
 }
 
-async function testVersionFooterAndUpdateBanner() {
-  const dom = makeDOM(['version-label', 'update-banner', 'update-banner-text']);
-  let answer = { ok: true, data: { version: '1.2.0', build: 'v1.2.0-0-gaaaaaaa' } };
-  const context = vm.createContext({ ...dom, async safeFetch() { return answer; } });
-  evaluate(context, between(app, "// The running backend's version", "document.getElementById('update-banner-reload')"));
-  const label = dom.elements.get('version-label'), banner = dom.elements.get('update-banner');
-  banner.hidden = true;
-  await context.checkVersion();
+async function testVersionFooter() {
+  const footer = async answer => {
+    const dom = makeDOM(['version-label']);
+    await evaluate(vm.createContext({ ...dom, safeFetch: async () => answer }),
+      app.slice(app.indexOf('// The running version (/api/version)')));
+    return dom.elements.get('version-label');
+  };
+  let label = await footer({ ok: true, data: { version: '1.2.0', build: 'v1.2.0-3-gaaaaaaa' } });
   assert.equal(label.textContent, 'horatio v1.2.0');
-  assert.equal(label.title, 'build v1.2.0-0-gaaaaaaa');
-  await context.checkVersion();
-  assert.equal(banner.hidden, true, 'an unchanged version shows no banner');
-  answer = { ok: false, data: null, errorType: 'network' };
-  await context.checkVersion();
-  assert.equal(banner.hidden, true, 'a failed fetch (service restarting) is not an update');
-  answer = { ok: true, data: { version: '1.2.0', build: 'v1.2.0-3-gbbbbbbb' } };
-  await context.checkVersion();
-  assert.equal(banner.hidden, false, 'a new build on main is an update');
-  assert.match(dom.elements.get('update-banner-text').textContent, /v1\.2\.0-3-gbbbbbbb/);
-  answer = { ok: true, data: { version: '1.3.0', build: null } };
-  await context.checkVersion();
-  assert.match(dom.elements.get('update-banner-text').textContent, /Updated to v1\.3\.0/);
-  assert.equal(label.textContent, 'horatio v1.2.0', 'the footer keeps the version this page runs');
-  // Dismissed: stays hidden for that version, shows again for the next one.
-  evaluate(context, 'dismissedVersion = "1.3.0 null"');
-  banner.hidden = true;
-  await context.checkVersion();
-  assert.equal(banner.hidden, true);
-  answer = { ok: true, data: { version: '1.4.0', build: null } };
-  await context.checkVersion();
-  assert.equal(banner.hidden, false);
+  assert.equal(label.title, 'build v1.2.0-3-gaaaaaaa');
+  label = await footer({ ok: true, data: { version: 'demo', build: null } });
+  assert.equal(label.textContent, 'horatio demo');
+  label = await footer({ ok: false, data: null, errorType: 'network' });
+  assert.equal(label.textContent, '', 'no version, no footer text');
 }
 
 async function testThemes() {
@@ -1214,7 +1213,7 @@ async function testThemes() {
   for (const test of [testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
-    testVersionFooterAndUpdateBanner]) {
+    testVersionFooter]) {
     await test();
     console.log(`PASS ${test.name}`);
   }

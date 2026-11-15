@@ -5,7 +5,7 @@ LUA ?= lua5.1
 PYTEST_ARGS ?=
 
 .DEFAULT_GOAL := check
-.PHONY: format check-format typing test test-linux test-openwrt test-openwrt-container test-all check check-all demo demo-docs
+.PHONY: format check-format typing test test-linux test-openwrt test-openwrt-container test-all check check-all demo demo-docs release
 
 format:
 	$(UV) run --locked ruff check --fix .
@@ -47,3 +47,13 @@ demo-docs:
 
 demo: demo-docs
 	python3 -m http.server -d docs 8000
+
+# Cut a release: make release V=1.2.0 (README: Versions and updates). VERSION changes
+# only here, so main's VERSION is always the newest release.
+release:
+	@test -n "$(V)" || { echo "usage: make release V=X.Y.Z"; exit 1; }
+	echo "$(V)" > VERSION
+	sed -i "s/^## \[Unreleased\]$$/## [Unreleased]\n\n## [$(V)] - $$(date +%F)/" CHANGELOG.md
+	git commit -m "Release v$(V)" VERSION CHANGELOG.md
+	git tag -a "v$(V)" -m "v$(V)"
+	@echo "now: git push origin main v$(V)"

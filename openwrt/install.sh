@@ -88,120 +88,32 @@ EOF
 fi
 
 # --- Update ---
-# Releases are vX.Y.Z tags (README: Versions and updates). A git checkout moves to
-# the release's tag; a copy without .git gets the release tarball from GitHub,
-# copied over the checkout (config.json, www/ and logs/ are not in a release).
-# Then the release's own installer runs.
-RELEASE_API="https://api.github.com/repos/mivanit/horatio/releases/latest"
-# codeload is where github.com/<repo>/archive/... redirects; going there directly
-# saves the redirect (some networks reach codeload but not github.com).
-RELEASE_TARBALLS="https://codeload.github.com/mivanit/horatio/tar.gz/refs/tags"
-SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+# Releases are vX.Y.Z tags (README: Versions and updates). VERSION changes only in a
+# release, so main's VERSION names the newest one. Its tarball is copied over the
+# checkout (config.json, www/ and logs/ are not in a release), then its installer runs.
+RAW_URL="https://raw.githubusercontent.com/mivanit/horatio"
+TARBALL_URL="https://codeload.github.com/mivanit/horatio/tar.gz/refs/tags"
 die() { error "$1"; exit 1; }
-# Compare two X.Y.Z[-pre] versions: prints -1, 0 or 1. A pre-release sorts before
-# its release.
-semver_cmp() {   # <a> <b>
-    awk -v a="$1" -v b="$2" 'BEGIN {
-        na = split(a, pa, "-"); nb = split(b, pb, "-")
-        split(pa[1], x, "."); split(pb[1], y, ".")
-        for (i = 1; i <= 3; i++) {
-            if (x[i] + 0 < y[i] + 0) { print -1; exit }
-            if (x[i] + 0 > y[i] + 0) { print 1; exit }
-        }
-        print (na > 1 && nb == 1) ? -1 : (na == 1 && nb > 1) ? 1 : 0
-    }'
-}
 update_checkout() {   # [vX.Y.Z]
-    ref="$1"
-    named=1
-    old_version=$(read_version "$DASHBOARD_DIR") || old_version=""
-    printf '%s\n' "$old_version" | grep -Eq "$SEMVER_RE" \
-        || die "$DASHBOARD_DIR/VERSION is missing or not a version; reinstall from a release."
-    use_git=0
-    if [ -e "$DASHBOARD_DIR/.git" ] && command -v git >/dev/null 2>&1; then
-        use_git=1
-        [ -z "$(git -C "$DASHBOARD_DIR" status --porcelain --untracked-files=no)" ] \
-            || die "Tracked files have local changes; commit or stash them first."
-        branch=$(git -C "$DASHBOARD_DIR" symbolic-ref --quiet --short HEAD) || branch=""
-        [ -z "$branch" ] || [ "$branch" = main ] \
-            || die "On branch '$branch'; --update only moves main or a release checkout."
-        info "Fetching releases..."
-        git -C "$DASHBOARD_DIR" fetch --quiet --tags origin || die "git fetch failed."
-        if [ -z "$ref" ]; then
-            named=0
-            ref=$(git -C "$DASHBOARD_DIR" tag -l 'v*' --sort=-v:refname \
-                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1) || ref=""
-            [ -n "$ref" ] || die "origin has no releases (vX.Y.Z tags) yet."
-        fi
-    else
-        command -v wget >/dev/null 2>&1 || die "--update needs wget (or git and a git checkout)."
-        if [ -z "$ref" ]; then
-            named=0
-            info "Asking GitHub for the newest release..."
-            # Never --no-check-certificate: this download becomes code that runs as root.
-            ref=$(wget -qO- "$RELEASE_API" | jsonfilter -e '@.tag_name') || ref=""
-            [ -n "$ref" ] || die "Could not get the newest release from GitHub. HTTPS needs a TLS-capable wget and CA certificates (packages libustream-mbedtls and ca-bundle); or name one: --update vX.Y.Z"
-        fi
-    fi
-    case "$ref" in v*) ;; *) ref="v$ref" ;; esac
-    if [ "$use_git" = 1 ]; then
-        git -C "$DASHBOARD_DIR" rev-parse --quiet --verify "refs/tags/$ref" >/dev/null \
-            || die "No release $ref (list them: git tag -l 'v*')."
-        new_version=$(git -C "$DASHBOARD_DIR" show "$ref:VERSION" 2>/dev/null | tr -d '[:space:]') || new_version=""
-    else
-        new_version="${ref#v}"
-    fi
-    printf '%s\n' "$new_version" | grep -Eq "$SEMVER_RE" \
-        || die "$ref is not a release with a VERSION file (it predates --update)."
-
-    case "$(semver_cmp "$new_version" "$old_version")" in
-        0)
-            if [ "$named" = 0 ] || { [ "$use_git" = 1 ] && [ "$(git -C "$DASHBOARD_DIR" rev-parse "$ref^{commit}")" = "$(git -C "$DASHBOARD_DIR" rev-parse HEAD)" ]; }; then
-                info "Already at v$old_version."
-                exit 0
-            fi ;;
-        -1)
-            [ "$named" = 1 ] || die "The newest release $ref is older than this checkout's v$old_version. To go back anyway: --update $ref"
-            warn "Downgrading v$old_version -> v$new_version. History and config written by v$old_version may not read back." ;;
-    esac
-
-    if [ "$use_git" = 1 ]; then
-        git -C "$DASHBOARD_DIR" checkout --quiet --detach "$ref" || die "git checkout $ref failed."
-    else
-        # Unpack beside the checkout: same filesystem, and not in RAM-backed /tmp.
-        free_kb=$(df -k "$DASHBOARD_DIR" | awk 'NR == 2 { print $4 }')
-        [ "${free_kb:-0}" -ge 4096 ] || die "Less than 4 MB free in $DASHBOARD_DIR."
-        work=$(mktemp -d "$DASHBOARD_DIR/.update.XXXXXX") || die "mktemp failed."
-        trap 'rm -rf "$work"' EXIT
-        trap 'exit 1' HUP INT TERM
-        info "Downloading $ref..."
-        wget -qO "$work/release.tar.gz" "$RELEASE_TARBALLS/$ref" \
-            || die "Download of $ref failed (does the release exist? HTTPS needs libustream-mbedtls and ca-bundle)."
-        mkdir "$work/tree"
-        # gzip | tar rather than tar -z, which some BusyBox builds lack.
-        gzip -dc "$work/release.tar.gz" | tar -xf - -C "$work/tree" || die "Could not unpack $ref."
-        # GitHub's archive holds one horatio-X.Y.Z/ directory. Match directories only:
-        # a BusyBox tar without pax support unpacks pax_global_header as a file.
-        src=""
-        for dir in "$work/tree"/*/; do
-            [ -z "$src" ] || die "The $ref download has more than one top directory."
-            src="${dir%/}"
-        done
-        [ -d "$src" ] || die "The $ref download is empty."
-        [ "$(read_version "$src")" = "$new_version" ] \
-            || die "The $ref download does not contain VERSION $new_version; nothing was changed."
-        for local_state in config.json www logs .password; do
-            [ ! -e "$src/$local_state" ] || die "The $ref download contains $local_state; refusing to overwrite local state."
-        done
-        cp -R "$src/." "$DASHBOARD_DIR/" \
-            || die "Copying $ref over $DASHBOARD_DIR failed partway; rerun: sh $0 --update $ref"
-        rm -rf "$work"
-        trap - EXIT HUP INT TERM
-    fi
-    info "Updated v$old_version -> v$new_version. Changes: CHANGELOG.md"
-    info "To go back: sh $SCRIPT_DIR/install.sh --update v$old_version"
-    # The files have moved already: if the install below fails, say how to finish it.
-    info "Running the updated installer. If it fails, fix the cause and rerun: sh $SCRIPT_DIR/install.sh"
+    old=$(read_version "$DASHBOARD_DIR") || old=unknown
+    new="${1#v}"
+    # Never --no-check-certificate: this download becomes code that runs as root.
+    [ -n "$new" ] || new=$(wget -qO- "$RAW_URL/main/VERSION" | tr -d '[:space:]') || new=""
+    [ -n "$new" ] || die "Could not reach GitHub (HTTPS needs libustream-mbedtls and ca-bundle)."
+    [ "$new" != "$old" ] || { info "Already at v$old."; exit 0; }
+    # Unpack beside the checkout: same filesystem, and not in RAM-backed /tmp.
+    work=$(mktemp -d "$DASHBOARD_DIR/.update.XXXXXX") || die "mktemp failed."
+    trap 'rm -rf "$work"' EXIT
+    wget -qO "$work/r.tgz" "$TARBALL_URL/v$new" || die "No release v$new to download."
+    # gzip | tar rather than tar -z, which some BusyBox builds lack.
+    gzip -dc "$work/r.tgz" | tar -xf - -C "$work" || die "Could not unpack v$new."
+    # GitHub's archive of tag vX.Y.Z is one directory, horatio-X.Y.Z.
+    [ "$(read_version "$work/horatio-$new")" = "$new" ] || die "Unexpected download; nothing changed."
+    cp -R "$work/horatio-$new/." "$DASHBOARD_DIR/" \
+        || die "Copying v$new failed partway; rerun: sh $0 --update v$new"
+    rm -rf "$work"
+    trap - EXIT
+    info "Updated v$old -> v$new. To go back: sh $0 --update v$old"
     # The release's installer does the install, so it matches what it installs.
     exec sh "$SCRIPT_DIR/install.sh"
 }

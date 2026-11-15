@@ -2,9 +2,9 @@
 # Horatio installer and updater. Idempotent: run it after every `git pull`.
 #   ./install.sh                 install or update the web service, and the hardware
 #                                collector when it is already installed on this box
-#   ./install.sh --update [vX.Y.Z|main]
+#   ./install.sh --update [vX.Y.Z]
 #                                move this checkout to the newest release (or the one
-#                                named, or main), then install it; other flags pass through
+#                                named), then install it; other flags pass through
 #   ./install.sh --collector     also install the root hardware collector (first time)
 #   ./install.sh --no-optional   do not offer nethogs / sysstat
 #   ./install.sh --grant-capabilities
@@ -62,126 +62,24 @@ if [ "$UPDATE" = 1 ] && [ "$UNINSTALL" = 1 ]; then
     exit 2
 fi
 
-# --- --update: move the checkout, then run the installer it now contains ---
-# Releases are vX.Y.Z tags (README: Versions and updates). A release checkout is a
-# detached HEAD; main is the development channel.
+# --- --update: move the checkout to a release, then run the installer it contains ---
+# Releases are vX.Y.Z tags (README: Versions and updates). [ref] is anything git can
+# check out; without it, the newest release.
 die() { echo "Error: $*" >&2; exit 1; }
-# Compare two X.Y.Z[-pre] versions: prints -1, 0 or 1. A pre-release sorts before
-# its release; two pre-releases of one version compare equal.
-semver_cmp() {   # <a> <b>
-    local a="$1" b="$2" i x y
-    local -a pa pb
-    IFS=. read -r -a pa <<< "${a%%-*}"
-    IFS=. read -r -a pb <<< "${b%%-*}"
-    for i in 0 1 2; do
-        x=$((10#${pa[i]:-0})) y=$((10#${pb[i]:-0}))
-        if ((x < y)); then echo -1; return; fi
-        if ((x > y)); then echo 1; return; fi
-    done
-    if [[ "$a" == *-* && "$b" != *-* ]]; then echo -1
-    elif [[ "$a" != *-* && "$b" == *-* ]]; then echo 1
-    else echo 0
-    fi
-}
-SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
-# Nothing to update. Flags given alongside --update (--collector, ...) still get
-# their install, so `--update --collector` on a current box isn't a silent no-op.
-already_current() {   # message
-    echo "$1"
-    [ ${#PASSTHROUGH[@]} -gt 0 ] || exit 0
-    echo "Running the installer for: ${PASSTHROUGH[*]}"
-    exec bash "$SCRIPT_DIR/install.sh" "${PASSTHROUGH[@]}"
-}
 update_checkout() {
-    local git=(git -C "$SCRIPT_DIR")
-    command -v git > /dev/null || die "--update needs git."
-    "${git[@]}" rev-parse --git-dir > /dev/null 2>&1 \
-        || die "$SCRIPT_DIR is not a git checkout; clone https://github.com/mivanit/horatio instead."
-    local dirty
-    dirty="$("${git[@]}" status --porcelain --untracked-files=no)"
-    [ -z "$dirty" ] || die "tracked files have local changes; commit or stash them first:"$'\n'"$dirty"
-    # A checkout on another branch is someone's work in progress: never move it.
-    local branch
-    branch="$("${git[@]}" symbolic-ref --quiet --short HEAD)" || branch=""
-    [ -z "$branch" ] || [ "$branch" = main ] \
-        || die "on branch '$branch'; --update only moves main or a release checkout (git checkout main)."
-
-    echo "Fetching releases..."
+    local git=(git -C "$SCRIPT_DIR") old ref
+    [ -z "$("${git[@]}" status --porcelain --untracked-files=no)" ] \
+        || die "tracked files have local changes; commit or stash them first."
     "${git[@]}" fetch --quiet --tags origin
-    if "${git[@]}" show-ref --verify --quiet refs/heads/main \
-        && [ -n "$("${git[@]}" rev-list origin/main..main)" ]; then
-        die "local main has commits that are not on origin/main; push or drop them first."
-    fi
-
-    local old_version old_commit old_desc old_ref
-    old_version="$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")"
-    [[ "$old_version" =~ $SEMVER_RE ]] || die "VERSION is not a version: '$old_version'"
-    old_commit="$("${git[@]}" rev-parse HEAD)"
-    old_desc="$("${git[@]}" describe --tags --always)"
-    old_ref="$("${git[@]}" describe --tags --exact-match HEAD 2> /dev/null)" || old_ref="$old_commit"
-
-    local ref="$UPDATE_REF" target named=1
-    if [ "$ref" = main ]; then
-        target=origin/main
-        if [ "$branch" = main ] && [ "$old_commit" = "$("${git[@]}" rev-parse origin/main)" ]; then
-            already_current "Already on the newest main ($old_desc)."
-        fi
-    else
-        if [ -z "$ref" ]; then
-            named=0
-            ref="$("${git[@]}" tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)" || true
-            [ -n "$ref" ] || die "origin has no releases (vX.Y.Z tags) yet; follow main with --update main."
-        fi
-        [[ "$ref" == v* ]] || ref="v$ref"
-        "${git[@]}" rev-parse --quiet --verify "refs/tags/$ref" > /dev/null \
-            || die "no release $ref (list them: git tag -l 'v*')."
-        target="$ref"
-        if [ "$("${git[@]}" rev-parse "$ref^{commit}")" = "$old_commit" ]; then
-            already_current "Already at $ref."
-        fi
-    fi
-    local new_version
-    new_version="$("${git[@]}" show "$target:VERSION" 2> /dev/null | tr -d '[:space:]')" || new_version=""
-    [[ "$new_version" =~ $SEMVER_RE ]] || die "$target has no VERSION file; it predates --update."
-
-    case "$(semver_cmp "$new_version" "$old_version")" in
-        0)
-            # Same release number, other commits: main between releases.
-            [ "$named" = 1 ] || die "this checkout is v$old_version plus unreleased commits ($old_desc), and the newest release is $ref. Switch to it with --update $ref, or stay on main with --update main." ;;
-        -1)
-            [ "$named" = 1 ] || die "the newest release $ref is older than this checkout's v$old_version ($old_desc). To go back anyway: --update $ref"
-            echo "Warning: downgrading v$old_version -> v$new_version. History and config written by v$old_version may not read back." >&2 ;;
-    esac
-    # A new MAJOR version means a breaking change or a step by hand: show what changed.
-    if (( 10#${new_version%%.*} > 10#${old_version%%.*} )); then
-        echo "=== Major update v$old_version -> v$new_version: read these before relying on the box ==="
-        "${git[@]}" show "$target:CHANGELOG.md" 2> /dev/null | awk -v old="## [$old_version]" '
-            /^## \[/ { if (index($0, old) == 1) exit; show = ($0 !~ /Unreleased/) }
-            show' || true
-        echo "==="
-    fi
-
-    if [ "$target" = origin/main ]; then
-        if "${git[@]}" show-ref --verify --quiet refs/heads/main; then
-            "${git[@]}" checkout --quiet main
-            "${git[@]}" merge --quiet --ff-only origin/main
-        else
-            "${git[@]}" checkout --quiet -b main --track origin/main
-        fi
-    else
-        "${git[@]}" checkout --quiet --detach "$target"
-    fi
-    echo "Updated v$old_version ($old_desc) -> v$new_version ($("${git[@]}" describe --tags --always)). Changes: CHANGELOG.md"
-    if [[ "$old_ref" == v* ]]; then
-        echo "To go back: ./install.sh --update $old_ref"
-    elif [ "$branch" = main ] && [ "$target" != origin/main ]; then
-        echo "To go back: git checkout main && ./install.sh"   # main itself did not move
-    else
-        echo "To go back: git checkout $old_ref && ./install.sh"
-    fi
-    # The checkout has moved: if the install below fails (network, sudo), the old
-    # service runs the new code against the old venv on its next restart.
-    echo "Running the updated installer. If it fails, fix the cause and rerun: ./install.sh ${PASSTHROUGH[*]+${PASSTHROUGH[*]}}"
+    old="$("${git[@]}" describe --tags --always)"
+    ref="$UPDATE_REF"
+    [ -n "$ref" ] || ref="$("${git[@]}" tag -l 'v*' --sort=-v:refname | grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)" \
+        || die "no releases yet; follow main with: git pull && ./install.sh"
+    # Unnamed, only ever forward: a checkout ahead of the newest release stays put.
+    [ -n "$UPDATE_REF" ] || "${git[@]}" merge-base --is-ancestor HEAD "$ref" \
+        || die "this checkout ($old) is not behind $ref; to switch anyway: --update $ref"
+    "${git[@]}" checkout --quiet --detach "$ref"
+    echo "Updated $old -> $ref. To go back: ./install.sh --update $old"
     # The new installer does the install: it matches the code it installs. Nothing
     # after this line runs from the old script, which git has replaced on disk.
     exec bash "$SCRIPT_DIR/install.sh" ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}

@@ -87,6 +87,7 @@ const diskCapture = createCaptureState({
 
 // Unified processes table state
 let processSort = { key: 'cpu_percent', dir: 'desc' };
+let lastProcessRowsHtml = null; // the <tbody> markup last written; null when the table shell is gone
 let lastGpuProcesses = []; // Cache GPU process data for joining
 let lastGpuProcessesTime = null; // Track when GPU data was last fetched
 
@@ -1042,6 +1043,7 @@ function renderUnifiedProcesses() {
 
   if (!hasAnyData) {
     processesTable.innerHTML = '<div class="empty-state">No process data</div>';
+    lastProcessRowsHtml = null;
     updateCardNoData('processes', false);
     return;
   }
@@ -1153,96 +1155,23 @@ function renderUnifiedProcesses() {
 
   if (procs.length === 0) {
     processesTable.innerHTML = '<div class="empty-state">No active processes</div>';
+    lastProcessRowsHtml = null;
     processesValueEl.textContent = '0';
   } else {
     processesValueEl.textContent = 'shown';
 
-    // Build two-row header: row 1 has group controls (network, disk, cpu_time, process_info), row 2 has individual column headers
-    const networkColIndices = getColumnIndicesByGroup('network');
-    const diskColIndices = getColumnIndicesByGroup('disk');
-    const cpuTimeColIndices = getColumnIndicesByGroup('cpu_time');
-    const processInfoColIndices = getColumnIndicesByGroup('process_info');
-    // Track which columns are part of a group (for skipping in row 1)
-    const groupedColIndices = new Set([...networkColIndices, ...diskColIndices, ...cpuTimeColIndices, ...processInfoColIndices]);
-
-    // Helper to build a standard header cell
-    const buildHeaderCell = (col, rowspan = 1) => {
-      const sortClass = col.sortable ? 'sortable' : '';
-      const sortDir = col.key === processSort.key ? (processSort.dir === 'asc' ? 'sort-asc' : 'sort-desc') : '';
-      const indicator = col.sortable ? `<span class="sort-indicator">${col.key === processSort.key ? (processSort.dir === 'asc' ? '▲' : '▼') : '⇅'}</span>` : '';
-      const numHeader = col.cssClass === 'num-cell' ? 'num-header' : '';
-      const rowspanAttr = rowspan > 1 ? `rowspan="${rowspan}"` : '';
-      // Smaller text for process_info subheaders (row 2 only, not group header)
-      const processInfoSubheader = col.group === 'process_info' && rowspan === 1 ? 'process-info-subheader' : '';
-      const titleAttr = col.sortable ? ' title="Click to sort"' : '';
-      return `<th class="${sortClass} ${sortDir} ${numHeader} ${processInfoSubheader}" data-sort-key="${col.key}" ${rowspanAttr}${titleAttr}>${col.label}${indicator}</th>`;
-    };
-
-    // Build network controls cell content
-    const netCapturingClass = networkCapture.capturing ? 'capturing' : '';
-    const netButtonClass = networkCapture.capturing ? 'refresh-btn refresh-btn-small capturing' : 'refresh-btn refresh-btn-small';
-    const networkControlsCell = `
-      <th colspan="${networkColIndices.length}" class="network-header-group ${netCapturingClass} ${networkCapture.error ? 'error' : ''}">
-        <div class="network-header-controls">
-          <button class="${netButtonClass}" id="network-refresh-btn" title="Capture network data">${networkCapture.capturing ? '' : '▷'}</button>
-          <button class="dropdown-trigger dropdown-trigger-small" id="nethogs-duration-table" title="Network capture duration">${nethogsDuration}s</button>
-          <span class="network-timestamp" id="network-timestamp">${networkCapture.getTimestamp()}</span>
-        </div>
-      </th>`;
-
-    // Build disk controls cell content
-    const diskCapturingClass = diskCapture.capturing ? 'capturing' : '';
-    const diskButtonClass = diskCapture.capturing ? 'refresh-btn refresh-btn-small capturing' : 'refresh-btn refresh-btn-small';
-    const diskControlsCell = `
-      <th colspan="${diskColIndices.length}" class="disk-header-group ${diskCapturingClass} ${diskCapture.error ? 'error' : ''}">
-        <div class="disk-header-controls">
-          <button class="${diskButtonClass}" id="disk-refresh-btn" title="Sample disk I/O">${diskCapture.capturing ? '' : '▷'}</button>
-          <button class="dropdown-trigger dropdown-trigger-small" id="disk-duration-table" title="Disk sample duration">${diskDuration}s</button>
-          <span class="disk-timestamp" id="disk-timestamp">${diskCapture.getTimestamp()}</span>
-        </div>
-      </th>`;
-
-    // Build CPU time header cell (simple label, no controls)
-    const cpuTimeCell = `<th colspan="${cpuTimeColIndices.length}" class="cpu-time-header-group">CPU Time</th>`;
-
-    // Build process info header cell (simple label, smaller text)
-    const processInfoCell = `<th colspan="${processInfoColIndices.length}" class="process-info-header-group">Info</th>`;
-
-    // Row 1: non-grouped columns with rowspan=2, group controls with colspan
-    let headerRow1 = '';
-    for (let i = 0; i < PROCESS_COLUMNS.length; i++) {
-      if (i === networkColIndices[0]) {
-        // Insert network controls cell (spans network columns)
-        headerRow1 += networkControlsCell;
-      } else if (i === diskColIndices[0]) {
-        // Insert disk controls cell (spans disk columns)
-        headerRow1 += diskControlsCell;
-      } else if (i === cpuTimeColIndices[0]) {
-        // Insert CPU time header cell (spans cpu_time columns)
-        headerRow1 += cpuTimeCell;
-      } else if (i === processInfoColIndices[0]) {
-        // Insert process info header cell (spans process_info columns)
-        headerRow1 += processInfoCell;
-      } else if (groupedColIndices.has(i)) {
-        // Skip - covered by colspan
-        continue;
-      } else {
-        headerRow1 += buildHeaderCell(PROCESS_COLUMNS[i], 2);
-      }
+    // The shell (colgroup and header) is built once and kept: the header holds
+    // live state — the buttons' tooltips, the capture pulse and spinner, the
+    // duration picker's label — that replacing it every tick would reset. Only
+    // the rows are rewritten, and only when they changed.
+    let table = processesTable.querySelector('table.data-table');
+    if (!table) {
+      processesTable.innerHTML = buildProcessTableShell();
+      table = processesTable.querySelector('table.data-table');
+      lastProcessRowsHtml = null;
     }
+    syncProcessTableHeader(table);
 
-    // Row 2: just the grouped column headers (sortable)
-    const headerRow2 = [...cpuTimeColIndices, ...networkColIndices, ...diskColIndices, ...processInfoColIndices]
-      .sort((a, b) => a - b)
-      .map(i => buildHeaderCell(PROCESS_COLUMNS[i]))
-      .join('');
-
-    // Build colgroup for fixed column widths
-    const colgroup = PROCESS_COLUMNS.map(col => {
-      return `<col style="width: ${col.width || 'auto'}">`;
-    }).join('');
-
-    // Build rows
     const rows = procs.map(p => {
       const cells = PROCESS_COLUMNS.map(col => {
         const value = col.render(p);
@@ -1252,13 +1181,140 @@ function renderUnifiedProcesses() {
       }).join('');
       return `<tr>${cells}</tr>`;
     }).join('');
-
-    processesTable.innerHTML = `<table class="data-table"><colgroup>${colgroup}</colgroup><thead><tr>${headerRow1}</tr><tr>${headerRow2}</tr></thead><tbody>${rows}</tbody></table>`;
+    if (rows !== lastProcessRowsHtml) {
+      table.tBodies[0].innerHTML = rows;
+      lastProcessRowsHtml = rows;
+    }
     // Event handlers are set up via delegation in initProcessTableListeners()
   }
 
   updateCardNoData('processes', true);
   updateCacheDisplay('processes', 'processes');
+}
+
+
+// The process table's markup minus its rows: fixed column widths and the two
+// header rows (group controls, then column headers), rendered from the current
+// sort and capture state. Built once per table; syncProcessTableHeader keeps it
+// current afterwards.
+function buildProcessTableShell() {
+  // Build two-row header: row 1 has group controls (network, disk, cpu_time, process_info), row 2 has individual column headers
+  const networkColIndices = getColumnIndicesByGroup('network');
+  const diskColIndices = getColumnIndicesByGroup('disk');
+  const cpuTimeColIndices = getColumnIndicesByGroup('cpu_time');
+  const processInfoColIndices = getColumnIndicesByGroup('process_info');
+  // Track which columns are part of a group (for skipping in row 1)
+  const groupedColIndices = new Set([...networkColIndices, ...diskColIndices, ...cpuTimeColIndices, ...processInfoColIndices]);
+
+  // Helper to build a standard header cell
+  const buildHeaderCell = (col, rowspan = 1) => {
+    const sortClass = col.sortable ? 'sortable' : '';
+    const sortDir = col.key === processSort.key ? (processSort.dir === 'asc' ? 'sort-asc' : 'sort-desc') : '';
+    const indicator = col.sortable ? `<span class="sort-indicator">${col.key === processSort.key ? (processSort.dir === 'asc' ? '▲' : '▼') : '⇅'}</span>` : '';
+    const numHeader = col.cssClass === 'num-cell' ? 'num-header' : '';
+    const rowspanAttr = rowspan > 1 ? `rowspan="${rowspan}"` : '';
+    // Smaller text for process_info subheaders (row 2 only, not group header)
+    const processInfoSubheader = col.group === 'process_info' && rowspan === 1 ? 'process-info-subheader' : '';
+    const titleAttr = col.sortable ? ' title="Click to sort"' : '';
+    return `<th class="${sortClass} ${sortDir} ${numHeader} ${processInfoSubheader}" data-sort-key="${col.key}" ${rowspanAttr}${titleAttr}>${col.label}${indicator}</th>`;
+  };
+
+  // Build network controls cell content
+  const netCapturingClass = networkCapture.capturing ? 'capturing' : '';
+  const netButtonClass = networkCapture.capturing ? 'refresh-btn refresh-btn-small capturing' : 'refresh-btn refresh-btn-small';
+  const networkControlsCell = `
+    <th colspan="${networkColIndices.length}" class="network-header-group ${netCapturingClass} ${networkCapture.error ? 'error' : ''}">
+      <div class="network-header-controls">
+        <button class="${netButtonClass}" id="network-refresh-btn" title="Capture network data">${networkCapture.capturing ? '' : '▷'}</button>
+        <button class="dropdown-trigger dropdown-trigger-small" id="nethogs-duration-table" title="Network capture duration">${nethogsDuration}s</button>
+        <span class="network-timestamp" id="network-timestamp">${networkCapture.getTimestamp()}</span>
+      </div>
+    </th>`;
+
+  // Build disk controls cell content
+  const diskCapturingClass = diskCapture.capturing ? 'capturing' : '';
+  const diskButtonClass = diskCapture.capturing ? 'refresh-btn refresh-btn-small capturing' : 'refresh-btn refresh-btn-small';
+  const diskControlsCell = `
+    <th colspan="${diskColIndices.length}" class="disk-header-group ${diskCapturingClass} ${diskCapture.error ? 'error' : ''}">
+      <div class="disk-header-controls">
+        <button class="${diskButtonClass}" id="disk-refresh-btn" title="Sample disk I/O">${diskCapture.capturing ? '' : '▷'}</button>
+        <button class="dropdown-trigger dropdown-trigger-small" id="disk-duration-table" title="Disk sample duration">${diskDuration}s</button>
+        <span class="disk-timestamp" id="disk-timestamp">${diskCapture.getTimestamp()}</span>
+      </div>
+    </th>`;
+
+  // Build CPU time header cell (simple label, no controls)
+  const cpuTimeCell = `<th colspan="${cpuTimeColIndices.length}" class="cpu-time-header-group">CPU Time</th>`;
+
+  // Build process info header cell (simple label, smaller text)
+  const processInfoCell = `<th colspan="${processInfoColIndices.length}" class="process-info-header-group">Info</th>`;
+
+  // Row 1: non-grouped columns with rowspan=2, group controls with colspan
+  let headerRow1 = '';
+  for (let i = 0; i < PROCESS_COLUMNS.length; i++) {
+    if (i === networkColIndices[0]) {
+      // Insert network controls cell (spans network columns)
+      headerRow1 += networkControlsCell;
+    } else if (i === diskColIndices[0]) {
+      // Insert disk controls cell (spans disk columns)
+      headerRow1 += diskControlsCell;
+    } else if (i === cpuTimeColIndices[0]) {
+      // Insert CPU time header cell (spans cpu_time columns)
+      headerRow1 += cpuTimeCell;
+    } else if (i === processInfoColIndices[0]) {
+      // Insert process info header cell (spans process_info columns)
+      headerRow1 += processInfoCell;
+    } else if (groupedColIndices.has(i)) {
+      // Skip - covered by colspan
+      continue;
+    } else {
+      headerRow1 += buildHeaderCell(PROCESS_COLUMNS[i], 2);
+    }
+  }
+
+  // Row 2: just the grouped column headers (sortable)
+  const headerRow2 = [...cpuTimeColIndices, ...networkColIndices, ...diskColIndices, ...processInfoColIndices]
+    .sort((a, b) => a - b)
+    .map(i => buildHeaderCell(PROCESS_COLUMNS[i]))
+    .join('');
+
+  // Build colgroup for fixed column widths
+  const colgroup = PROCESS_COLUMNS.map(col => {
+    return `<col style="width: ${col.width || 'auto'}">`;
+  }).join('');
+
+  return `<table class="data-table"><colgroup>${colgroup}</colgroup><thead><tr>${headerRow1}</tr><tr>${headerRow2}</tr></thead><tbody></tbody></table>`;
+}
+
+// Bring a kept header up to date in place: sort indicators, the capture groups'
+// capturing/error state, button faces, duration labels and timestamps. Writes
+// only what differs, so a running CSS animation is not restarted.
+function syncProcessTableHeader(table) {
+  const setText = (el, text) => { if (el && el.textContent !== text) el.textContent = text; };
+  table.querySelectorAll('th[data-sort-key]').forEach(th => {
+    const active = th.dataset.sortKey === processSort.key;
+    th.classList.toggle('sort-asc', active && processSort.dir === 'asc');
+    th.classList.toggle('sort-desc', active && processSort.dir === 'desc');
+    setText(th.querySelector('.sort-indicator'), active ? (processSort.dir === 'asc' ? '▲' : '▼') : '⇅');
+  });
+  const groups = [
+    [networkCapture, '.network-header-group', 'network-refresh-btn', 'nethogs-duration-table', 'network-timestamp', nethogsDuration],
+    [diskCapture, '.disk-header-group', 'disk-refresh-btn', 'disk-duration-table', 'disk-timestamp', diskDuration],
+  ];
+  for (const [capture, groupSelector, buttonId, durationId, timestampId, duration] of groups) {
+    const header = table.querySelector(groupSelector);
+    if (header) {
+      header.classList.toggle('capturing', capture.capturing);
+      header.classList.toggle('error', capture.error);
+    }
+    const button = table.querySelector('#' + buttonId);
+    if (button) {
+      button.classList.toggle('capturing', capture.capturing);
+      setText(button, capture.capturing ? '' : '▷');
+    }
+    setText(table.querySelector('#' + durationId), duration + 's');
+    setText(table.querySelector('#' + timestampId), capture.getTimestamp());
+  }
 }
 
 // Fetch slow-changing data; CPU/System Info retry until their permanent caches fill.
@@ -1403,13 +1459,17 @@ async function fetchSlowData() {
     guard('processes', () => diskCapture.handleResponse(getCache('diskProcesses'), dataCache.diskProcesses.lastUpdate));
   } else {
     if (!diskCapture.capturing) diskCapture.start();
+    // Stamped with the capture's start, not its end: the next slow tick is then
+    // a full interval away and finds the result expired however long the
+    // capture ran (see the capture TTLs in dataCache).
+    const diskStartedAt = Date.now();
     safeFetch(`/api/disk-processes?duration=${diskDuration}`, [], getDiskTimeout())
       .then(diskProcesses => {
         if (diskProcesses.ok) {
           // Cache only a real result array — never an error object, which would
           // otherwise pin the card in its error state for the whole TTL.
-          if (Array.isArray(diskProcesses.data)) updateCache('diskProcesses', diskProcesses.data);
-          diskCapture.handleResponse(diskProcesses.data);
+          if (Array.isArray(diskProcesses.data)) updateCache('diskProcesses', diskProcesses.data, diskStartedAt);
+          diskCapture.handleResponse(diskProcesses.data, diskStartedAt);
         } else {
           console.error('Disk processes fetch failed:', diskProcesses);
           diskCapture.stop();
@@ -1429,12 +1489,16 @@ async function fetchSlowData() {
     guard('processes', () => networkCapture.handleResponse(getCache('networkProcesses'), dataCache.networkProcesses.lastUpdate));
   } else {
     if (!networkCapture.capturing) networkCapture.start();
+    // Stamped with the capture's start, not its end: the next slow tick is then
+    // a full interval away and finds the result expired however long the
+    // capture ran (see the capture TTLs in dataCache).
+    const networkStartedAt = Date.now();
     safeFetch(`/api/network-processes?duration=${nethogsDuration}`, [], getNethogsTimeout())
       .then(networkProcesses => {
         if (networkProcesses.ok) {
           // Cache only a real result array (see diskProcesses above).
-          if (Array.isArray(networkProcesses.data)) updateCache('networkProcesses', networkProcesses.data);
-          networkCapture.handleResponse(networkProcesses.data);
+          if (Array.isArray(networkProcesses.data)) updateCache('networkProcesses', networkProcesses.data, networkStartedAt);
+          networkCapture.handleResponse(networkProcesses.data, networkStartedAt);
         } else {
           console.error('Network processes fetch failed:', networkProcesses);
           networkCapture.stop();
@@ -1447,9 +1511,6 @@ async function fetchSlowData() {
         networkCapture.setError();
       });
   }
-
-  // Runs on its own: the footer and the update banner (checkVersion, below).
-  checkVersion();
 }
 
 // One poll at a time: safeFetch's 5 s timeout is longer than the 2 s poll, so a
@@ -4243,38 +4304,10 @@ document.querySelector('.history-controls-label')?.addEventListener('mousedown',
   }
 });
 
-// The running backend's version (/api/version), checked on each slow poll. The
-// first answer goes in the footer. A different version or build later means the
-// box was updated under this page, whose scripts are still the old ones: offer a
-// reload. The build matters for a box tracking main, where pulls between
-// releases keep the same version.
-let loadedVersion = null, dismissedVersion = null;
-const versionName = v => (/^\d/.test(v) ? 'v' : '') + v;  // 1.2.0 -> v1.2.0; 'demo' stays
-async function checkVersion() {
-  const r = await safeFetch('/api/version', null);
-  // Restarting mid-update, or a backend without the endpoint: not a change.
-  if (!r.ok || !r.data || typeof r.data.version !== 'string') return;
-  const seen = { version: r.data.version, build: r.data.build ?? null };
-  const key = seen.version + ' ' + seen.build;
-  if (loadedVersion === null) {
-    loadedVersion = seen;
-    const label = document.getElementById('version-label');
-    label.textContent = 'horatio ' + versionName(seen.version);
-    label.title = seen.build ? 'build ' + seen.build : '';
-    return;
-  }
-  if (key === loadedVersion.version + ' ' + loadedVersion.build || key === dismissedVersion) return;
-  document.getElementById('update-banner-text').textContent = seen.version === loadedVersion.version
-    ? `Updated (${seen.build || versionName(seen.version)}): reload to run it.`
-    : `Updated to ${versionName(seen.version)}: reload to run it.`;
-  const banner = document.getElementById('update-banner');
-  banner.dataset.version = key;
-  banner.hidden = false;
-}
-
-document.getElementById('update-banner-reload').addEventListener('click', () => location.reload());
-document.getElementById('update-banner-close').addEventListener('click', () => {
-  const banner = document.getElementById('update-banner');
-  dismissedVersion = banner.dataset.version;
-  banner.hidden = true;
+// The running version (/api/version) in the footer; the build is the installed commit.
+safeFetch('/api/version', null).then(r => {
+  if (!r.ok || typeof r.data?.version !== 'string') return;
+  const label = document.getElementById('version-label');
+  label.textContent = 'horatio ' + (/^\d/.test(r.data.version) ? 'v' : '') + r.data.version;  // 'demo' stays
+  label.title = r.data.build ? 'build ' + r.data.build : '';
 });

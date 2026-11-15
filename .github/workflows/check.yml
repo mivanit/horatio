@@ -4,16 +4,12 @@ on:
   push:
   pull_request:
   workflow_dispatch:
-  # release.yml runs these before publishing a tag.
-  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  # github.workflow is the caller's name when release.yml calls this, so the
-  # release's run and this file's own run for the same tag don't cancel each other.
-  group: checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: checks-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -70,7 +66,7 @@ jobs:
   openwrt-container:
     # Real OpenWrt (the official rootfs, booted with procd): a fresh install of
     # this commit must serve the dashboard, and --update must install the newest
-    # GitHub release over it (skipped until one exists).
+    # release over it (skipped until one exists).
     name: OpenWrt install and update in a container
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -79,5 +75,3 @@ jobs:
         with:
           persist-credentials: false
       - run: scripts/openwrt-container-test.sh
-        env:
-          GH_TOKEN: ${{ github.token }}

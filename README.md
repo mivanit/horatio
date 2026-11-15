@@ -76,32 +76,20 @@ and `logs/` are never touched.
 
 ## Versions and updates
 
-`VERSION` holds the release; releases are `vX.Y.Z` tags with notes in
-[`CHANGELOG.md`](CHANGELOG.md), which also says what MAJOR, MINOR and PATCH mean here
-(MAJOR: something on the box has to change by hand). The page footer shows the running
-version; when the box is updated under an open page, a banner offers a reload, since the
-page's scripts are still the old ones. `GET /api/version` gives `{version, build}`, where
-`build` is the commit `install.sh` installed (`git describe`), or null.
+Releases are `vX.Y.Z` git tags, with notes in [`CHANGELOG.md`](CHANGELOG.md). `VERSION`
+holds the number and changes only in a release, so `main`'s `VERSION` is the newest one.
+The page footer shows the running version, and `GET /api/version` gives `{version, build}`
+(`build`: the commit `install.sh` installed, from `git describe`, or null).
 
-`./install.sh --update` fetches tags, checks out the newest `vX.Y.Z` (pre-releases only when
-named) and runs that version's installer; flags such as `--collector` pass through. It
-prints how to go back. It refuses to move local work: changes to tracked files, a branch
-other than main, or commits on main that origin lacks. It also refuses a downgrade unless the
-version is named, and a checkout on main past the newest release, unless you pick:
+`./install.sh --update` fetches tags, checks out the newest `vX.Y.Z` and runs that
+version's installer; flags such as `--collector` pass through. It refuses when tracked files
+have local changes, or when the checkout is not behind that release (a checkout on main
+past it). `./install.sh --update v1.2.0` goes to the version named, older ones included. It
+prints how to go back. A release checkout is a detached HEAD, so plain `git pull` fails
+there; use `--update`.
 
-```bash
-./install.sh --update v1.2.0     # that release, older ones included (with a warning)
-./install.sh --update main       # follow main: the development channel
-```
-
-A release checkout is a detached HEAD, so plain `git pull` fails there; use `--update`. A
-MAJOR update prints the changelog in between before installing.
-
-To cut a release, from a clean main: add the changes under `## [Unreleased]` in
-`CHANGELOG.md`, then `scripts/release.sh X.Y.Z` (bumps `VERSION` and `pyproject.toml`,
-relocks, dates the changelog section, commits and tags) and
-`git push origin main vX.Y.Z`. CI ([`release.yml`](.github/workflows/release.yml)) checks the
-tag against `VERSION`, runs the checks, and publishes the GitHub release.
+To cut a release: `make release V=X.Y.Z` (writes `VERSION`, dates the changelog's
+Unreleased section, commits and tags), then `git push origin main vX.Y.Z`.
 
 ## Uninstall
 
@@ -224,7 +212,7 @@ again, don't put this on anything besides a trusted LAN!
 horatio/
 ├── server.py                    # FastAPI server + Glances subprocess + history recorder
 ├── tests/                       # pytest suites, browser fixtures, and native Lua checks
-├── scripts/                     # release.sh, and development helpers (native Lua/Nixio build)
+├── scripts/                     # development helpers (native Lua/Nixio build, OpenWrt container test)
 ├── index.html, static/          # Frontend: app.js (polling, cards, history), config.js, charts.js, util.js, style.css
 ├── themes/                      # optional stylesheets for the Theme picker (README.md: how to write one)
 ├── config.example.json          # -> config.json (per machine, gitignored)
@@ -312,12 +300,11 @@ sh install.sh --update    # to the newest release (or --update vX.Y.Z), then rei
 sh install.sh --uninstall
 ```
 
-`--update` works on a git checkout (with `git` installed) like the Linux one, minus
-`--update main`. On a copy without `.git` it asks GitHub for the newest release, downloads
-its tarball over HTTPS (needs `libustream-mbedtls` and `ca-bundle`, on stock images), checks
-its `VERSION`, and copies it over the checkout; `www/`, `config.json` and `logs/` are not in a
-release and stay. Files a release deleted stay behind in the checkout, harmless since uhttpd
-serves only `www/`. The installer stamps the asset URLs in `www/index.html` with the version
+`--update` needs no git: it reads the newest version from `main`'s `VERSION` on GitHub,
+downloads that release's tarball over HTTPS (needs `libustream-mbedtls` and `ca-bundle`, on
+stock images), checks its `VERSION`, and copies it over the checkout; `www/`, `config.json`
+and `logs/` are not in a release and stay. Files a release deleted stay behind in the
+checkout, harmless since uhttpd serves only `www/`. The installer stamps the asset URLs in `www/index.html` with the version
 (`?v=`), as uhttpd sends no cache headers and browsers would keep the old scripts.
 
 Requires `uhttpd-mod-lua`, `luci-lib-jsonc`, and `luci-lib-nixio` (installed by the

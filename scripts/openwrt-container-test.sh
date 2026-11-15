@@ -4,13 +4,13 @@
 # push (.github/workflows/check.yml); locally:
 #   scripts/openwrt-container-test.sh          # docker; CONTAINER=podman to switch
 # OPENWRT_IMAGE picks another image. Needs network: the package feeds, Chart.js,
-# and GitHub for the update. GH_TOKEN, when set, only authenticates the
-# host-side lookup of the newest release.
+# and GitHub for the update.
 #
 # 1. The checkout's tracked files (no .git, as a copied-over router has them) are
 #    installed fresh, and the dashboard must answer with this checkout's VERSION.
-# 2. When GitHub has a release: VERSION is set to 0.0.0 and `--update` must
-#    download, check and install that release, keeping www/config.json.
+# 2. Once there is a release (main's VERSION on GitHub is past 0.0.0): the box's
+#    VERSION is set to 0.0.0 and `--update` must download and install that
+#    release, keeping www/config.json.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -59,7 +59,9 @@ expect() {   # <path> <fixed string>
 
 echo "== Fresh install of this checkout"
 on_router "mkdir -p $DIR"
-(cd "$ROOT" && git ls-files -z | tar --null -T - -cf -) | "$ENGINE" exec -i "$NAME" tar -xf - -C "$DIR"
+# Tracked files as they are on disk; one deleted but not yet committed is skipped.
+(cd "$ROOT" && git ls-files -z | while IFS= read -r -d '' f; do [ ! -e "$f" ] || printf '%s\0' "$f"; done \
+    | tar --null -T - -cf -) | "$ENGINE" exec -i "$NAME" tar -xf - -C "$DIR"
 on_router "cd $DIR && LAN_IP=$IP sh openwrt/install.sh"
 version="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 expect /api/version "\"version\":\"$version\""
@@ -67,25 +69,16 @@ expect /api/4/load '"min1"'
 expect / '/static/app.js?v='
 
 echo "== Update to the newest release"
-auth=()
-[ -z "${GH_TOKEN:-}" ] || auth=(-H "Authorization: Bearer $GH_TOKEN")
-latest="$(curl -fsS "${auth[@]}" "https://api.github.com/repos/$REPO/releases/latest" 2> /dev/null \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)["tag_name"])' 2> /dev/null)" || latest=""
-if [ -z "$latest" ]; then
-    echo "   skipped: $REPO has no published release yet"
+# main's VERSION is the newest release (it changes only in `make release`).
+latest="$(curl -fsS "https://raw.githubusercontent.com/$REPO/main/VERSION" 2> /dev/null | tr -d '[:space:]')" || latest=""
+if [ -z "$latest" ] || [ "$latest" = 0.0.0 ]; then
+    echo "   skipped: $REPO has no release yet"
     exit 0
 fi
-echo "   newest release: $latest"
+echo "   newest release: v$latest"
 # Pose as an older box with its own config; the update must keep the config.
 on_router "cd $DIR && echo 0.0.0 > VERSION && sed -i 's/\"title\": *\"[^\"]*\"/\"title\": \"kept-by-update\"/' www/config.json"
-# Unnamed, so the router asks GitHub's API itself (jsonfilter included). Runner
-# IPs share GitHub's unauthenticated rate limit: when the router is refused,
-# name the release and still test the download, unpack and install.
-if ! on_router "cd $DIR && LAN_IP=$IP sh openwrt/install.sh --update"; then
-    echo "   the router's own release lookup failed; retrying with --update $latest" >&2
-    on_router "cd $DIR && LAN_IP=$IP sh openwrt/install.sh --update $latest"
-fi
-[ "$(on_router "cat $DIR/VERSION" | tr -d '[:space:]')" = "${latest#v}" ] || fail "VERSION is not ${latest#v} after the update"
-expect /api/version "\"version\":\"${latest#v}\""
+on_router "cd $DIR && LAN_IP=$IP sh openwrt/install.sh --update"
+expect /api/version "\"version\":\"$latest\""
 expect /config.json '"title": "kept-by-update"'
 echo "== OpenWrt install and update passed"

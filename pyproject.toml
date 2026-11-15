@@ -1,6 +1,6 @@
 [project]
 name = "horatio"
-version = "0.1.0"
+version = "0"  # placeholder uv requires; the release number is in VERSION
 description = "Homelab status dashboard"
 requires-python = ">=3.10"
 dependencies = [

@@ -63,7 +63,6 @@
   /* Additional */
   --text-input: #e0e0e0;
   --color-accent: #3b82f6;
-  --text-on-accent: #ffffff;   /* text on an accent-filled button */
   --bg-bar: #252525;
 
   /* Typography */
@@ -1806,49 +1805,10 @@ h1 {
   -moz-appearance: textfield;
 }
 
-/* Version footer and the banner shown when the box is updated under an open page */
+/* Version footer */
 .page-footer {
   text-align: center;
   padding: 8px 0 16px;
   font-size: 12px;
   color: var(--text-muted);
-}
-
-.update-banner {
-  position: fixed;
-  bottom: 20px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 16px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--color-accent);
-  border-radius: var(--radius-lg);
-  color: var(--text-primary);
-  font-size: 14px;
-  z-index: 1000;
-}
-
-.update-banner[hidden] {
-  display: none;
-}
-
-.update-banner-reload {
-  background: var(--color-accent);
-  color: var(--text-on-accent);
-  border: none;
-  border-radius: var(--radius-sm);
-  padding: 4px 12px;
-  cursor: pointer;
-}
-
-.update-banner-close {
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
 }

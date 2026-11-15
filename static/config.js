@@ -608,11 +608,13 @@ const dataCache = {
   systemInfo: { ttl: Infinity, data: null, lastUpdate: null },
   drives: { ttl: 60000, data: null, lastUpdate: null },
   processes: { ttl: 10000, data: null, lastUpdate: null },
-  networkProcesses: { ttl: 30000, data: null, lastUpdate: null },
-  diskProcesses: { ttl: 30000, data: null, lastUpdate: null },
+  // Under the 30 s slow-poll interval: a ttl equal to it would still be "valid"
+  // at the next tick and skip every other refresh. Capture results are stamped
+  // with the capture's start (fetchSlowData), so the next tick finds them
+  // expired however long the capture ran.
+  networkProcesses: { ttl: 25000, data: null, lastUpdate: null },
+  diskProcesses: { ttl: 25000, data: null, lastUpdate: null },
   ipInfo: { ttl: 60000, data: null, lastUpdate: null },
-  // Well under the 30 s slow-poll interval: a ttl equal to it would still be
-  // "valid" at the next tick and skip every other refresh.
   mail: { ttl: 10000, data: null, lastUpdate: null },
   storageHealth: { ttl: 10000, data: null, lastUpdate: null },
   sensors: { ttl: 10000, data: null, lastUpdate: null }
@@ -625,10 +627,10 @@ function isCacheValid(key) {
   return (Date.now() - cache.lastUpdate) < cache.ttl;
 }
 
-function updateCache(key, data) {
+function updateCache(key, data, at = Date.now()) {
   if (dataCache[key]) {
     dataCache[key].data = data;
-    dataCache[key].lastUpdate = Date.now();
+    dataCache[key].lastUpdate = at;
   }
 }
 
