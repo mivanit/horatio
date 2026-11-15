@@ -317,10 +317,10 @@ checkout root is a link to it. Edit `www/config.json`: tools that replace the fi
 copies exist, the next install run keeps the newer one, saves the other as
 `config.json.bak`, and says so. An existing `config.json` is moved into `www/`
 on install, and uninstall leaves both in place. A cron job requests `/api/history/tick` every
-minute and the tick that finds a record due takes it, so no dashboard request waits for the
+5 minutes and the tick that finds a record due takes it, so no dashboard request waits for the
 second of sampling; if cron stops, records are taken on ordinary requests instead, up to two
-minutes late. A `history.record_interval` under two minutes is finer than cron's minute, so
-there ordinary requests still record on time. A kernel file lock serializes recording and
+minutes late. A `history.record_interval` under 5 minutes is finer than the tick, so
+there ordinary requests record on time, and with no dashboard open records come every 5 minutes. A kernel file lock serializes recording and
 rotation and releases automatically if a process exits. Rotation (gzipping the
 older half of a full history file) runs in a background process, so recording
 waits for it rather than a request timing out; one that fails is logged to syslog

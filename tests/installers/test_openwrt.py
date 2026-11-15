@@ -317,7 +317,7 @@ class TestOpenWrtInstaller:
                     assert final == unrelated
                 else:
                     expected: str = (
-                        "* * * * * wget -qO /dev/null "
+                        "*/5 * * * * wget -qO /dev/null "
                         "http://192.168.1.1:8080/api/history/tick # dashboard-history\n"
                     )
                     assert final == unrelated + expected

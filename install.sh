@@ -70,7 +70,9 @@ update_checkout() {
     local git=(git -C "$SCRIPT_DIR") old ref
     [ -z "$("${git[@]}" status --porcelain --untracked-files=no)" ] \
         || die "tracked files have local changes; commit or stash them first."
-    "${git[@]}" fetch --quiet --tags origin
+    # --force: a release tag re-created upstream must not block every later update.
+    "${git[@]}" fetch --quiet --tags --force origin \
+        || die "git fetch failed (no network, or no origin remote)."
     old="$("${git[@]}" describe --tags --always)"
     ref="$UPDATE_REF"
     [ -n "$ref" ] || ref="$("${git[@]}" tag -l 'v*' --sort=-v:refname | grep -Ex 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)" \

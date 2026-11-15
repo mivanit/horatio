@@ -161,7 +161,7 @@ routes["/history/record"] = function(env)
     end
 end
 
--- Cron's once-a-minute request (install.sh): it does nothing itself, and
+-- Cron's request every 5 minutes (install.sh): it does nothing itself, and
 -- handle_request takes the history record when one is due.
 routes["/history/tick"] = function() send_json({status = "ok"}) end
 

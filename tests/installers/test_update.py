@@ -130,3 +130,24 @@ def test_no_releases_yet(repos: Repos) -> None:
     repos.clone()
     result: subprocess.CompletedProcess[str] = repos.update()
     assert result.returncode == 1 and "no releases yet" in result.stderr
+
+
+def test_a_failed_fetch_says_so(repos: Repos) -> None:
+    repos.commit("0.1.0")
+    repos.clone()
+    repos.upstream.rename(repos.upstream.with_name("gone"))
+    result: subprocess.CompletedProcess[str] = repos.update()
+    assert result.returncode == 1 and "git fetch failed" in result.stderr
+
+
+def test_a_release_tag_recreated_upstream_still_updates(repos: Repos) -> None:
+    repos.commit("0.1.0")
+    repos.commit("0.2.0", stub=True)
+    repos.clone("v0.1.0")
+    repos.git(repos.upstream, "commit", "--quiet", "--allow-empty", "-m", "again")
+    repos.git(repos.upstream, "tag", "-f", "-a", "v0.2.0", "-m", "0.2.0")
+    result: subprocess.CompletedProcess[str] = repos.update()
+    assert result.returncode == 0, result.stderr
+    assert repos.git(repos.box, "rev-parse", "HEAD") == repos.git(
+        repos.upstream, "rev-parse", "v0.2.0^{commit}"
+    )

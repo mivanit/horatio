@@ -267,12 +267,14 @@ uci commit uhttpd
 info "Restarting uhttpd..."
 /etc/init.d/uhttpd restart
 
-# --- History recording cron job: a tick every minute. ---
+# --- History recording cron job: a tick every 5 minutes. ---
 # The tick that finds a record due (config history.record_interval) takes it
 # (history.lua maybe_record), so the second of sampling never holds up a
-# dashboard request. A tick with nothing due reads one small file.
-CRON_CMD="* * * * * wget -qO /dev/null http://$LAN_IP:$PORT/api/history/tick # dashboard-history"
-info "Adding history cron job (a tick every minute)..."
+# dashboard request. A tick with nothing due reads one small file. Not every
+# minute: crond logs each job it starts, and 1440 lines a day crowd out the
+# router's small syslog.
+CRON_CMD="*/5 * * * * wget -qO /dev/null http://$LAN_IP:$PORT/api/history/tick # dashboard-history"
+info "Adding history cron job (a tick every 5 minutes)..."
 update_history_cron "$CRON_CMD"
 /etc/init.d/cron restart
 

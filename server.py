@@ -703,13 +703,14 @@ def get_gpu_stats() -> list[dict[str, Any]]:
 
 def _read_ping_targets(cfg: dict[str, Any]) -> list[str]:
     """The ping_targets addresses, in config order; an entry without an address
-    is skipped. Any other shape is fatal like _load_config's errors rather than
-    skipped: the frontend reads the raw config.json and reads ``t.address`` of
-    each entry, so a server that limped on would still serve a broken ping card,
-    and a bare string or null here used to die at import with a traceback."""
-    targets: Any = cfg.get(
-        "ping_targets", [{"address": "8.8.8.8"}, {"address": "192.168.1.1"}]
-    )
+    is skipped and null means the defaults, as in the frontend. Any other shape
+    is fatal like _load_config's errors rather than skipped: the frontend reads
+    the raw config.json and reads ``t.address`` of each entry, so a server that
+    limped on would still serve a broken ping card, and a bare string here used
+    to die at import with a traceback."""
+    targets: Any = cfg.get("ping_targets")
+    if targets is None:
+        targets = [{"address": "8.8.8.8"}, {"address": "192.168.1.1"}]
     if not isinstance(targets, list) or not all(
         isinstance(t, dict) and isinstance(t.get("address") or "", str) for t in targets
     ):
@@ -2070,8 +2071,10 @@ GLANCES_MAX_MISSES: Final[int] = (
 
 async def _glances_answers() -> bool:
     try:
+        # Its own client: in the shared pool the probe queues behind the page's
+        # requests, and a pool timeout would count as a dead Glances.
         client: httpx.AsyncClient
-        async with _glances_client() as client:
+        async with httpx.AsyncClient() as client:
             resp: httpx.Response = await client.get(
                 f"{APP.state.glances_url}/api/4/cpu", timeout=5.0
             )

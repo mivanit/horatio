@@ -1,5 +1,5 @@
 -- Simple JSONL history recording, every RECORD_INTERVAL (config
--- history.record_interval). A cron job requests /api/history/tick each minute
+-- history.record_interval). A cron job requests /api/history/tick every 5 minutes
 -- (see install.sh) and the tick that finds a record due takes it, so sampling
 -- does not hold up a dashboard request. Without cron, records piggyback on
 -- ordinary API requests instead, a little late (see M.maybe_record).
@@ -19,10 +19,11 @@ local RECORD_LOCK = "/tmp/dashboard-history.lock"      -- stable inode; never un
 local RECORD_INTERVAL = 600   -- seconds between records
 -- A tick records this much early: cron's minute and the previous record's
 -- stamp are never exactly an interval apart, and a tick that came a second
--- short would wait a whole minute more.
+-- short would wait for the next tick, 5 minutes on.
 local TICK_SLACK = 15
 -- An ordinary request records only when the ticks are this late (cron stopped,
--- or was never installed): two minutes of ticks missed.
+-- or was never installed, or the interval is not a multiple of the tick's 5
+-- minutes): two minutes overdue.
 local PIGGYBACK_GRACE = 120
 local MIN_MANUAL_INTERVAL = 60
 local INITIAL_TAIL_READ = 1048576  -- 1 MiB tail window, doubled until it covers the range
@@ -506,9 +507,9 @@ end
 -- failed record is not retried until the next interval.
 function M.maybe_record(scheduled)
     if not metrics then return end
-    -- An interval under two minutes is finer than cron's minute can keep, so
+    -- An interval under 5 minutes is finer than cron's tick can keep, so
     -- there ordinary requests record on time, as they did before the tick.
-    local grace = RECORD_INTERVAL >= 120 and PIGGYBACK_GRACE or 0
+    local grace = RECORD_INTERVAL >= 300 and PIGGYBACK_GRACE or 0
     local interval = scheduled and math.max(1, RECORD_INTERVAL - TICK_SLACK)
         or RECORD_INTERVAL + grace
     if not due(os.time(), interval) then return end

@@ -266,9 +266,13 @@ def test_read_ping_targets_unit() -> None:
         }
     ) == ["8.8.8.8"], "addresses kept, empty/null/missing ones skipped"
     assert server._read_ping_targets({}) == ["8.8.8.8", "192.168.1.1"], "default"
+    assert server._read_ping_targets({"ping_targets": None}) == [
+        "8.8.8.8",
+        "192.168.1.1",
+    ], "null is the default too, as the frontend reads it"
     assert server._read_ping_targets({"ping_targets": []}) == [], "none configured"
     bad: object
-    for bad in (["8.8.8.8"], None, [None], {"a": 1}, [{"address": 5}], "8.8.8.8"):
+    for bad in (["8.8.8.8"], [None], {"a": 1}, [{"address": 5}], "8.8.8.8"):
         with pytest.raises(SystemExit, match="ping_targets must be a list"):
             server._read_ping_targets({"ping_targets": bad})
 
