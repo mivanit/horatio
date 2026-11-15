@@ -139,6 +139,11 @@ elif command -v opkg >/dev/null 2>&1; then
     opkg list-installed | grep -q luci-lib-jsonc || opkg install luci-lib-jsonc
     opkg list-installed | grep -q luci-lib-nixio || opkg install luci-lib-nixio
 fi
+# Stock OpenWrt has no timeout; without it a hung df or tailscale call blocks
+# every request (metrics.lua). Optional: the dashboard runs without it.
+command -v timeout >/dev/null 2>&1 \
+    || apk add coreutils-timeout 2>/dev/null || opkg install coreutils-timeout 2>/dev/null \
+    || warn "Could not install coreutils-timeout; a hung command can stall the dashboard."
 
 # --- Chart.js ---
 # Keep version/hash in sync with the Linux installer. Verify the existing asset

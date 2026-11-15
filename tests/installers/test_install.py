@@ -175,6 +175,13 @@ def test_system_python_binds_usr_and_unit_verifies(box: Box) -> None:
     assert verify.returncode == 0 and verify.stderr == "", verify.stderr
 
 
+def test_existing_config_is_never_overwritten(box: Box) -> None:
+    (box.co / "config.json").write_text('{"title": "mine"}\n')
+    result: subprocess.CompletedProcess[str] = box.run()
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert (box.co / "config.json").read_text() == '{"title": "mine"}\n'
+
+
 @pytest.mark.parametrize("prefix", ["home", "parent", "root"])
 def test_prefix_containing_home_is_refused(box: Box, prefix: str) -> None:
     py_home: str = {
