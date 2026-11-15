@@ -320,7 +320,8 @@ copies exist, the next install run keeps the newer one, saves the other as
 on install, and uninstall leaves both in place. A cron job requests `/api/history/tick` every
 minute and the tick that finds a record due takes it, so no dashboard request waits for the
 second of sampling; if cron stops, records are taken on ordinary requests instead, up to two
-minutes late. A kernel file lock serializes recording and
+minutes late. A `history.record_interval` under two minutes is finer than cron's minute, so
+there ordinary requests still record on time. A kernel file lock serializes recording and
 rotation and releases automatically if a request worker exits. A successfully
 saved record whose rotation failed returns a warning; its original history is
 retained. It does not implement `since=` (Refresh reloads the whole window there)

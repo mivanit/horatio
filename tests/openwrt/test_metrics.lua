@@ -222,9 +222,13 @@ check(cpu_rate.total == 50, "the next poll measures from the stored counters to 
 net = metrics.network()
 check(net[1].bytes_recv_rate_per_sec == 2000 and net[1].bytes_sent_rate_per_sec == 500,
     "network rates divide by the time between polls (2 s), not by a fixed window")
-counters(103.5, 1200, 9200, 7000, 1500)
+counters(103.3, 1200, 9200, 7000, 1500)
 check(metrics.cpu().total == 50 and metrics.network()[1].bytes_recv_rate_per_sec == 2000,
-    "a request within a second gets the stored rates, not a half-second window")
+    "a request moments later gets the stored rates, not a window too short to mean much")
+counters(133, 2650, 10650, 67000, 16500)
+net = metrics.network()
+check(metrics.cpu().total == 50 and net[1].bytes_recv_rate_per_sec == 2000
+    and net[1].bytes_sent_rate_per_sec == 500, "the UI's slowest poll (30 s) is measured without waiting too")
 
 local function falls_back(label)
     local before = sleeps

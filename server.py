@@ -855,9 +855,6 @@ def _visible_mounts(mountinfo: str) -> dict[str, str]:
     can't be used: mounts made in the initramfs (/sys, /proc, a separate /usr) are
     listed before / after the switch to the real root.
 
-    TODO: O(mounts^2) on the event loop: ~0.04 s at 500 mounts, fine for a
-    homelab, 0.7 s at 2000 (a busy Kubernetes node). Index by path and walk each
-    mount's ancestors, and run it in a thread, if that ever matters.
     TODO: keyed by mount point and fs type only, so a disk covered by another of
     the same type at the same path (ext4 over ext4 at /mnt) keeps its row and
     shows the covering disk's numbers; matching the source device too would fix it.

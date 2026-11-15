@@ -857,7 +857,7 @@ async function testCapturePendingAndHiddenTab() {
     nethogsDuration: 3, diskDuration: 1, API_BASE: '/api/4', cardStatus: { processes: { ok: true } },
     getDiskTimeout: () => 6500, getNethogsTimeout: () => 9500,
     renderUnifiedProcesses() {}, renderGpuInfo() {}, renderCpuInfo() {}, renderDrives() {}, renderIpInfo() {},
-    renderMail() {}, renderHardware() {}, renderDriveHealth() {}, renderSystemInfo() {}, checkVersion() {},
+    renderMail() {}, renderHardware() {}, renderDriveHealth() {}, renderSystemInfo() {},
     safeFetch(url) {
       calls[url] = (calls[url] || 0) + 1;
       if (url.includes('-processes')) return new Promise(resolve => { release[url] = resolve; });

@@ -712,6 +712,20 @@ do
     check(count_records(path) == 2, "with the ticks overdue, an ordinary request records")
 end
 
+-- 22b. An interval finer than cron's minute is kept by ordinary requests.
+do
+    local dir, m = base .. "/tick-fast", metrics_stub()
+    local h = assert(loadfile(script_dir .. "/history.lua"))()
+    h.init({history = {record_interval = 30}}, m, dir, dir)
+    local path = dir .. "/logs/history.jsonl"
+    write(dir .. "/dashboard-last-record", tostring(os.time() - 20) .. "\n")
+    h.maybe_record()
+    check(count_records(path) == 0, "a short interval is still respected")
+    write(dir .. "/dashboard-last-record", tostring(os.time() - 40) .. "\n")
+    h.maybe_record()
+    check(count_records(path) == 1, "an interval under two minutes records on an ordinary request, on time")
+end
+
 -- 23. Rotation keeps the newest max_archives archives and deletes older ones;
 -- files that are not this history's archives are left alone.
 do

@@ -124,7 +124,7 @@
 .reset-btn, .dropdown-trigger, .dropdown-trigger-small, .toggle-btn,
 .history-btn, .history-icon-btn, .history-close-btn, .history-refresh-btn,
 .history-settings-btn, .mode-toggle-btn, .refresh-btn, .refresh-btn-small,
-.trace-btn, .unit-toggle-btn, .range-toggle, .update-banner-reload {
+.trace-btn, .unit-toggle-btn, .range-toggle {
   background: #c0c0c0;
   color: #000;
   border: none;

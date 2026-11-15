@@ -12,8 +12,13 @@ local config = {}
 local PUBLIC_IP_FILE = "/tmp/dashboard-public-ip"
 local PUBLIC_IP_TTL = 600     -- 10 minutes
 local RATES_FILE = "/tmp/dashboard-rates"
-local RATES_FRESH = 1         -- younger than this (s): reuse the stored rates
-local RATES_STALE = 15        -- older than this (s): too old to measure against
+-- Younger than this (s): reuse the stored rates. Well under the UI's fastest
+-- poll (1 s), so only the requests of one poll share a measurement.
+local RATES_FRESH = 0.5
+-- Older than this (s): too old to measure against. Over twice the UI's slowest
+-- poll (30 s), so no poll interval falls back to waiting; a dashboard reopened
+-- after longer shows the last second, not an average over its absence.
+local RATES_STALE = 65
 
 local has_timeout = false
 

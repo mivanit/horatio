@@ -457,8 +457,11 @@ end
 -- failed record is not retried until the next interval.
 function M.maybe_record(scheduled)
     if not metrics then return end
+    -- An interval under two minutes is finer than cron's minute can keep, so
+    -- there ordinary requests record on time, as they did before the tick.
+    local grace = RECORD_INTERVAL >= 120 and PIGGYBACK_GRACE or 0
     local interval = scheduled and math.max(1, RECORD_INTERVAL - TICK_SLACK)
-        or RECORD_INTERVAL + PIGGYBACK_GRACE
+        or RECORD_INTERVAL + grace
     if not due(os.time(), interval) then return end
     local result = record(interval, true)
     if result.error then
