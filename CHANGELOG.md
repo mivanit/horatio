@@ -5,6 +5,8 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-15
+
 - `scripts/history-merge.sh`: merge the history of several boxes, or a box's archives,
   into one file. Inputs are never changed and an existing output is never overwritten.
 - Security: Glances 4.5.6 or newer and urllib3 2.8.0. The newer Glances no longer
