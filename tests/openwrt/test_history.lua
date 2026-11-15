@@ -726,28 +726,22 @@ do
     check(count_records(path) == 1, "an interval under two minutes records on an ordinary request, on time")
 end
 
--- 23. Rotation keeps the newest max_archives archives and deletes older ones;
--- files that are not this history's archives are left alone.
+-- 23. Rotation never deletes an archive, its own or older ones, nor other files.
 do
-    local h, _, path, dir = fixture("prune")
+    local h, _, path, dir = fixture("keep-archives")
     h.max_file_bytes = 3000
-    h.max_archives = 2
     local logs = dir .. "/logs/"
     local old = {"history-20000101T000000Z.jsonl.gz", "history-20000102T000000Z.jsonl.gz",
-        "history-20000103T000000Z.jsonl.gz"}
+        "history-20000103T000000Z.jsonl.gz", "history-notes.txt"}
     for _, name in ipairs(old) do write(logs .. name, "old") end
-    write(logs .. "history-notes.txt", "keep")
-    write(logs .. "other-20000101T000000Z.jsonl.gz", "keep")
     write(path, rotation_input())
     local result = h.record_now()
     local kept = archives(dir)
-    check(result.status == "ok" and result.warning == nil and #kept == 2
-        and kept[1] == logs .. old[3] and contents(logs .. old[1]) == "" and contents(logs .. old[2]) == "",
-        "rotation deletes all but the newest archives", "kept=" .. table.concat(kept, ","))
-    check(contents(logs .. "history-notes.txt") == "keep"
-        and contents(logs .. "other-20000101T000000Z.jsonl.gz") == "keep",
-        "pruning touches only this history's archives")
-    check(archived(kept[2]) .. contents(path) == rotation_input() .. jsonc.stringify(result.record) .. "\n",
+    local untouched = true
+    for _, name in ipairs(old) do untouched = untouched and contents(logs .. name) == "old" end
+    check(result.status == "ok" and result.warning == nil and #kept == 4 and untouched,
+        "rotation keeps every archive", "kept=" .. table.concat(kept, ","))
+    check(archived(kept[4]) .. contents(path) == rotation_input() .. jsonc.stringify(result.record) .. "\n",
         "the new archive and the live file still hold every record")
 end
 

@@ -31,9 +31,6 @@ local INITIAL_TAIL_READ = 1048576  -- 1 MiB tail window, doubled until it covers
 -- Small, because rotation runs inside a request on the router's CPU and flash:
 -- 16 MiB is some months of records and a few seconds of gzip.
 M.max_file_bytes = 16 * 1048576
--- Archives kept (config history.max_archives); older ones are deleted after a
--- rotation so the flash cannot fill.
-M.max_archives = 6
 M.max_read_bytes = 4 * 1048576  -- bound per-request parsing and response memory on routers
 
 local function shell_quote(value)
@@ -51,7 +48,6 @@ function M.init(cfg, metrics_module, dashboard_dir, state_dir)
     local hist_cfg = config.history or {}
     RECORD_INTERVAL = hist_cfg.record_interval or 600
     M.max_file_bytes = (hist_cfg.max_file_mb or 16) * 1048576
-    M.max_archives = tonumber(hist_cfg.max_archives) or 6
     if dashboard_dir then
         local logs_dir = dashboard_dir .. "/logs"
         os.execute("mkdir -p " .. shell_quote(logs_dir))
@@ -300,28 +296,6 @@ local function reserve_archive()
     end
 end
 
--- Delete all but the newest M.max_archives archives. Their names carry the UTC
--- time, so name order is age order. Best effort: a failure here leaves an extra
--- archive, never a lost record.
-local function prune_archives()
-    local dir, stem = HISTORY_FILE:match("^(.*)/([^/]+)%.jsonl$")
-    if not dir then return end
-    local nixio = require("nixio")
-    local prefix, suffix, names = stem .. "-", ".jsonl.gz", {}
-    for name in (nixio.fs.dir(dir) or function() end) do
-        if name:sub(1, #prefix) == prefix and name:sub(-#suffix) == suffix then
-            names[#names + 1] = name
-        end
-    end
-    table.sort(names)
-    for i = 1, #names - math.max(0, M.max_archives) do
-        local removed, remove_err = os.remove(dir .. "/" .. names[i])
-        if not removed then
-            io.stderr:write("[dashboard] could not delete old history archive: " .. tostring(remove_err) .. "\n")
-        end
-    end
-end
-
 -- Gzip everything but the newest max_file_bytes / 2 (whole lines) to an archive
 -- beside the file, then atomically replace the live file with its newest part.
 -- The writer lock is already held. Until rename succeeds, every failure keeps
@@ -377,8 +351,6 @@ rotate_locked = function()
     if not ok then
         if archive then os.remove(archive) end
         if tmp_created then os.remove(tmp) end
-    elseif archive then
-        prune_archives()
     end
     return ok, err
 end

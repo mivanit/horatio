@@ -256,8 +256,15 @@ def test_read_ping_targets_unit() -> None:
     import server
 
     assert server._read_ping_targets(
-        {"ping_targets": [{"address": "8.8.8.8"}, {"address": ""}, {"name": "x"}]}
-    ) == ["8.8.8.8"], "addresses kept, empty/missing ones skipped"
+        {
+            "ping_targets": [
+                {"address": "8.8.8.8"},
+                {"address": ""},
+                {"address": None},
+                {"name": "x"},
+            ]
+        }
+    ) == ["8.8.8.8"], "addresses kept, empty/null/missing ones skipped"
     assert server._read_ping_targets({}) == ["8.8.8.8", "192.168.1.1"], "default"
     assert server._read_ping_targets({"ping_targets": []}) == [], "none configured"
     bad: object
@@ -328,12 +335,13 @@ def test_cached_unit() -> None:
 
 
 def test_mail_cache_unit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The spool is re-read only when its size or mtime changes; a missing spool
-    is reported every time, never from the cache."""
+    """The spool is re-read only when it changes (contents, permissions, or the
+    file itself); a missing spool is reported every time, never from the cache."""
     import server
 
     spool: Path = tmp_path / "spool"
     monkeypatch.setattr(server, "MAIL_SPOOL", str(spool))
+    monkeypatch.setattr(server, "_mail_cache", {"key": None, "result": None})
     reads: list[int] = []
 
     def fake_mail() -> dict[str, Any]:
@@ -348,6 +356,8 @@ def test_mail_cache_unit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     assert server._get_mail_cached()["count"] == 3 and len(reads) == 3, "unchanged"
     spool.write_text("From a\n\nFrom b\n\n")
     assert server._get_mail_cached()["count"] == 4, "a changed spool is re-read"
+    spool.chmod(0o600)  # e.g. fixing an unreadable spool: mtime and size unchanged
+    assert server._get_mail_cached()["count"] == 5, "a permission change is re-read"
 
 
 def test_shape_fs_unit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

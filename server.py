@@ -711,7 +711,7 @@ def _read_ping_targets(cfg: dict[str, Any]) -> list[str]:
         "ping_targets", [{"address": "8.8.8.8"}, {"address": "192.168.1.1"}]
     )
     if not isinstance(targets, list) or not all(
-        isinstance(t, dict) and isinstance(t.get("address", ""), str) for t in targets
+        isinstance(t, dict) and isinstance(t.get("address") or "", str) for t in targets
     ):
         sys.exit(
             f'{CONFIG_FILE}: ping_targets must be a list of {{"address": "<host>"}}'
@@ -4092,7 +4092,9 @@ def _get_mail_cached() -> dict[str, Any]:
         st: os.stat_result = os.stat(MAIL_SPOOL)
     except OSError:
         return _get_mail()  # missing or unreadable: cheap, and reports why
-    key: tuple[int, int] = (st.st_mtime_ns, st.st_size)
+    # ctime and inode too: a chmod/chown that fixes an unreadable spool, or a
+    # replaced spool, changes neither mtime nor size.
+    key: tuple[int, ...] = (st.st_mtime_ns, st.st_ctime_ns, st.st_ino, st.st_size)
     if _mail_cache["key"] != key:
         _mail_cache["result"] = _get_mail()
         _mail_cache["key"] = key

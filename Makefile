@@ -52,6 +52,14 @@ demo: demo-docs
 # only here, so main's VERSION is always the newest release.
 release:
 	@test -n "$(V)" || { echo "usage: make release V=X.Y.Z"; exit 1; }
+	@echo "$(V)" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' \
+		|| { echo "error: V must be X.Y.Z (digits, no leading v), got '$(V)'"; exit 1; }
+	@! git rev-parse -q --verify "refs/tags/v$(V)" >/dev/null \
+		|| { echo "error: tag v$(V) already exists"; exit 1; }
+	@git diff --quiet HEAD -- VERSION CHANGELOG.md \
+		|| { echo "error: VERSION or CHANGELOG.md has uncommitted changes"; exit 1; }
+	@awk '/^## \[Unreleased\]$$/ {u=1; next} u && /^## \[/ {exit} u && NF {found=1} END {exit !found}' CHANGELOG.md \
+		|| { echo "error: CHANGELOG.md has no '## [Unreleased]' section with entries"; exit 1; }
 	echo "$(V)" > VERSION
 	sed -i "s/^## \[Unreleased\]$$/## [Unreleased]\n\n## [$(V)] - $$(date +%F)/" CHANGELOG.md
 	git commit -m "Release v$(V)" VERSION CHANGELOG.md
