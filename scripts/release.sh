@@ -4,7 +4,8 @@
 # Sets VERSION and pyproject.toml's version, relocks, turns CHANGELOG.md's
 # Unreleased section into "## [X.Y.Z] - <today>", commits "Release vX.Y.Z" and
 # tags vX.Y.Z. When VERSION already says X.Y.Z with a dated section (the first
-# release), it only tags. Pushing is left to you; the pushed tag makes CI publish
+# release), it re-dates that section to today (committing "Release vX.Y.Z" if
+# the date changed) and tags. Pushing is left to you; the pushed tag makes CI publish
 # the GitHub release once the checks pass.
 set -euo pipefail
 
@@ -35,7 +36,19 @@ if [ "$new" != "$old" ]; then
     git add VERSION pyproject.toml uv.lock CHANGELOG.md
     git commit --quiet -m "Release v$new"
 else
-    uv run --locked pytest tests/unit/test_version.py -q
+    # The section was dated when it was written; the release is dated the day it
+    # is tagged. Portable sed (no -i), dots in the version matched literally.
+    today="$(date +%F)"
+    grep -q "^## \[${new//./\\.}\] - " CHANGELOG.md || die "CHANGELOG.md has no dated [$new] section."
+    if ! grep -q "^## \[${new//./\\.}\] - $today\$" CHANGELOG.md; then
+        sed "s/^## \[${new//./\\.}\] - .*\$/## [$new] - $today/" CHANGELOG.md > CHANGELOG.md.tmp
+        mv CHANGELOG.md.tmp CHANGELOG.md
+        uv run --locked pytest tests/unit/test_version.py -q
+        git add CHANGELOG.md
+        git commit --quiet -m "Release v$new"
+    else
+        uv run --locked pytest tests/unit/test_version.py -q
+    fi
 fi
 git tag -a "v$new" -m "v$new"
 echo "Tagged v$new. Publish it with:"
