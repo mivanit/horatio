@@ -105,6 +105,8 @@ def test_newest_stable_release_runs_its_installer_with_the_other_flags(
     assert repos.ran() == "--no-optional --collector"
     assert "v0.1.0 (v0.1.0) -> v0.2.0 (v0.2.0)" in result.stdout
     assert "To go back: ./install.sh --update v0.1.0" in result.stdout
+    # The checkout has moved before the new installer runs: say how to finish.
+    assert "rerun: ./install.sh --no-optional --collector" in result.stdout
 
 
 def test_named_pre_release_and_bare_version(repos: Repos) -> None:
@@ -122,6 +124,40 @@ def test_already_at_newest_release(repos: Repos) -> None:
     result: subprocess.CompletedProcess[str] = repos.update()
     assert result.returncode == 0, result.stderr
     assert "Already at v0.1.0" in result.stdout and repos.ran() is None
+
+
+@pytest.mark.parametrize("ref", ["", "main"])
+def test_already_current_still_runs_the_other_flags(
+    repos: Repos, tmp_path: Path, ref: str
+) -> None:
+    """`--update --collector` on a current box installs the collector instead of
+    stopping at "Already at". The installer it hands over to is the box's own
+    (real) one, so a `bash` first on PATH passes the --update run through and
+    records the hand-over instead of running it."""
+    repos.release("0.1.0")
+    repos.clone()
+    if ref == "main":
+        # origin/main must be fetched for "Already on the newest main".
+        repos.git(repos.box, "fetch", "--quiet", "origin")
+    shim: Path = tmp_path / "bin" / "bash"
+    shim.parent.mkdir()
+    real_bash: str = subprocess.run(
+        ["sh", "-c", "command -v bash"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'case " $* " in *" --update "*) exec {real_bash} "$@" ;; esac\n'
+        f'printf "%s\\n" "$*" > {repos.box}/ran\n'
+    )
+    shim.chmod(0o755)
+    repos.env["PATH"] = f"{shim.parent}{os.pathsep}{repos.env['PATH']}"
+    result: subprocess.CompletedProcess[str] = repos.update(
+        *([ref] if ref else []), "--collector", "--no-optional"
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Already" in result.stdout
+    assert "Running the installer for: --collector --no-optional" in result.stdout
+    assert repos.ran() == f"{repos.box}/install.sh --collector --no-optional"
 
 
 @pytest.mark.parametrize("problem", ["dirty", "branch", "unpushed"])

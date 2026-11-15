@@ -84,6 +84,14 @@ semver_cmp() {   # <a> <b>
     fi
 }
 SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+# Nothing to update. Flags given alongside --update (--collector, ...) still get
+# their install, so `--update --collector` on a current box isn't a silent no-op.
+already_current() {   # message
+    echo "$1"
+    [ ${#PASSTHROUGH[@]} -gt 0 ] || exit 0
+    echo "Running the installer for: ${PASSTHROUGH[*]}"
+    exec bash "$SCRIPT_DIR/install.sh" "${PASSTHROUGH[@]}"
+}
 update_checkout() {
     local git=(git -C "$SCRIPT_DIR")
     command -v git > /dev/null || die "--update needs git."
@@ -116,8 +124,7 @@ update_checkout() {
     if [ "$ref" = main ]; then
         target=origin/main
         if [ "$branch" = main ] && [ "$old_commit" = "$("${git[@]}" rev-parse origin/main)" ]; then
-            echo "Already on the newest main ($old_desc)."
-            exit 0
+            already_current "Already on the newest main ($old_desc)."
         fi
     else
         if [ -z "$ref" ]; then
@@ -130,8 +137,7 @@ update_checkout() {
             || die "no release $ref (list them: git tag -l 'v*')."
         target="$ref"
         if [ "$("${git[@]}" rev-parse "$ref^{commit}")" = "$old_commit" ]; then
-            echo "Already at $ref."
-            exit 0
+            already_current "Already at $ref."
         fi
     fi
     local new_version
@@ -173,7 +179,9 @@ update_checkout() {
     else
         echo "To go back: git checkout $old_ref && ./install.sh"
     fi
-    echo "Running the updated installer..."
+    # The checkout has moved: if the install below fails (network, sudo), the old
+    # service runs the new code against the old venv on its next restart.
+    echo "Running the updated installer. If it fails, fix the cause and rerun: ./install.sh ${PASSTHROUGH[*]+${PASSTHROUGH[*]}}"
     # The new installer does the install: it matches the code it installs. Nothing
     # after this line runs from the old script, which git has replaced on disk.
     exec bash "$SCRIPT_DIR/install.sh" ${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}

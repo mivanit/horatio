@@ -127,7 +127,7 @@ def test_newest_release_replaces_code_and_keeps_local_state(router: Router) -> N
     assert result.returncode == 0, result.stdout + result.stderr
     assert router.downloads() == [
         "https://api.github.com/repos/mivanit/horatio/releases/latest",
-        "https://github.com/mivanit/horatio/archive/refs/tags/v0.2.0.tar.gz",
+        "https://codeload.github.com/mivanit/horatio/tar.gz/refs/tags/v0.2.0",
     ]
     assert (router.box / "VERSION").read_text() == "0.2.0\n"
     assert (router.box / "README.md").read_text() == "new\n"
@@ -143,7 +143,7 @@ def test_named_release_skips_the_api(router: Router) -> None:
     result: subprocess.CompletedProcess[str] = router.update("0.2.0")
     assert result.returncode == 0, result.stdout + result.stderr
     assert router.downloads() == [
-        "https://github.com/mivanit/horatio/archive/refs/tags/v0.2.0.tar.gz"
+        "https://codeload.github.com/mivanit/horatio/tar.gz/refs/tags/v0.2.0"
     ]
 
 

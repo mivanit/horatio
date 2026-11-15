@@ -49,6 +49,7 @@
   --color-load-5m: #ffd000;
   --color-load-15m: #ff8000;
   --color-accent: #ffff00;
+  --text-on-accent: #000000;
 
   --shadow-color: rgba(0, 0, 0, 0);
   --chart-font-size: 18;

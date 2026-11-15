@@ -251,6 +251,7 @@ make typing         # ty type checking
 make test           # Linux pytest suite (same as make test-linux)
 make check          # formatting, typing, and Linux tests; the default target
 make test-openwrt   # native Lua tests; requires Lua 5.1 and Nixio
+make test-openwrt-container   # install + --update on real OpenWrt in docker (CONTAINER=podman)
 make test-all       # Linux and native Lua suites
 make check-all      # formatting, typing, and both suites
 ```
@@ -366,11 +367,12 @@ The appropriate environment depends on the claim being tested:
 |---|---|---|
 | Linux APIs and history, frontend logic, mocked installers/collectors | `make test-linux` on Linux with the locked Python environment and Node.js | Actual router services or GPU hardware |
 | Lua recording locks, interrupted writes, and rotation | `make test-openwrt` on Linux with real Lua 5.1/Nixio and gzip | OpenWrt's service lifecycle or flash storage |
+| Router install, `--update` and the dashboard answering | `make test-openwrt-container`: the official OpenWrt rootfs booted with procd in docker or podman, with its own UCI, uhttpd, apk feeds and BusyBox; CI runs it on every push | The nginx/LuCI port handoff, real network interfaces, flash storage |
 | Router installation and service readiness | A disposable, booted OpenWrt VM with its own UCI, procd, uhttpd, nginx, and BusyBox | Every custom router configuration or physical flash behavior |
 
 The Lua suite checks preservation after application/process failures, not
-durability through sudden power loss. A rootfs container or host Nixio build is
-useful for the Lua tests, but does not replace a booted router for service tests.
+durability through sudden power loss. A host Nixio build is useful for the Lua
+tests; the container covers installing and updating, not the nginx handoff.
 
 <details>
 <summary>Build the native Lua test environment on Linux without installing host packages</summary>

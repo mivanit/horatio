@@ -93,7 +93,9 @@ fi
 # copied over the checkout (config.json, www/ and logs/ are not in a release).
 # Then the release's own installer runs.
 RELEASE_API="https://api.github.com/repos/mivanit/horatio/releases/latest"
-RELEASE_TARBALLS="https://github.com/mivanit/horatio/archive/refs/tags"
+# codeload is where github.com/<repo>/archive/... redirects; going there directly
+# saves the redirect (some networks reach codeload but not github.com).
+RELEASE_TARBALLS="https://codeload.github.com/mivanit/horatio/tar.gz/refs/tags"
 SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
 die() { error "$1"; exit 1; }
 # Compare two X.Y.Z[-pre] versions: prints -1, 0 or 1. A pre-release sorts before
@@ -173,7 +175,7 @@ update_checkout() {   # [vX.Y.Z]
         trap 'rm -rf "$work"' EXIT
         trap 'exit 1' HUP INT TERM
         info "Downloading $ref..."
-        wget -qO "$work/release.tar.gz" "$RELEASE_TARBALLS/$ref.tar.gz" \
+        wget -qO "$work/release.tar.gz" "$RELEASE_TARBALLS/$ref" \
             || die "Download of $ref failed (does the release exist? HTTPS needs libustream-mbedtls and ca-bundle)."
         mkdir "$work/tree"
         # gzip | tar rather than tar -z, which some BusyBox builds lack.
@@ -198,7 +200,8 @@ update_checkout() {   # [vX.Y.Z]
     fi
     info "Updated v$old_version -> v$new_version. Changes: CHANGELOG.md"
     info "To go back: sh $SCRIPT_DIR/install.sh --update v$old_version"
-    info "Running the updated installer..."
+    # The files have moved already: if the install below fails, say how to finish it.
+    info "Running the updated installer. If it fails, fix the cause and rerun: sh $SCRIPT_DIR/install.sh"
     # The release's installer does the install, so it matches what it installs.
     exec sh "$SCRIPT_DIR/install.sh"
 }
@@ -213,7 +216,9 @@ command -v uhttpd >/dev/null 2>&1 || { error "uhttpd not found."; exit 1; }
 # --- Dependencies ---
 info "Checking dependencies..."
 if command -v apk >/dev/null 2>&1; then
-    apk add uhttpd-mod-lua luci-lib-jsonc luci-lib-nixio
+    # uhttpd with its Lua plugin, both at the feed's version: a newer plugin in an
+    # older uhttpd gets a garbled handler path and the dashboard never starts.
+    apk add --upgrade uhttpd uhttpd-mod-lua luci-lib-jsonc luci-lib-nixio
 elif command -v opkg >/dev/null 2>&1; then
     opkg list-installed | grep -q uhttpd-mod-lua || opkg install uhttpd-mod-lua
     opkg list-installed | grep -q luci-lib-jsonc || opkg install luci-lib-jsonc

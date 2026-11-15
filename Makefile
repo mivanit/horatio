@@ -5,7 +5,7 @@ LUA ?= lua5.1
 PYTEST_ARGS ?=
 
 .DEFAULT_GOAL := check
-.PHONY: format check-format typing test test-linux test-openwrt test-all check check-all demo demo-docs
+.PHONY: format check-format typing test test-linux test-openwrt test-openwrt-container test-all check check-all demo demo-docs
 
 format:
 	$(UV) run --locked ruff check --fix .
@@ -28,6 +28,11 @@ test-linux:
 # Override LUA and/or export LUA_CPATH when using a local Lua/Nixio build.
 test-openwrt:
 	LUA="$(LUA)" $(UV) run --locked pytest tests/openwrt $(PYTEST_ARGS)
+
+# Real OpenWrt in a container (docker; CONTAINER=podman to switch): install this
+# checkout, then --update to the newest release. Needs network.
+test-openwrt-container:
+	scripts/openwrt-container-test.sh
 
 test-all: test-linux test-openwrt
 

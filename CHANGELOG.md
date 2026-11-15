@@ -25,7 +25,8 @@ First versioned release.
 - History recording to `logs/history.jsonl`, with `/api/history` and per-field reads.
 - Optional root hardware collector: SMART, RAID, ECC, IPMI fans/temps/power, RAPL.
 - `/text` console report and the `tui.py` live terminal view.
-- OpenWrt backend in Lua serving the same frontend.
+- OpenWrt backend in Lua serving the same frontend. The installer upgrades uhttpd with
+  its Lua plugin: a plugin newer than uhttpd left the dashboard unstarted.
 - Themes picked from the toolbar: light, classic, high-contrast, print (also for e-ink)
   and phosphor, or your own CSS file in `themes/` (see `themes/README.md`).
 - Demo site (`docs/`, deployed to GitHub Pages): the real frontend against a fake

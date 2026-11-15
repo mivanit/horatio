@@ -49,6 +49,7 @@
   --color-load-5m: #ccff00;
   --color-load-15m: #88cc00;
   --color-accent: #33ff66;
+  --text-on-accent: #000000;
 
   --radius-xs: 0;
   --radius-sm: 0;

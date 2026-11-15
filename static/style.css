@@ -63,6 +63,7 @@
   /* Additional */
   --text-input: #e0e0e0;
   --color-accent: #3b82f6;
+  --text-on-accent: #ffffff;   /* text on an accent-filled button */
   --bg-bar: #252525;
 
   /* Typography */
@@ -1836,7 +1837,7 @@ h1 {
 
 .update-banner-reload {
   background: var(--color-accent);
-  color: var(--text-primary);
+  color: var(--text-on-accent);
   border: none;
   border-radius: var(--radius-sm);
   padding: 4px 12px;
