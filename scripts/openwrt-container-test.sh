@@ -67,6 +67,12 @@ version="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 expect /api/version "\"version\":\"$version\""
 expect /api/4/load '"min1"'
 expect / '/static/app.js?v='
+# Rates come from the previous poll's counters: the second request takes that path.
+expect /api/4/cpu '"total"'
+sleep 1
+expect /api/4/cpu '"total"'
+expect /api/history/tick '"status":"ok"'
+expect /api/history '"timestamp"'
 
 echo "== Update to the newest release"
 # main's VERSION is the newest release (it changes only in `make release`).
