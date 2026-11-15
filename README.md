@@ -151,6 +151,14 @@ an agent along with a description of the look you want).
 History recording settings can also be changed from the page with the password; they revert to
 `config.json` on restart.
 
+**Merging history** (moving to a new box, combining a router's and a server's, or folding a
+router's gzipped archives back into one file): `scripts/history-merge.sh -o merged.jsonl
+logs/ other-box-logs/ some.jsonl.gz` reads `logs/` directories or single files, sorts by
+timestamp, and drops only byte-identical lines. It never changes its inputs or overwrites
+`-o`. To use the result, stop the dashboard, keep the old `logs/history.jsonl`, and put the
+merged file in its place. It runs on BusyBox too, but holds the data in RAM there, so merge
+large histories on a Linux box.
+
 ## Security
 
 Meant for a trusted LAN, not public interfaces. probably has many security holes. The dashboard binds to all interfaces and is unauthenticated except

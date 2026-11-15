@@ -16,9 +16,6 @@ constraint-dependencies = [
     "fastapi>=0.133.0",      # earlier versions cap starlette <1.0, blocking its fixes
     "starlette>=1.3.1",
     "urllib3>=2.8.0",
-    "cryptography>=50.0.0",
-    "ecdsa>=0.19.2",         # Minerva timing attack remains unfixed upstream (won't-fix)
-    "pyasn1>=0.6.5",
     "idna>=3.15",
     "requests>=2.33.0",
 ]

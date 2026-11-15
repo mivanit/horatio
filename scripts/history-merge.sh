@@ -34,7 +34,7 @@ if [ -e "$out" ] || [ -L "$out" ]; then
     exit 1
 fi
 
-# Every input file, oldest archives first (order only matters for the report).
+# Every input file, one per line.
 files=""
 for input in "$@"; do
     if [ -d "$input" ]; then
@@ -56,18 +56,23 @@ for input in "$@"; do
 done
 
 tmp="$out.partial.$$"
-trap 'rm -f "$tmp"' EXIT  # only this run's unfinished output
+failed="$out.failed.$$"
+trap 'rm -f "$tmp" "$tmp.count" "$failed"' EXIT  # only this run's own unfinished output
 echo "$files" | while IFS= read -r f; do
     [ -n "$f" ] || continue
     echo "reading $f" >&2
     case "$f" in
-        *.gz) gzip -dc "$f" ;;
-        *) cat "$f" ;;
+        # A broken archive (e.g. a rotation that was killed) still yields what it
+        # can; its records are also in the file it was being cut from.
+        *.gz) gzip -dc "$f" || echo "warning: $f is damaged; using the part that reads" >&2 ;;
+        *) cat "$f" || echo "unreadable: $f" >> "$failed" ;;
     esac
     # A file without a trailing newline must not fuse with the next file's first line.
     echo
-done | awk '
+done | { awk -v countfile="$tmp.count" '
     NF == 0 { next }
+    { n++ }
+    END { print n + 0 > countfile }
     {
         ts = ""
         if (match($0, /"timestamp": *"[^"]*"/)) {
@@ -76,18 +81,19 @@ done | awk '
             sub(/"$/, "", ts)
         }
         print ts "\t" $0
-    }' | LC_ALL=C sort -u | awk '{ print substr($0, index($0, "\t") + 1) }' > "$tmp"
+    }' || echo "awk failed" >> "$failed"; } \
+    | { LC_ALL=C sort -u || echo "sort failed (out of memory or /tmp space?)" >> "$failed"; } \
+    | { awk '{ print substr($0, index($0, "\t") + 1) }' > "$tmp" || echo "write failed" >> "$failed"; }
+if [ -s "$failed" ]; then
+    echo "error: nothing written:" >&2
+    cat "$failed" >&2
+    exit 1
+fi
 
-read_lines=0
-for f in $(echo "$files"); do
-    case "$f" in
-        *.gz) n=$(gzip -dc "$f" | awk 'NF { n++ } END { print n + 0 }') ;;
-        *) n=$(awk 'NF { n++ } END { print n + 0 }' "$f") ;;
-    esac
-    read_lines=$((read_lines + n))
-done
+read_lines=$(cat "$tmp.count")
+rm -f "$tmp.count"
 written=$(awk 'END { print NR }' "$tmp")
-untimed=$(awk '!/"timestamp": *"/ { n++ } END { print n + 0 }' "$tmp")
+untimed=$(awk '!/"timestamp": *"[^"]*"/ { n++ } END { print n + 0 }' "$tmp")
 mv "$tmp" "$out"
 trap - EXIT
 echo "wrote $out: $written records from $read_lines lines;" \
