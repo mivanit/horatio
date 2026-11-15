@@ -5,6 +5,8 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+## [0.0.1] - 2026-11-15
+
 - Dashboard: live CPU, memory, swap, GPU, network, disk I/O, temperature, power and ping
   cards with history charts, from a FastAPI server wrapping Glances, `nvidia-smi`,
   `ping`, `nethogs` and `pidstat`.
