@@ -70,6 +70,15 @@ elif name == "test-uhttpd-service" and event["config"] is None and os.environ["H
 """
 
 
+# The line of index.html's theme loader that the installer stamps; the real
+# page must still contain it, or themes would be served unstamped.
+THEME_LOADER: str = next(
+    line + "\n"
+    for line in (ROOT / "index.html").read_text().splitlines()
+    if "+ t + '.css\"" in line
+)
+
+
 class TestOpenWrtInstaller:
     @pytest.fixture(autouse=True)
     def setup(self: TestOpenWrtInstaller, tmp_path: Path) -> None:
@@ -489,7 +498,7 @@ class TestOpenWrtInstaller:
         (self.root / "index.html").write_text(
             '<link rel="stylesheet" href="/static/style.css">\n'
             '<link rel="icon" href="/static/favicon.svg">\n'
-            '<script src="/static/app.js"></script>\n'
+            '<script src="/static/app.js"></script>\n' + THEME_LOADER
         )
         result: subprocess.CompletedProcess[str] = self.run_install()
         assert result.returncode == 0, result.stderr + result.stdout
@@ -500,6 +509,8 @@ class TestOpenWrtInstaller:
         assert len(stamps) == 2 and stamps[0] == stamps[1], served
         assert re.fullmatch(r"1\.2\.3-\d+", stamps[0]), stamps
         assert '"/static/favicon.svg"' in served, "only scripts and styles"
+        # The theme loader builds its URL in JS; it gets the same stamp.
+        assert f"+ t + '.css?v={stamps[0]}\"" in served, served
 
     def test_existing_config_is_migrated_and_rerun_is_idempotent(
         self: TestOpenWrtInstaller,

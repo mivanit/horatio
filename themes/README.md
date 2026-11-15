@@ -13,8 +13,9 @@ in the toolbar lists every theme here; each browser remembers its own choice
   straight away. On OpenWrt, add it here and rerun `openwrt/install.sh`, which
   copies themes into `www/themes/` and writes the list (symlinks are copied as
   files, since uhttpd won't serve them).
-- **Iterating**: the server sends themes with `Cache-Control: no-cache`, so a
-  plain reload shows an edit. On OpenWrt, use a hard reload.
+- **Iterating**: a plain reload shows an edit. The Linux server sends themes
+  with `Cache-Control: no-cache`; on OpenWrt, rerunning the installer gives
+  theme URLs a new version stamp.
 - **Shipped examples**: `light.css` changes only variables. The others also
   restyle selectors: `classic.css` (a 1990s desktop), `high-contrast.css`
   (black and white, heavy edges), `print.css` (black ink on white, no motion;

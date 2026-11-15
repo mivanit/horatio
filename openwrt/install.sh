@@ -269,8 +269,12 @@ mkdir -p "$WWW_DIR"
 rm -rf "$WWW_DIR/static" "$WWW_DIR/index.html"
 # uhttpd sends no Cache-Control for files, so browsers may keep old scripts for
 # days after an update: give the asset URLs this install's version and time.
+# The theme URL is built by the loader in <head> ('themes/' + t + '.css'), so a
+# new or edited theme also reaches browsers once this script reruns.
 ASSET_STAMP="$(read_version "$DASHBOARD_DIR" || true)-$(date +%s)"
-sed -E "s#\"(/static/[^\"?]+\.(js|css))\"#\"\1?v=$ASSET_STAMP\"#g" \
+sed -E \
+    -e "s#\"(/static/[^\"?]+\.(js|css))\"#\"\1?v=$ASSET_STAMP\"#g" \
+    -e "s#(\+ t \+ '\.css)\"#\1?v=$ASSET_STAMP\"#" \
     "$DASHBOARD_DIR/index.html" > "$WWW_DIR/index.html"
 cp -RL "$DASHBOARD_DIR/static" "$WWW_DIR/static"
 # Themes are copied like static/ (add one to themes/ and rerun this script);
