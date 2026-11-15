@@ -899,6 +899,7 @@ function renderDrives(data) {
     const maxDrivePercent = Math.max(...data.map(d => Math.max(d.percent || 0, d.inodes_percent || 0)));
     updateCardWarning('drive-usage', maxDrivePercent, thresholds.disk_percent);
   } else {
+    updateCardNoData('drive-usage', true);   // hidden, not failed: must not count as "Partial"
     driveUsageCard.style.display = 'none';
   }
   updateCacheDisplay('drive-usage', 'drives');
@@ -1411,6 +1412,7 @@ async function fetchSlowData() {
   } else if (!fs.ok) {
     const driveUsageContent = document.getElementById('drive-usage-content');
     driveUsageContent.innerHTML = '<div class="drive-usage-item text-error">Error loading drive info</div>';
+    document.getElementById('drive-usage-card').style.display = '';   // an empty list hid it; show the error
     updateCardNoData('drive-usage', false);
   }
 
@@ -1457,7 +1459,7 @@ async function fetchSlowData() {
   const useDiskCache = isCacheValid('diskProcesses');
   if (useDiskCache) {
     guard('processes', () => diskCapture.handleResponse(getCache('diskProcesses'), dataCache.diskProcesses.lastUpdate));
-  } else {
+  } else if (cardStatus.processes) {   // no process card (OpenWrt): no capture, no error
     if (!diskCapture.capturing) diskCapture.start();
     // Stamped with the capture's start, not its end: the next slow tick is then
     // a full interval away and finds the result expired however long the
@@ -1487,7 +1489,7 @@ async function fetchSlowData() {
   const useNetworkCache = isCacheValid('networkProcesses');
   if (useNetworkCache) {
     guard('processes', () => networkCapture.handleResponse(getCache('networkProcesses'), dataCache.networkProcesses.lastUpdate));
-  } else {
+  } else if (cardStatus.processes) {   // as the disk capture above
     if (!networkCapture.capturing) networkCapture.start();
     // Stamped with the capture's start, not its end: the next slow tick is then
     // a full interval away and finds the result expired however long the
@@ -2049,7 +2051,9 @@ async function fetchDataOnce() {
 
     // Temperatures chart
     const tempsValueEl = document.getElementById('temps-value');
+    const tempsCard = document.getElementById('temps-card');
     if (temps.length > 0) {
+      tempsCard.style.display = '';
       charts.temps.data.labels = temps.map(t => abbreviateSensorLabel(t.label));
       charts.temps.data.datasets[0].data = temps.map(t => t.value ?? 0);
       charts.temps.data.datasets[0].backgroundColor = temps.map(t => getTempColor(hi(t), t.warning, t.critical));
@@ -2062,7 +2066,15 @@ async function fetchDataOnce() {
       // Orange when any sensor is at or over ITS OWN line (>= matches getTempColor),
       // not when the hottest sensor (usually a GPU under load) is over the chassis line.
       updateCardWarning('temps', temps.filter(t => hi(t) >= t.warning).length, 0);
+    } else if (sensors.ok && (gpu.ok || gpu.errorType === 'unavailable') &&
+               !getCache('sensors')?.temps?.length &&
+               !getCache('storageHealth')?.drives?.some(d => d.temperature_c != null)) {
+      // No source has any temperature (a router without thermal zones): hidden,
+      // not failed, as fans and power. A failed or stale source stays red.
+      tempsCard.style.display = 'none';
+      updateCardNoData('temps', true);
     } else {
+      tempsCard.style.display = '';   // a failure is shown, never counted on a hidden card
       updateCardNoData('temps', false);
     }
 
@@ -3738,7 +3750,6 @@ async function createHistoryCard(metric, hours = defaultHistoryHours) {
         <button class="trace-btn" data-traces="all" title="Show every trace">all</button>`;
 
   card.innerHTML = `
-    <div class="drag-handle"></div>
     <div class="card-header">
       <h2>${metricInfo.name} History</h2>
       <div class="history-controls">

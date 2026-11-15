@@ -4,12 +4,16 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  # pages.yml runs these before deploying the demo.
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: checks-${{ github.event.pull_request.number || github.ref }}
+  # github.workflow is the caller's name when pages.yml calls this, so that run
+  # and this file's own run for the same push don't cancel each other.
+  group: checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

@@ -39,12 +39,12 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, BinaryIO, Final, Literal, NamedTuple, TypeAlias
+from typing import Any, BinaryIO, Final, Literal, NamedTuple, TypeAlias, TypeVar
 
 import anyio
 import httpx
@@ -279,6 +279,52 @@ _nethogs_lock: asyncio.Lock = asyncio.Lock()
 
 # Lock to prevent concurrent disk captures
 _disk_lock: asyncio.Lock = asyncio.Lock()
+
+# One HTTP client for every call to Glances, made by lifespan. Building a client
+# costs ~18 ms of event-loop time (httpx loads the CA bundle into a new SSL
+# context each time), which a dashboard polling ten plugins every 2 s paid per
+# request, for plaintext calls to 127.0.0.1.
+_glances_client_shared: httpx.AsyncClient | None = None
+
+
+@asynccontextmanager
+async def _glances_client() -> AsyncIterator[httpx.AsyncClient]:
+    """The shared Glances client while the app runs; a throwaway one otherwise
+    (a coroutine driven without lifespan, as the unit tests do)."""
+    if _glances_client_shared is not None:
+        yield _glances_client_shared
+        return
+    client: httpx.AsyncClient
+    async with httpx.AsyncClient() as client:
+        yield client
+
+
+_T = TypeVar("_T")
+# Server-side result caches (see _cached): key -> (monotonic time, value).
+_cache_values: dict[str, tuple[float, Any]] = {}
+_cache_locks: dict[str, asyncio.Lock] = {}
+
+
+async def _cached(key: str, ttl: float, compute: Callable[[], Awaitable[_T]]) -> _T:
+    """``compute()``'s result, reused for ``ttl`` seconds.
+
+    Every open browser polls the same endpoints, and several of them start
+    processes (ping, nvidia-smi) or call out (the public-IP lookup): without
+    this each extra tab repeats that work. Concurrent callers share one
+    computation, and a failure is raised to its caller and not kept. The value
+    is shared between callers, so they must not change it.
+    """
+    hit: tuple[float, Any] | None = _cache_values.get(key)
+    if hit is not None and time.monotonic() - hit[0] < ttl:
+        return hit[1]
+    async with _cache_locks.setdefault(key, asyncio.Lock()):
+        hit = _cache_values.get(key)  # filled while this caller waited
+        if hit is not None and time.monotonic() - hit[0] < ttl:
+            return hit[1]
+        value: _T = await compute()
+        _cache_values[key] = (time.monotonic(), value)
+        return value
+
 
 # Rate limiting for manual history recording
 # Minimum gap between manual "record now" requests; 0 disables the limit. Read
@@ -654,15 +700,27 @@ def get_gpu_stats() -> list[dict[str, Any]]:
 # Ping Helper
 # ============================================================================
 
-addr: str | None
-PING_TARGETS: Final[list[str]] = [
-    addr
-    for t in _CONFIG.get(
-        "ping_targets",
-        [{"address": "8.8.8.8"}, {"address": "192.168.1.1"}],
+
+def _read_ping_targets(cfg: dict[str, Any]) -> list[str]:
+    """The ping_targets addresses, in config order; an entry without an address
+    is skipped. Any other shape is fatal like _load_config's errors rather than
+    skipped: the frontend reads the raw config.json and reads ``t.address`` of
+    each entry, so a server that limped on would still serve a broken ping card,
+    and a bare string or null here used to die at import with a traceback."""
+    targets: Any = cfg.get(
+        "ping_targets", [{"address": "8.8.8.8"}, {"address": "192.168.1.1"}]
     )
-    if (addr := t.get("address"))
-]
+    if not isinstance(targets, list) or not all(
+        isinstance(t, dict) and isinstance(t.get("address", ""), str) for t in targets
+    ):
+        sys.exit(
+            f'{CONFIG_FILE}: ping_targets must be a list of {{"address": "<host>"}}'
+            f" objects, got {json.dumps(targets)}"
+        )
+    return [t["address"] for t in targets if t.get("address")]
+
+
+PING_TARGETS: Final[list[str]] = _read_ping_targets(_CONFIG)
 
 
 def _run_ping(target: str = "8.8.8.8", timeout: int = 2) -> float | None:
@@ -759,23 +817,26 @@ def _dedupe_fs_by_device(fs_entries: list[dict[str, Any]]) -> list[dict[str, Any
     def _rank(mnt: str) -> tuple[bool, int, str]:
         return (mnt == "", len(mnt), mnt)  # non-empty first, then shortest
 
+    # One key per row, computed once: realpath walks the filesystem.
+    keys: list[tuple[str, Any, Any] | None] = [
+        _key(fs) if fs.get("device_name") else None for fs in fs_entries
+    ]
     winner: dict[tuple[str, Any, Any], str] = {}
     fs: dict[str, Any]
-    for fs in fs_entries:
-        if not fs.get("device_name"):
+    key: tuple[str, Any, Any] | None
+    for fs, key in zip(fs_entries, keys):
+        if key is None:
             continue
         mnt: Any = fs.get("mnt_point") or ""
-        key: tuple[str, Any, Any] = _key(fs)
         if key not in winner or _rank(mnt) < _rank(winner[key]):
             winner[key] = mnt
 
     kept: list[dict[str, Any]] = []
     used: set[tuple[str, Any, Any]] = set()
-    for fs in fs_entries:
-        if not fs.get("device_name"):
+    for fs, key in zip(fs_entries, keys):
+        if key is None:
             kept.append(fs)  # nothing to dedupe against
             continue
-        key = _key(fs)
         if key not in used and (fs.get("mnt_point") or "") == winner[key]:
             used.add(key)
             kept.append(fs)
@@ -820,15 +881,26 @@ def _visible_mounts(mountinfo: str) -> dict[str, str]:
             mount_id = mounts[mount_id][0]
         return seen
 
-    visible: dict[str, str] = {}
+    # Mount ids by mount point ("/" as ""), so each mount is checked against the
+    # mounts at its own path and its parent directories only, not against all.
+    at_path: dict[str, list[str]] = {}
     mount_id: str
+    for mount_id, (_, mnt, _) in mounts.items():
+        at_path.setdefault(mnt.rstrip("/"), []).append(mount_id)
+
+    visible: dict[str, str] = {}
+    fstype: str
     for mount_id, (_, mnt, fstype) in mounts.items():
         below: set[str] = ancestors(mount_id)
-        hidden: bool = any(
-            other not in below
-            and (path == mnt or mnt.startswith(path.rstrip("/") + "/"))
-            for other, (_, path, _) in mounts.items()
-        )
+        path: str = mnt.rstrip("/")
+        hidden: bool = False
+        while True:
+            if any(other not in below for other in at_path.get(path, ())):
+                hidden = True
+                break
+            if not path:
+                break
+            path = path.rpartition("/")[0]
         if not hidden:
             visible[mnt] = fstype
     return visible
@@ -865,6 +937,24 @@ def _add_inode_usage(fs_entries: list[dict[str, Any]]) -> None:
         fs["inodes_percent"] = (
             round(used / st.f_files * 100, 1) if st and used is not None else None
         )
+
+
+def _shape_fs(
+    fs_entries: list[dict[str, Any]], resolve_devices: bool
+) -> list[dict[str, Any]]:
+    """Glances' fs rows as served and recorded: duplicate views of one device
+    collapsed, hidden mounts dropped, inode usage added; with ``resolve_devices``
+    each device_name symlink is resolved first (the UI matches it to diskio).
+    Sync, for a thread: every step reads the filesystem."""
+    if resolve_devices:
+        entry: dict[str, Any]
+        for entry in fs_entries:
+            device_name: str = entry.get("device_name", "")
+            if device_name:
+                entry["device_name"] = os.path.realpath(device_name)
+    fs_entries = _drop_hidden_mounts(_dedupe_fs_by_device(fs_entries))
+    _add_inode_usage(fs_entries)
+    return fs_entries
 
 
 def _sum_known(values: list[float | None]) -> float | None:
@@ -1326,9 +1416,37 @@ async def collect_history_sample(
     )
     ping_attempts: dict[str, int] = {t: 0 for t in PING_TARGETS} if ping_enabled else {}
 
+    async def ping_round(i: int) -> None:
+        """Ping every target once, recording each success in ping_samples."""
+        # Count an attempt per target up front so a gather-timeout (which
+        # skips the append below) still counts as a loss, not a non-event.
+        target: str
+        for target in PING_TARGETS:
+            ping_attempts[target] += 1
+        e: Exception
+        try:
+            # Live (/text) pings get a short leash: the request waits on
+            # this, and a dead target would otherwise hold it 2-8 s.
+            ping_results: list[float | None] = await asyncio.wait_for(
+                asyncio.gather(
+                    *(
+                        asyncio.to_thread(_run_ping, t, 1 if live else 2)
+                        for t in PING_TARGETS
+                    )
+                ),
+                timeout=2.5 if live else 8,
+            )
+            latency: float | None
+            for target, latency in zip(PING_TARGETS, ping_results):
+                if latency is not None:
+                    ping_samples[target].append(latency)
+        except Exception as e:
+            logger.warning("Ping sample %d failed: %s", i, e)
+
     # Collect samples over time
+    burst_start: float = time.monotonic()
     client: httpx.AsyncClient
-    async with httpx.AsyncClient() as client:
+    async with _glances_client() as client:
         i: int
         for i in range(sample_count):
             e: Exception
@@ -1433,35 +1551,18 @@ async def collect_history_sample(
                 # TODO: track which metrics failed and include in record for frontend to indicate partial data
                 logger.warning("Sample %d collection error: %s", i, e)
 
-            # Ping (runs in thread pool, concurrently with sleep below)
-            if ping_enabled:
-                # Count an attempt per target up front so a gather-timeout (which
-                # skips the append below) still counts as a loss, not a non-event.
-                target: str
-                for target in PING_TARGETS:
-                    ping_attempts[target] += 1
-                try:
-                    # Live (/text) pings get a short leash: the request waits on
-                    # this, and a dead target would otherwise hold it 2-8 s.
-                    ping_results: list[float | None] = await asyncio.wait_for(
-                        asyncio.gather(
-                            *(
-                                asyncio.to_thread(_run_ping, t, 1 if live else 2)
-                                for t in PING_TARGETS
-                            )
-                        ),
-                        timeout=2.5 if live else 8,
-                    )
-                    latency: float | None
-                    for target, latency in zip(PING_TARGETS, ping_results):
-                        if latency is not None:
-                            ping_samples[target].append(latency)
-                except Exception as e:
-                    logger.warning("Ping sample %d failed: %s", i, e)
-
-            # Wait before next sample (except for last)
-            if i < sample_count - 1:
-                await asyncio.sleep(sample_interval)
+            # Ping (thread pool) concurrently with the wait for the next sample.
+            # The wait is paced against the burst's start, so neither the
+            # fetches above nor a dead target's 2 s timeout add to the burst:
+            # it lasts about sample_duration, not up to twice that. The last
+            # sample needs no wait (each Glances rate covers the slot before it).
+            next_at: float = burst_start + (i + 1) * sample_interval
+            await asyncio.gather(
+                ping_round(i) if ping_enabled else asyncio.sleep(0),
+                asyncio.sleep(
+                    max(0.0, next_at - time.monotonic()) if i < sample_count - 1 else 0
+                ),
+            )
 
         # Fetch point-in-time metrics (only need one sample)
         memory_data: dict[str, Any] = {}
@@ -1538,8 +1639,7 @@ async def collect_history_sample(
                 # De-dupe duplicate-device entries (e.g. PrivateTmp /tmp, /var/tmp
                 # bind mounts mirroring /) so history drives + per-drive I/O labels
                 # match the live view. This fetch bypasses the proxy, so dedupe here.
-                fs_data = _drop_hidden_mounts(_dedupe_fs_by_device(fs_resp.json()))
-                await asyncio.to_thread(_add_inode_usage, fs_data)
+                fs_data = await asyncio.to_thread(_shape_fs, fs_resp.json(), False)
         except Exception as e:
             logger.warning("History: failed to fetch fs: %s", e)
 
@@ -1547,7 +1647,7 @@ async def collect_history_sample(
     ip_data: dict[str, Any] = {}
     try:
         if not live:
-            ip_data = await asyncio.to_thread(_get_ip_info)
+            ip_data = await _ip_info_cached()
     except Exception as e:
         logger.warning("History: failed to fetch IP info: %s", e)
 
@@ -1926,7 +2026,7 @@ async def wait_for_glances_warm(glances_url: str, timeout: float = 20.0) -> bool
     last: float | None = None
     changes: int = 0
     client: httpx.AsyncClient
-    async with httpx.AsyncClient() as client:
+    async with _glances_client() as client:
         while time.monotonic() < deadline:
             try:
                 resp: httpx.Response = await client.get(
@@ -1974,7 +2074,7 @@ GLANCES_MAX_MISSES: Final[int] = (
 async def _glances_answers() -> bool:
     try:
         client: httpx.AsyncClient
-        async with httpx.AsyncClient() as client:
+        async with _glances_client() as client:
             resp: httpx.Response = await client.get(
                 f"{APP.state.glances_url}/api/4/cpu", timeout=5.0
             )
@@ -2043,6 +2143,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except OSError as e:
             logger.warning("Could not tighten permissions on %s: %s", PASSWORD_FILE, e)
 
+    global _glances_client_shared
+    _glances_client_shared = httpx.AsyncClient(
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10)
+    )
+
     logger.info("Starting Glances web server on port %d...", glances_port)
     app.state.glances_process = start_glances(glances_port)
     app.state.glances_started_at = time.time()
@@ -2090,6 +2195,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await task
         except asyncio.CancelledError:
             pass
+
+    if _glances_client_shared is not None:
+        shared: httpx.AsyncClient = _glances_client_shared
+        _glances_client_shared = None
+        await shared.aclose()
 
     stop_glances(
         app.state.glances_process
@@ -2784,7 +2894,15 @@ async def update_history_settings(request: Request) -> Response:
             media_type="application/json",
         )
 
-    password: str = body.get("password", "")
+    password: Any = body.get("password", "")
+    if not isinstance(password, str):
+        # Before the throttle: a malformed body is not a guess, and the KDF's
+        # .encode() would turn it into a 500 that still counted as a failure.
+        return Response(
+            content=json.dumps({"error": "password must be a string"}),
+            status_code=400,
+            media_type="application/json",
+        )
     denied: Response | None = await _verify_password_throttled(request, password)
     if denied is not None:
         return denied
@@ -2930,15 +3048,22 @@ async def ping() -> Response:
             content=json.dumps({"disabled": True}),
             media_type="application/json",
         )
-    try:
-        results: list[float | None] = await asyncio.wait_for(
-            asyncio.gather(*(asyncio.to_thread(_run_ping, t) for t in PING_TARGETS)),
-            timeout=8,
-        )
-    # asyncio.TimeoutError is a distinct class from builtin TimeoutError before
-    # Python 3.11 (the declared floor is 3.10), so catch both.
-    except (asyncio.TimeoutError, TimeoutError):
-        results = [None] * len(PING_TARGETS)
+
+    async def ping_all() -> list[float | None]:
+        try:
+            return await asyncio.wait_for(
+                asyncio.gather(
+                    *(asyncio.to_thread(_run_ping, t) for t in PING_TARGETS)
+                ),
+                timeout=8,
+            )
+        # asyncio.TimeoutError is a distinct class from builtin TimeoutError before
+        # Python 3.11 (the declared floor is 3.10), so catch both.
+        except (asyncio.TimeoutError, TimeoutError):
+            return [None] * len(PING_TARGETS)
+
+    # Under the UI's fastest poll (1 s): one round of pings serves every browser.
+    results: list[float | None] = await _cached("ping", 0.9, ping_all)
     targets: dict[str, Any] = {}
     target: str
     latency: float | None
@@ -2951,6 +3076,9 @@ async def ping() -> Response:
         content=json.dumps({"targets": targets}),
         media_type="application/json",
     )
+
+
+_cuda_version: str = ""  # nvidia-smi's CUDA version once read (see _get_gpu_info)
 
 
 def _get_gpu_info() -> list[dict[str, int | float | str | None]]:
@@ -2986,26 +3114,30 @@ def _get_gpu_info() -> list[dict[str, int | float | str | None]]:
         )
         return []
 
-    # Get CUDA version from nvidia-smi header
-    cuda_version: str = ""
-    try:
-        cuda_result: subprocess.CompletedProcess[str] = subprocess.run(
-            ["nvidia-smi"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        line: str
-        for line in cuda_result.stdout.split("\n"):
-            if "CUDA Version:" in line:
-                # Extract version like "12.4" from "CUDA Version: 12.4"
-                version_parts: list[str] = (
-                    line.split("CUDA Version:")[1].strip().split()
-                )
-                cuda_version = version_parts[0] if version_parts else ""
-                break
-    except Exception:
-        pass  # CUDA version is optional — GPU data still valid
+    # Get CUDA version from nvidia-smi header. It changes only with the driver,
+    # so once read it is kept: no second nvidia-smi run per request.
+    global _cuda_version
+    cuda_version: str = _cuda_version
+    line: str
+    if not cuda_version:
+        try:
+            cuda_result: subprocess.CompletedProcess[str] = subprocess.run(
+                ["nvidia-smi"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            for line in cuda_result.stdout.split("\n"):
+                if "CUDA Version:" in line:
+                    # Extract version like "12.4" from "CUDA Version: 12.4"
+                    version_parts: list[str] = (
+                        line.split("CUDA Version:")[1].strip().split()
+                    )
+                    cuda_version = version_parts[0] if version_parts else ""
+                    break
+            _cuda_version = cuda_version
+        except Exception:
+            pass  # CUDA version is optional — GPU data still valid
 
     def metric(value: str) -> float | None:
         try:
@@ -3044,7 +3176,9 @@ def _get_gpu_info() -> list[dict[str, int | float | str | None]]:
 @APP.get("/api/gpu-info")
 async def gpu_info() -> Response:
     """Detailed GPU info from nvidia-smi; [] when it is unavailable."""
-    result: list[dict[str, float | str | None]] = await asyncio.to_thread(_get_gpu_info)
+    result: list[dict[str, float | str | None]] = await _cached(
+        "gpu-info", 5.0, lambda: asyncio.to_thread(_get_gpu_info)
+    )
     return Response(content=json.dumps(result), media_type="application/json")
 
 
@@ -3097,7 +3231,9 @@ async def cpu_info() -> Response:
     """Get detailed CPU info from /proc/cpuinfo."""
     e: Exception
     try:
-        result: dict[str, Any] = await asyncio.to_thread(_get_cpu_info)
+        result: dict[str, Any] = await _cached(
+            "cpu-info", math.inf, lambda: asyncio.to_thread(_get_cpu_info)
+        )
         return Response(content=json.dumps(result), media_type="application/json")
     except Exception as e:
         logger.warning("Failed to read CPU info: %s", e)
@@ -3204,12 +3340,19 @@ def _get_ip_info() -> dict[str, Any]:
     return result
 
 
+async def _ip_info_cached() -> dict[str, Any]:
+    """_get_ip_info, at most once a minute: it starts two processes and asks an
+    outside service for the public address. Shared by /api/ip-info and the
+    history sampler, so a record's ``ip`` can be up to a minute old."""
+    return await _cached("ip-info", 60.0, lambda: asyncio.to_thread(_get_ip_info))
+
+
 @APP.get("/api/ip-info")
 async def ip_info() -> Response:
     """Get IP addresses: LAN, public, and Tailscale."""
     e: Exception
     try:
-        result: dict[str, Any] = await asyncio.to_thread(_get_ip_info)
+        result: dict[str, Any] = await _ip_info_cached()
         return Response(content=json.dumps(result), media_type="application/json")
     except Exception as e:
         logger.warning("Failed to get IP info: %s", e)
@@ -3375,15 +3518,20 @@ def _get_gpu_processes() -> list[dict[str, Any]]:
 @APP.get("/api/gpu-processes")
 async def gpu_processes() -> Response:
     """Get processes using GPU from nvidia-smi."""
-    try:
-        result: list[dict[str, Any]] = await asyncio.to_thread(_get_gpu_processes)
-    except FileNotFoundError:
-        logger.debug("nvidia-smi not found for GPU processes")
-        return Response(content="[]", media_type="application/json")
-    except subprocess.TimeoutExpired:
-        logger.warning("nvidia-smi timed out for GPU processes")
-        return Response(content="[]", media_type="application/json")
 
+    async def read() -> list[dict[str, Any]]:
+        try:
+            return await asyncio.to_thread(_get_gpu_processes)
+        except FileNotFoundError:
+            logger.debug("nvidia-smi not found for GPU processes")
+        except subprocess.TimeoutExpired:
+            logger.warning("nvidia-smi timed out for GPU processes")
+        return []
+
+    # Three nvidia-smi runs per read; under the UI's fastest poll (1 s), so one
+    # read serves every browser. The empty result is kept too: a box without
+    # nvidia-smi would otherwise try to start it on every request.
+    result: list[dict[str, Any]] = await _cached("gpu-processes", 0.9, read)
     return Response(content=json.dumps(result), media_type="application/json")
 
 
@@ -3397,6 +3545,54 @@ def _run_pidstat(duration: int, timeout: int) -> subprocess.CompletedProcess[str
         timeout=timeout,
         env={**os.environ, "LC_ALL": "C"},  # stable Average: label and decimal points
     )
+
+
+def _parse_pidstat(stdout: str) -> str:
+    """pidstat -d output as the JSON body served: processes with I/O, named from
+    /proc (sync, called from thread pool)."""
+    # Parse pidstat output
+    # Format: Average:  UID  PID  kB_rd/s  kB_wr/s  kB_ccwr/s  iodelay  Command
+    # Fields:    [0]    [1]  [2]    [3]      [4]       [5]       [6]      [7]
+    processes: dict[int, dict[str, Any]] = {}
+
+    for line in stdout.strip().split("\n"):
+        line: str = line.strip()
+        if not line:
+            continue
+
+        # Look for "Average:" section (most accurate values)
+        if not line.startswith("Average:"):
+            continue
+
+        # Skip the column header line
+        if "PID" in line and "kB_rd/s" in line:
+            continue
+
+        fields: list[str] = line.split()
+        if len(fields) < 8:
+            continue
+
+        try:
+            # Average: UID PID kB_rd/s kB_wr/s kB_ccwr/s iodelay Command
+            pid: int = int(fields[2])
+            read_kbps: float = float(fields[3])
+            write_kbps: float = float(fields[4])
+
+            # Only include processes with actual I/O
+            if read_kbps > 0 or write_kbps > 0:
+                command: str = fields[7] if len(fields) > 7 else "unknown"
+                info: dict[str, str] = get_sanitized_process_info(pid, command, "")
+                processes[pid] = {
+                    "pid": pid,
+                    "read_kbps": read_kbps,
+                    "write_kbps": write_kbps,
+                    "name": info["name"],
+                    "path": info["path"],
+                }
+        except (ValueError, IndexError):
+            continue
+
+    return json.dumps(list(processes.values()))
 
 
 @APP.get("/api/disk-processes")
@@ -3435,52 +3631,8 @@ async def disk_processes(duration: int = 1) -> Response:
                 media_type="application/json",
             )
 
-        # Parse pidstat output
-        # Format: Average:  UID  PID  kB_rd/s  kB_wr/s  kB_ccwr/s  iodelay  Command
-        # Fields:    [0]    [1]  [2]    [3]      [4]       [5]       [6]      [7]
-        processes: dict[int, dict[str, Any]] = {}
-
-        for line in result.stdout.strip().split("\n"):
-            line: str = line.strip()
-            if not line:
-                continue
-
-            # Look for "Average:" section (most accurate values)
-            if not line.startswith("Average:"):
-                continue
-
-            # Skip the column header line
-            if "PID" in line and "kB_rd/s" in line:
-                continue
-
-            fields: list[str] = line.split()
-            if len(fields) < 8:
-                continue
-
-            try:
-                # Average: UID PID kB_rd/s kB_wr/s kB_ccwr/s iodelay Command
-                pid: int = int(fields[2])
-                read_kbps: float = float(fields[3])
-                write_kbps: float = float(fields[4])
-
-                # Only include processes with actual I/O
-                if read_kbps > 0 or write_kbps > 0:
-                    command: str = fields[7] if len(fields) > 7 else "unknown"
-                    info: dict[str, str] = get_sanitized_process_info(pid, command, "")
-                    processes[pid] = {
-                        "pid": pid,
-                        "read_kbps": read_kbps,
-                        "write_kbps": write_kbps,
-                        "name": info["name"],
-                        "path": info["path"],
-                    }
-            except (ValueError, IndexError):
-                continue
-
-        return Response(
-            content=json.dumps(list(processes.values())),
-            media_type="application/json",
-        )
+        body: str = await asyncio.to_thread(_parse_pidstat, result.stdout)
+        return Response(content=body, media_type="application/json")
 
     except FileNotFoundError:
         logger.debug("pidstat not found")
@@ -3524,6 +3676,70 @@ def _run_nethogs(cycles: int, timeout: int) -> subprocess.CompletedProcess[str]:
         text=True,
         errors="replace",  # process names/paths are bytes, not necessarily UTF-8
         timeout=timeout,
+    )
+
+
+def _parse_nethogs(stdout: str) -> str:
+    """nethogs -t output as the JSON body served: processes with traffic, named
+    from /proc (sync, called from thread pool)."""
+    # Parse nethogs trace mode output
+    # Format: <path>/<pid>/<uid>\t<sent_kb/s>\t<recv_kb/s>
+    processes: dict[int, dict[str, Any]] = {}
+
+    for line in stdout.strip().split("\n"):
+        line: str = line.strip()
+        if not line or line.startswith("Refreshing"):
+            continue
+
+        # nethogs -t is tab-separated: program path, sent, received. Splitting
+        # on any whitespace would break a program path containing a space.
+        fields: list[str] = [f.strip() for f in line.split("\t")]
+        if len(fields) < 3:
+            continue
+
+        try:
+            recv_kbps: float = float(fields[-1])
+            sent_kbps: float = float(fields[-2])
+            proc_info: str = fields[0]  # e.g., "/usr/bin/firefox/12345/1000"
+
+            # Extract PID from proc_info (format: path/pid/uid)
+            parts: list[str] = proc_info.rsplit("/", 2)
+            if len(parts) >= 3:
+                pid: int = int(parts[-2])
+                # The path is the fallback when the process exits before
+                # /proc is read. nethogs -l (and some older builds) print the
+                # whole command line here, whose arguments may hold secrets:
+                # keep only the text before the first whitespace.
+                exe_path: str = (parts[0].split() or [""])[0]
+                program: str = exe_path.rsplit("/", 1)[-1]
+            else:
+                continue
+
+            # Aggregate (nethogs outputs multiple lines per process across cycles)
+            if pid in processes:
+                processes[pid]["sent_kbps"] = max(
+                    processes[pid]["sent_kbps"], sent_kbps
+                )
+                processes[pid]["recv_kbps"] = max(
+                    processes[pid]["recv_kbps"], recv_kbps
+                )
+            else:
+                # Get sanitized process info from /proc
+                info: dict[str, str] = get_sanitized_process_info(
+                    pid, program, exe_path
+                )
+                processes[pid] = {
+                    "pid": pid,
+                    "name": info["name"],
+                    "path": info["path"],
+                    "sent_kbps": sent_kbps,
+                    "recv_kbps": recv_kbps,
+                }
+        except (ValueError, IndexError):
+            continue
+
+    return json.dumps(
+        [p for p in processes.values() if p["sent_kbps"] > 0 or p["recv_kbps"] > 0]
     )
 
 
@@ -3575,67 +3791,8 @@ async def network_processes(duration: int = 3) -> Response:
                 media_type="application/json",
             )
 
-        # Parse nethogs trace mode output
-        # Format: <path>/<pid>/<uid>\t<sent_kb/s>\t<recv_kb/s>
-        processes: dict[int, dict[str, Any]] = {}
-
-        for line in result.stdout.strip().split("\n"):
-            line: str = line.strip()
-            if not line or line.startswith("Refreshing"):
-                continue
-
-            # nethogs -t is tab-separated: program path, sent, received. Splitting
-            # on any whitespace would break a program path containing a space.
-            fields: list[str] = [f.strip() for f in line.split("\t")]
-            if len(fields) < 3:
-                continue
-
-            try:
-                recv_kbps: float = float(fields[-1])
-                sent_kbps: float = float(fields[-2])
-                proc_info: str = fields[0]  # e.g., "/usr/bin/firefox/12345/1000"
-
-                # Extract PID from proc_info (format: path/pid/uid)
-                parts: list[str] = proc_info.rsplit("/", 2)
-                if len(parts) >= 3:
-                    pid: int = int(parts[-2])
-                    # The path is the fallback when the process exits before
-                    # /proc is read. nethogs -l (and some older builds) print the
-                    # whole command line here, whose arguments may hold secrets:
-                    # keep only the text before the first whitespace.
-                    exe_path: str = (parts[0].split() or [""])[0]
-                    program: str = exe_path.rsplit("/", 1)[-1]
-                else:
-                    continue
-
-                # Aggregate (nethogs outputs multiple lines per process across cycles)
-                if pid in processes:
-                    processes[pid]["sent_kbps"] = max(
-                        processes[pid]["sent_kbps"], sent_kbps
-                    )
-                    processes[pid]["recv_kbps"] = max(
-                        processes[pid]["recv_kbps"], recv_kbps
-                    )
-                else:
-                    # Get sanitized process info from /proc
-                    info: dict[str, str] = get_sanitized_process_info(
-                        pid, program, exe_path
-                    )
-                    processes[pid] = {
-                        "pid": pid,
-                        "name": info["name"],
-                        "path": info["path"],
-                        "sent_kbps": sent_kbps,
-                        "recv_kbps": recv_kbps,
-                    }
-            except (ValueError, IndexError):
-                continue
-
-        # Filter out zero-bandwidth processes
-        active: list[dict[str, Any]] = [
-            p for p in processes.values() if p["sent_kbps"] > 0 or p["recv_kbps"] > 0
-        ]
-        return Response(content=json.dumps(active), media_type="application/json")
+        body: str = await asyncio.to_thread(_parse_nethogs, result.stdout)
+        return Response(content=body, media_type="application/json")
 
     except FileNotFoundError:
         logger.debug("nethogs not found")
@@ -3671,12 +3828,28 @@ async def network_processes(duration: int = 3) -> Response:
         _nethogs_lock.release()
 
 
+def _sanitized_processlist(processes: list[dict[str, Any]]) -> str:
+    """Glances' process list as the JSON body served: display_name/display_path
+    from /proc, and no cmdline (sync, called from thread pool)."""
+    proc: dict[str, Any]
+    for proc in processes:
+        pid: Any = proc.get("pid")
+        if pid:
+            name: str = proc.get("name", "unknown")
+            info: dict[str, str] = get_sanitized_process_info(pid, name)
+            proc["display_name"] = info["name"]
+            proc["display_path"] = info["path"]
+        # Remove cmdline to prevent leaking sensitive data
+        proc.pop("cmdline", None)
+    return json.dumps(processes)
+
+
 @APP.get("/api/processlist")
 async def processlist() -> Response:
     """Get process list from Glances with sanitized display info."""
     glances_url: str = APP.state.glances_url
     client: httpx.AsyncClient
-    async with httpx.AsyncClient() as client:
+    async with _glances_client() as client:
         error: httpx.RequestError
         try:
             resp: httpx.Response = await client.get(
@@ -3685,21 +3858,9 @@ async def processlist() -> Response:
             if resp.status_code != 200:
                 return Response(content=resp.content, status_code=resp.status_code)
 
-            processes: list[dict[str, Any]] = resp.json()
-            proc: dict[str, Any]
-            for proc in processes:
-                pid: Any = proc.get("pid")
-                if pid:
-                    name: str = proc.get("name", "unknown")
-                    info: dict[str, str] = get_sanitized_process_info(pid, name)
-                    proc["display_name"] = info["name"]
-                    proc["display_path"] = info["path"]
-                # Remove cmdline to prevent leaking sensitive data
-                proc.pop("cmdline", None)
-
-            return Response(
-                content=json.dumps(processes), media_type="application/json"
-            )
+            # One /proc read per process, and a large body: off the event loop.
+            body: str = await asyncio.to_thread(_sanitized_processlist, resp.json())
+            return Response(content=body, media_type="application/json")
         except httpx.RequestError as error:
             logger.error("Glances API unavailable: %s", error)
             return Response(
@@ -3718,22 +3879,17 @@ async def proxy_fs(request: Request) -> Response:
     mounts that mirror /) so each physical filesystem shows once."""
     glances_url: str = request.app.state.glances_url
     client: httpx.AsyncClient
-    async with httpx.AsyncClient() as client:
+    async with _glances_client() as client:
         error: httpx.RequestError
         try:
             resp: httpx.Response = await client.get(
                 f"{glances_url}/api/4/fs", timeout=10.0
             )
             if resp.status_code == 200:
-                data: list[dict[str, Any]] = resp.json()
-                entry: dict[str, Any]
-                for entry in data:
-                    device_name: str = entry.get("device_name", "")
-                    if device_name:
-                        entry["device_name"] = os.path.realpath(device_name)
-                data = _drop_hidden_mounts(_dedupe_fs_by_device(data))
-                await asyncio.to_thread(_add_inode_usage, data)
-                return Response(content=json.dumps(data), media_type="application/json")
+                body: str = await asyncio.to_thread(
+                    lambda: json.dumps(_shape_fs(resp.json(), True))
+                )
+                return Response(content=body, media_type="application/json")
             return Response(
                 content=resp.content,
                 status_code=resp.status_code,
@@ -3857,10 +4013,27 @@ def _get_mail(path: str = MAIL_SPOOL, limit: int = MAIL_LIMIT) -> dict[str, Any]
     return result
 
 
+_mail_cache: dict[str, Any] = {"key": None, "result": None}
+
+
+def _get_mail_cached() -> dict[str, Any]:
+    """_get_mail for the default spool, re-read only when the spool's size or
+    modification time changes: reading it scans the whole file (sync)."""
+    try:
+        st: os.stat_result = os.stat(MAIL_SPOOL)
+    except OSError:
+        return _get_mail()  # missing or unreadable: cheap, and reports why
+    key: tuple[int, int] = (st.st_mtime_ns, st.st_size)
+    if _mail_cache["key"] != key:
+        _mail_cache["result"] = _get_mail()
+        _mail_cache["key"] = key
+    return _mail_cache["result"]
+
+
 @APP.get("/api/mail")
 async def mail() -> Response:
     """Local system mail: count and newest subjects. Always 200; ``status`` says why not."""
-    result: dict[str, Any] = await asyncio.to_thread(_get_mail)
+    result: dict[str, Any] = await asyncio.to_thread(_get_mail_cached)
     return Response(content=json.dumps(result), media_type="application/json")
 
 
@@ -4007,7 +4180,7 @@ async def proxy_api(path: str, request: Request) -> Response:
         return Response(status_code=404)
     glances_url: str = request.app.state.glances_url
     client: httpx.AsyncClient
-    async with httpx.AsyncClient() as client:
+    async with _glances_client() as client:
         url: str = f"{glances_url}/api/{path}"
         error: httpx.RequestError
         try:
@@ -5264,8 +5437,6 @@ def _fit_height(body: str, height: int, color: ColorDepth) -> str:
 # Short-lived caches so several terminals polling /text every second cost one
 # live sample per second and one history parse per new record.
 _LIVE_TTL: Final[float] = 1.0
-_live_cache: dict[str, Any] = {"at": 0.0, "record": None}
-_live_lock: asyncio.Lock = asyncio.Lock()
 # One history read at a time: a year-long range over a large file parses up to
 # HISTORY_MAX_TAIL_READ of JSON (hundreds of MB in Python objects); several at
 # once could exhaust a small box. Short and since= reads take milliseconds.
@@ -5274,16 +5445,11 @@ _history_cache: dict[str, Any] = {"key": None, "result": None}
 
 
 async def _live_sample() -> dict[str, Any]:
-    async with _live_lock:
-        if (
-            _live_cache["record"] is None
-            or time.monotonic() - _live_cache["at"] > _LIVE_TTL
-        ):
-            _live_cache["record"] = await collect_history_sample(
-                APP.state.glances_url, live=True
-            )
-            _live_cache["at"] = time.monotonic()
-        return _live_cache["record"]
+    return await _cached(
+        "live",
+        _LIVE_TTL,
+        lambda: collect_history_sample(APP.state.glances_url, live=True),
+    )
 
 
 def _read_history_cached(

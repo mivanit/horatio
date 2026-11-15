@@ -392,7 +392,7 @@ function testGpuInfoUnavailableReadings() {
 }
 
 function testDriveTemperatureFreshness() {
-  const context = liveContext(['temps-value', 'fans-card', 'power-card']);
+  const context = liveContext(['temps-value', 'temps-card', 'fans-card', 'power-card']);
   let now = 100000000;
   context.Date = { now: () => now };
   context.sensors = { ok: false };
@@ -439,8 +439,45 @@ function testDriveTemperatureFreshness() {
   assert.deepEqual(context.errors, []);
 }
 
+// A box with no temperature source (an OpenWrt router without thermal zones)
+// hides the card like fans/power; failed or stale sources keep it red.
+function testTempsWithoutSensors() {
+  const context = liveContext(['temps-value', 'temps-card', 'fans-card', 'power-card']);
+  context.charts = { temps: makeChart(), fans: makeChart() };
+  context.sensorsAgeText = () => '';
+  context.abbreviateSensorLabel = label => label;
+  context.getTempColor = () => '#123456';
+  evaluate(context,
+    between(config, 'const CORE_TEMP_LABEL', 'function formatTimeAgo') +
+    'function tickTemps() {' + between(app, "  guard('temps',", "  guard('load',") + '}');
+  const card = context.elements.get('temps-card');
+  const tick = (sensors, gpu = { ok: false, errorType: 'unavailable' }) => {
+    Object.assign(context, { sensors, gpu });
+    context.tickTemps();
+    return [context.statuses.temps, card.style.display];
+  };
+  assert.deepEqual(tick({ ok: false }), [false, ''], 'a failed sensors fetch is shown red');
+  assert.deepEqual(tick({ ok: true, data: [] }), [true, 'none'], 'no temperature source is hidden, not failed');
+  assert.deepEqual(tick({ ok: true, data: [{ type: 'temperature_core', label: 'cpu', value: 50 }] }), [true, ''], 'readings bring it back');
+  assert.deepEqual(tick({ ok: true, data: [] }, { ok: false, errorType: 'http' }), [false, ''], 'a failed GPU source stays red');
+  context.dataCache.storageHealth = { lastUpdate: 1, data: { status: 'ok', age_sec: 0, drives: [{ device: 'sda', temperature_c: 30 }] } };
+  assert.deepEqual(tick({ ok: true, data: [] }), [false, ''], 'stale drive temperatures stay red');
+  assert.deepEqual(context.errors, []);
+}
+
+// Glances returning no mounts hides Drive Usage; a hidden card is not a failed one.
+function testDriveUsageHidden() {
+  const context = liveContext(['drive-usage-card', 'drive-usage-content']);
+  context.updateCacheDisplay = () => {};
+  evaluate(context, between(app, 'function renderDrives', '// Helper to enrich'));
+  context.statuses['drive-usage'] = false;  // e.g. an earlier failed fetch
+  context.renderDrives([]);
+  assert.equal(context.elements.get('drive-usage-card').style.display, 'none');
+  assert.equal(context.statuses['drive-usage'], true, 'the header must not stay Partial for a hidden card');
+}
+
 function testSensorFreshness() {
-  const context = liveContext(['temps-value', 'fans-card', 'fans-value', 'power-card', 'power-value',
+  const context = liveContext(['temps-value', 'temps-card', 'fans-card', 'fans-value', 'power-card', 'power-value',
     'power-bar', 'hardware-content', 'hardware-value', 'snapshot-age']);
   let now = 100000000;
   context.Date = { now: () => now };
@@ -816,7 +853,7 @@ async function testCaptureCacheAge() {
     Date: { now: () => now }, console: { error() {}, warn() {} },
     document: { getElementById: () => null, querySelector: () => null },
     setInterval: () => 1, clearInterval() {},
-    nethogsDuration: 3, diskDuration: 1, API_BASE: '/api/4',
+    nethogsDuration: 3, diskDuration: 1, API_BASE: '/api/4', cardStatus: { processes: { ok: true } },
     getDiskTimeout: () => 6500, getNethogsTimeout: () => 9500,
     renderUnifiedProcesses() {}, renderGpuInfo() {}, renderCpuInfo() {}, renderDrives() {}, renderIpInfo() {},
     renderMail() {}, renderHardware() {}, renderDriveHealth() {}, renderSystemInfo() {},
@@ -876,6 +913,15 @@ async function testCaptureCacheAge() {
     assert.equal(capturedAt(name), 193000, 'errors do not replace the last successful capture');
     assert.equal(evaluate(context, `${name}Capture.error`), true);
     assert.equal(evaluate(context, `${name}Capture.capturing`), false);
+  }
+  // A backend with no process card (OpenWrt) starts no capture and logs no error.
+  evaluate(context, 'delete cardStatus.processes; networkCapture.clearError(); diskCapture.clearError();');
+  now = 300000;
+  await context.fetchSlowData();
+  for (const name of ['network', 'disk']) {
+    assert.equal(calls[url(name)], 5, 'no capture request without a process card');
+    assert.equal(evaluate(context, `${name}Capture.capturing`), false);
+    assert.equal(evaluate(context, `${name}Capture.error`), false);
   }
 }
 
@@ -1211,7 +1257,7 @@ async function testThemes() {
 
 (async () => {
   for (const test of [testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
-    testDriveTemperatureFreshness, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
+    testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
     testVersionFooter]) {
     await test();

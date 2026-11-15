@@ -13,6 +13,7 @@ from typing import Any, Literal, TextIO
 from unittest.mock import patch
 
 import h11
+import httpx
 from starlette.requests import Request
 from starlette.types import Message, Scope
 
@@ -74,6 +75,90 @@ def test_history_settings_preserve_recording_schedule() -> None:
             await asyncio.gather(original, state.history_task, return_exceptions=True)
 
     asyncio.run(run())
+
+
+def test_history_settings_rejects_non_string_password() -> None:
+    """A non-string password is a 400 before the throttle: not a 500 from the
+    KDF, and not a strike towards the client's lockout."""
+    import server
+
+    server.PASSWORD_FILE.write_text(server._hash_password("test-password"))
+    server._auth_failures.clear()
+
+    async def save(password: object) -> server.Response:
+        body: bytes = json.dumps({"password": password}).encode()
+
+        async def receive() -> Message:
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        request: Request = Request(
+            {"type": "http", "client": ("127.0.0.1", 12345)}, receive
+        )
+        return await server.update_history_settings(request)
+
+    bad: object
+    for bad in (5, None, ["x"], {"a": 1}):
+        response: server.Response = asyncio.run(save(bad))
+        assert response.status_code == 400, (
+            f"password {bad!r}: expected 400, got {response.status_code}"
+        )
+    assert not server._auth_failures, (
+        f"malformed bodies must not count as failed guesses: {server._auth_failures}"
+    )
+
+
+def test_history_burst_pacing() -> None:
+    """The burst lasts about sample_duration even with a dead ping target: each
+    ping runs alongside the wait for the next sample, which is paced from the
+    burst's start. Scaled down 10x from the default 10 s / 5 samples / -W 2."""
+    import server
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={})
+
+    class FakeClient(httpx.AsyncClient):
+        def __init__(self: FakeClient, **k: Any) -> None:
+            k["transport"] = httpx.MockTransport(handler)
+            super().__init__(**k)
+
+    def burst(ping_sec: float, latency: float | None) -> tuple[float, dict[str, Any]]:
+        def fake_ping(target: str, timeout: int = 2) -> float | None:
+            time.sleep(ping_sec)
+            return latency
+
+        with (
+            patch.object(server.httpx, "AsyncClient", FakeClient),
+            patch.object(server, "get_gpu_stats", return_value=[]),
+            patch.object(server, "_get_ip_info", return_value={}),
+            patch.object(server, "_run_ping", fake_ping),
+            patch.object(server, "PING_TARGETS", ["192.0.2.1"]),
+        ):
+            state: Any = server.APP.state
+            state.history_sample_duration = 1
+            state.history_sample_count = 5
+            state.history_processes_enabled = False
+            state.history_process_count = 10
+            state.ping_enabled = True
+            t0: float = time.monotonic()
+            record: dict[str, Any] = asyncio.run(
+                server.collect_history_sample("http://glances.invalid")
+            )
+            return time.monotonic() - t0, record["ping"]["192.0.2.1"]
+
+    # Serial ping-then-sleep took 4 * 0.2 + 5 * 0.2 = 1.8 s here (18 s real).
+    elapsed: float
+    ping: dict[str, Any]
+    elapsed, ping = burst(0.2, None)
+    assert 0.9 <= elapsed < 1.4 and ping["loss"] == 1.0, (
+        f"dead target: burst ~1 s, every attempt a loss: {elapsed:.2f} s {ping}"
+    )
+    elapsed, ping = burst(0.01, 5.0)
+    assert 0.75 <= elapsed < 1.1 and ping == {
+        "avg": 5.0,
+        "min": 5.0,
+        "max": 5.0,
+        "loss": 0.0,
+    }, f"healthy target: 5 samples, ~0.8 s: {elapsed:.2f} s {ping}"
 
 
 def test_read_history_unit() -> None:

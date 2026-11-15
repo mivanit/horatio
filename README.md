@@ -119,7 +119,7 @@ curl http://<host>:8080/text?style=simple         # plain ASCII, for scripts and
   curl -fsS http://<host>:8080/tui.py | python3 -
   ```
   This runs whatever the server sends, which is fine on your own network. Otherwise save it, read it, then run it: `curl -fsS -o tui.py http://<host>:8080/tui.py && python3 tui.py`.
-- **From a horatio checkout.** `python3 tui.py` on the box itself finds the local server (the port comes from the service file, else 8080). Elsewhere, `python3 tui.py http://<host>:8080`, or set `HORATIO_URL`.
+- **From a horatio checkout.** `python3 tui.py` on the box itself connects to `http://localhost:8080`. Elsewhere, `python3 tui.py http://<host>:8080`, or set `HORATIO_URL`.
 
 `http://<host>:8080/help` has the full list of options, with the box's real address filled in.
 

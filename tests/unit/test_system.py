@@ -248,3 +248,127 @@ def test_mail_and_health_unit() -> None:
         assert server._get_storage_health(state)["status"] == "ok", (
             "health: the file cannot override status"
         )
+
+
+def test_read_ping_targets_unit() -> None:
+    """ping_targets: addresses in order, entries without one skipped; any other
+    shape exits with a message naming the file instead of a traceback."""
+    import server
+
+    assert server._read_ping_targets(
+        {"ping_targets": [{"address": "8.8.8.8"}, {"address": ""}, {"name": "x"}]}
+    ) == ["8.8.8.8"], "addresses kept, empty/missing ones skipped"
+    assert server._read_ping_targets({}) == ["8.8.8.8", "192.168.1.1"], "default"
+    assert server._read_ping_targets({"ping_targets": []}) == [], "none configured"
+    bad: object
+    for bad in (["8.8.8.8"], None, [None], {"a": 1}, [{"address": 5}], "8.8.8.8"):
+        with pytest.raises(SystemExit, match="ping_targets must be a list"):
+            server._read_ping_targets({"ping_targets": bad})
+
+
+def test_glances_client_shared_unit() -> None:
+    """The shared Glances client is handed out as is and left open; without one
+    (no lifespan) each use gets its own client, closed afterwards."""
+    import asyncio
+
+    import server
+
+    async def scenario() -> None:
+        async with server._glances_client() as own:
+            assert not own.is_closed
+        assert own.is_closed
+        shared = server.httpx.AsyncClient()
+        server._glances_client_shared = shared
+        try:
+            async with server._glances_client() as first:
+                assert first is shared
+            async with server._glances_client() as second:
+                assert second is shared
+            assert not shared.is_closed
+        finally:
+            server._glances_client_shared = None
+            await shared.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_cached_unit() -> None:
+    """_cached: one computation for concurrent callers, reuse within the ttl,
+    a fresh one after it, and a failure neither kept nor swallowed."""
+    import asyncio
+
+    import server
+
+    async def scenario() -> None:
+        calls: list[str] = []
+
+        async def compute() -> int:
+            calls.append("run")
+            await asyncio.sleep(0.01)
+            return len(calls)
+
+        assert (
+            await asyncio.gather(
+                *(server._cached("k", 60.0, compute) for _ in range(5))
+            )
+            == [1] * 5
+        ), "concurrent callers share one computation"
+        assert await server._cached("k", 60.0, compute) == 1, "reused within the ttl"
+        assert await server._cached("k", 0.0, compute) == 2, "expired: computed again"
+        assert await server._cached("other", 60.0, compute) == 3, "keys are separate"
+
+        async def fail() -> int:
+            raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError):
+            await server._cached("bad", 60.0, fail)
+        assert await server._cached("bad", 60.0, compute) == 4, "a failure is not kept"
+
+    asyncio.run(scenario())
+
+
+def test_mail_cache_unit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The spool is re-read only when its size or mtime changes; a missing spool
+    is reported every time, never from the cache."""
+    import server
+
+    spool: Path = tmp_path / "spool"
+    monkeypatch.setattr(server, "MAIL_SPOOL", str(spool))
+    reads: list[int] = []
+
+    def fake_mail() -> dict[str, Any]:
+        reads.append(1)
+        return {"status": "ok", "count": len(reads)}
+
+    monkeypatch.setattr(server, "_get_mail", fake_mail)
+    assert server._get_mail_cached()["count"] == 1 and len(reads) == 1  # missing
+    assert server._get_mail_cached()["count"] == 2, "a missing spool is not cached"
+    spool.write_text("From a\n\n")
+    assert server._get_mail_cached()["count"] == 3
+    assert server._get_mail_cached()["count"] == 3 and len(reads) == 3, "unchanged"
+    spool.write_text("From a\n\nFrom b\n\n")
+    assert server._get_mail_cached()["count"] == 4, "a changed spool is re-read"
+
+
+def test_shape_fs_unit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """_shape_fs resolves device symlinks only when asked, and applies the
+    hidden-mount filter and inode usage through the module's own helpers."""
+    import server
+
+    device: Path = tmp_path / "sda1"
+    device.write_text("")
+    link: Path = tmp_path / "by-label"
+    link.symlink_to(device)
+    monkeypatch.setattr(server, "_drop_hidden_mounts", lambda rows: rows)
+
+    def rows() -> list[dict[str, Any]]:
+        return [
+            {"device_name": str(link), "mnt_point": "/", "size": 100, "used": 10},
+            {"device_name": str(link), "mnt_point": "/tmp", "size": 100, "used": 10},
+        ]
+
+    kept: list[dict[str, Any]] = server._shape_fs(rows(), False)
+    assert [r["mnt_point"] for r in kept] == ["/"], "duplicate device views collapse"
+    assert kept[0]["device_name"] == str(link), "left as Glances reported it"
+    assert "inodes_used" in kept[0] and "inodes_percent" in kept[0]
+    assert server._shape_fs(rows(), True)[0]["device_name"] == str(device)
