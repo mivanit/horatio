@@ -198,6 +198,7 @@ local function fixture(name)
     local dir, m = base .. "/" .. name, metrics_stub()
     local h = assert(loadfile(script_dir .. "/history.lua"))()
     h.init({}, m, dir, dir)
+    h.rotate_in_background = false  -- test 24 covers the detached process
     return h, m, dir .. "/logs/history.jsonl", dir
 end
 local function busy(result)
@@ -743,6 +744,42 @@ do
         "rotation keeps every archive", "kept=" .. table.concat(kept, ","))
     check(archived(kept[4]) .. contents(path) == rotation_input() .. jsonc.stringify(result.record) .. "\n",
         "the new archive and the live file still hold every record")
+end
+
+-- 24. In production rotation runs in a detached process: the recording request
+-- returns before the (here slowed) gzip finishes, the process outlives it, and
+-- the archive plus the live file still hold every record.
+do
+    local h, _, path, dir = fixture("background")
+    h.rotate_in_background = true
+    h.max_file_bytes = 3000
+    local original = rotation_input()
+    write(path, original)
+    local real_gzip = assert(io.popen("command -v gzip")):read("*l")
+    local bin = dir .. "/bin"
+    os.execute("mkdir " .. quote(bin))
+    write(bin .. "/gzip", "#!/bin/sh\nsleep 1\nexec " .. quote(real_gzip) .. ' "$@"\n')
+    os.execute("chmod +x " .. quote(bin .. "/gzip"))
+    local old_path = os.getenv("PATH")
+    assert(nixio.setenv("PATH", bin .. ":" .. old_path))
+    local result = h.record_now()
+    assert(nixio.setenv("PATH", old_path))
+    local appended = result.record and jsonc.stringify(result.record) .. "\n" or ""
+    check(result.status == "ok" and result.warning == nil and contents(path) == original .. appended,
+        "the recording request returns before the background rotation finishes")
+    local list = {}
+    for _ = 1, 100 do
+        list = archives(dir)
+        if #list == 1 and #contents(path) < #original then break end
+        nixio.nanosleep(0, 100000000)
+    end
+    check(#list == 1 and archived(list[1]) .. contents(path) == original .. appended,
+        "the detached rotation finishes and keeps every record")
+    os.remove(dir .. "/dashboard-last-record")
+    local retry = h.record_now()
+    check(retry.status == "ok" and not retry.warning
+        and archived(list[1]) .. contents(path) == original .. appended .. jsonc.stringify(retry.record) .. "\n",
+        "recording continues after a background rotation")
 end
 
 os.execute("rm -rf " .. quote(base))

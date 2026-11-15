@@ -134,7 +134,7 @@ curl http://<host>:8080/text?style=simple         # plain ASCII, for scripts and
 | `history.record_interval` | seconds between history records (default 600) |
 | `history.min_record_interval` | minimum seconds between manual "record now" requests, 0 to disable (default 60) |
 | `history.sample_duration`, `history.sample_count` | each record averages `sample_count` samples over `sample_duration` seconds |
-| `history.max_file_mb` | OpenWrt backend only: past this size the older part of `logs/history.jsonl` is gzipped beside it and the file keeps its newest half (default 16, some months of records). Rotation runs on the router inside the request that records, and needs free space for the compressed archive and the retained half. History requests read at most the newest 4 MiB and report `truncated` when the requested range does not fit |
+| `history.max_file_mb` | OpenWrt backend only: past this size the older part of `logs/history.jsonl` is gzipped beside it and the file keeps its newest half (default 16, some months of records). Rotation runs in a background process on the router, so a large file cannot time out a request; it needs free space for the compressed archive and the retained half, and never deletes history (failures are logged to syslog and retried after the next record). History requests read at most the newest 4 MiB and report `truncated` when the requested range does not fit |
 | `history.max_hours` | Linux server only (OpenWrt reads at most its 4 MiB tail anyway): largest window, in hours, any history read serves (`/api/history`, `/api/history/field/<name>`, `/text`); larger requests are clamped to it. Lower it on a small box: a year-long window parses up to the 64 MB history tail into memory (default 8760, 0.1 to 8760) |
 | `history.processes_enabled`, `history.process_count` | log the top `process_count` processes by CPU and by memory, plus any holding GPU memory, in each history record (`processes`: pid, name always; ppid, create_time, user, status, threads, cpu_percent, rss_mb, disk_read_kbps, disk_write_kbps, gpu_mem_mib + gpus, gpu_util_percent when known and non-zero); default off, 10. Roughly doubles a record's size at 10, so the 64 MB history tail covers fewer days |
 | `thresholds.*_percent`, `temp_celsius`, `network_mbps`, `disk_io_mbps`, `ping_ms` | orange-card thresholds |
@@ -321,9 +321,10 @@ minute and the tick that finds a record due takes it, so no dashboard request wa
 second of sampling; if cron stops, records are taken on ordinary requests instead, up to two
 minutes late. A `history.record_interval` under two minutes is finer than cron's minute, so
 there ordinary requests still record on time. A kernel file lock serializes recording and
-rotation and releases automatically if a request worker exits. A successfully
-saved record whose rotation failed returns a warning; its original history is
-retained. It does not implement `since=` (Refresh reloads the whole window there)
+rotation and releases automatically if a process exits. Rotation (gzipping the
+older half of a full history file) runs in a background process, so recording
+waits for it rather than a request timing out; one that fails is logged to syslog
+and retried after the next record, and history is never deleted. It does not implement `since=` (Refresh reloads the whole window there)
 or the rate caps on history.
 
 Run the OpenWrt Lua tests from the checkout root:

@@ -28,9 +28,14 @@ local MIN_MANUAL_INTERVAL = 60
 local INITIAL_TAIL_READ = 1048576  -- 1 MiB tail window, doubled until it covers the range
 -- Past this (config history.max_file_mb) the older part of the file is gzipped
 -- to history-<UTC time>.jsonl.gz beside it and the file keeps its newest half.
--- Small, because rotation runs inside a request on the router's CPU and flash:
+-- Nothing is ever deleted: every record ends up in the live file or an archive.
 -- 16 MiB is some months of records and a few seconds of gzip.
 M.max_file_bytes = 16 * 1048576
+-- Rotation runs in a detached process (start_rotation), never in the request:
+-- uhttpd kills a request after its script timeout, and a file that grew under an
+-- older, larger max_file_mb can take minutes to gzip. Tests set this to false to
+-- rotate in the calling process.
+M.rotate_in_background = true
 M.max_read_bytes = 4 * 1048576  -- bound per-request parsing and response memory on routers
 
 local function shell_quote(value)
@@ -207,10 +212,11 @@ end
 
 local rotate_locked
 
--- Append a record to the JSONL file.
--- The caller holds RECORD_LOCK until any rotation has finished.
--- Returns ok, err so callers can report a failed write instead of claiming
--- success: a read-only or full filesystem must not surface as {status = "ok"}.
+-- Append a record to the JSONL file. The caller holds RECORD_LOCK.
+-- Returns ok, err, rotation_due so callers can report a failed write instead of
+-- claiming success: a read-only or full filesystem must not surface as
+-- {status = "ok"}. rotation_due: the file is past max_file_bytes; the caller
+-- rotates after releasing the lock (rotate takes it again).
 local function append_record(record)
     local jsonc = require("luci.jsonc")
     local json_line = jsonc.stringify(record)
@@ -253,11 +259,7 @@ local function append_record(record)
     if not written or not size or not closed then
         return false, tostring(write_err or seek_err or close_err)
     end
-    if size > M.max_file_bytes then
-        local rotated, rotation_err = rotate_locked()
-        if not rotated then return true, rotation_err end
-    end
-    return true
+    return true, nil, size > M.max_file_bytes
 end
 
 -- Every byte must arrive. EOF before n bytes and read errors are failures,
@@ -355,6 +357,65 @@ rotate_locked = function()
     return ok, err
 end
 
+-- Rotate under RECORD_LOCK, waiting for it: a recording request holds it for
+-- seconds at most. Recorders that find it held meanwhile skip as busy and record
+-- on a later tick, so a long rotation delays records but cannot lose one.
+local function rotate()
+    local nixio = require("nixio")
+    local lock, code, err = nixio.open(RECORD_LOCK, "w", "600")
+    if not lock then return false, tostring(err or code) end
+    local acquired
+    acquired, code, err = lock:lock("lock")
+    if not acquired then
+        lock:close()
+        return false, tostring(err or code)
+    end
+    local ok, rotated, rotation_err = pcall(rotate_locked)
+    lock:close()
+    if not ok then return false, tostring(rotated) end
+    return rotated, rotation_err
+end
+
+local function log(message)
+    os.execute("logger -t dashboard " .. shell_quote(message) .. " 2>/dev/null")
+end
+
+-- Run rotate() in a detached grandchild of this request's process: setsid and a
+-- second fork leave it to init, so neither the request's end nor uhttpd's
+-- timeout stops it, and its stdio goes to /dev/null so the response is not held
+-- open. Called without RECORD_LOCK held (a POSIX lock is not inherited, and an
+-- inherited descriptor closed in the child would not matter, but none is open).
+-- Returns false only when the process could not be started.
+local function start_rotation()
+    local nixio = require("nixio")
+    io.stdout:flush(); io.stderr:flush()  -- an exiting child must not repeat buffered output
+    local pid, code, err = nixio.fork()
+    if not pid then return false, tostring(err or code) end
+    if pid == 0 then
+        nixio.setsid()
+        local worker = nixio.fork()
+        if worker == 0 then
+            local null = nixio.open("/dev/null", "r+")
+            if null then
+                nixio.dup(null, nixio.stdin)
+                nixio.dup(null, nixio.stdout)
+                nixio.dup(null, nixio.stderr)
+                null:close()
+            end
+            local ok, rotated, rotation_err = pcall(rotate)
+            if not (ok and rotated) then
+                log("history rotation FAILED: " .. tostring(ok and rotation_err or rotated)
+                    .. " (history is intact; it is retried after the next record)")
+            end
+            os.exit(ok and rotated and 0 or 1)
+        end
+        os.exit(worker and 0 or 1)
+    end
+    local _, state, status = nixio.waitpid(pid)
+    if state ~= "exited" or status ~= 0 then return false, "could not start the rotation process" end
+    return true
+end
+
 local function read_last_record_time()
     local f = io.open(LAST_RECORD_FILE, "r")
     if not f then return 0 end
@@ -388,10 +449,14 @@ local function due(now, interval)
 end
 
 -- Check the interval inside the writer lock, then retain it through the
--- append and any rotation. Piggyback claims still stamp before sampling so a
--- failed sample waits for the next interval; manual records stamp on success.
+-- append; a rotation the append made due starts after the lock is released.
+-- A rotation that fails, or could not start, is a warning on a successful
+-- record, and is retried after the next one. Piggyback claims still stamp
+-- before sampling so a failed sample waits for the next interval; manual
+-- records stamp on success.
 local function record(interval, stamp_before)
-    return with_record_lock(function()
+    local rotation_due = false
+    local result = with_record_lock(function()
         local now = os.time()
         local elapsed = now - read_last_record_time()
         if elapsed >= 0 and elapsed < interval then
@@ -404,15 +469,12 @@ local function record(interval, stamp_before)
             end
         end
         local snapshot = build_record()
-        local written, write_err = append_record(snapshot)
+        local written, write_err
+        written, write_err, rotation_due = append_record(snapshot)
         if not written then return {error = "Recording failed", detail = write_err} end
         local stamped, stamp_err = true, nil
         if not stamp_before then stamped, stamp_err = write_last_record_time(now) end
         local result = {status = "ok", record = snapshot}
-        if write_err then
-            result.warning, result.detail = "History rotation failed", tostring(write_err)
-            io.stderr:write("[dashboard] history rotation FAILED: " .. result.detail .. "\n")
-        end
         if not stamped then
             result.warning = (result.warning and result.warning .. "; " or "") .. "History timestamp update failed"
             result.detail = (result.detail and result.detail .. "; " or "") .. tostring(stamp_err)
@@ -420,6 +482,21 @@ local function record(interval, stamp_before)
         end
         return result
     end)
+    if rotation_due and result.status == "ok" then
+        local rotated, rotation_err
+        if M.rotate_in_background then
+            rotated, rotation_err = start_rotation()
+        else
+            rotated, rotation_err = rotate()
+        end
+        if not rotated then
+            local detail = tostring(rotation_err)
+            result.warning = (result.warning and result.warning .. "; " or "") .. "History rotation failed"
+            result.detail = (result.detail and result.detail .. "; " or "") .. detail
+            io.stderr:write("[dashboard] history rotation FAILED: " .. detail .. "\n")
+        end
+    end
+    return result
 end
 
 -- Called on every API request (handler.lua); records if one is due. The
