@@ -5,6 +5,17 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- `scripts/history-merge.sh`: merge the history of several boxes, or a box's archives,
+  into one file. Inputs are never changed and an existing output is never overwritten.
+- Security: Glances 4.5.6 or newer and urllib3 2.8.0. The newer Glances no longer
+  depends on `python-jose`, `ecdsa`, `pyasn1` or `cryptography`.
+- OpenWrt `--update`: an update interrupted partway no longer reads as "Already at"
+  on the next run.
+- OpenWrt installer: installs `coreutils-timeout` when it can, so a hung `df` or
+  `tailscale` call cannot stall the dashboard.
+- Demo build: refuses an output directory whose replaced names would contain the
+  checkout.
+
 ## [0.0.1] - 2026-11-15
 
 - Dashboard: live CPU, memory, swap, GPU, network, disk I/O, temperature, power and ping
