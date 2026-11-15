@@ -1321,6 +1321,9 @@ function syncProcessTableHeader(table) {
 
 // Fetch slow-changing data; CPU/System Info retry until their permanent caches fill.
 async function fetchSlowData() {
+  // Taken before any await: the capture stamps below must not drift with how
+  // long this tick's other fetches (the public-IP lookup) took.
+  const tickAt = Date.now();
   const cpuInfoPromise = isCacheValid('cpuInfo')
     ? Promise.resolve({ data: getCache('cpuInfo'), ok: true, cached: true })
     : safeFetch('/api/cpu-info', {});
@@ -1469,7 +1472,7 @@ async function fetchSlowData() {
     // Stamped with the capture's start, not its end: the next slow tick is then
     // a full interval away and finds the result expired however long the
     // capture ran (see the capture TTLs in dataCache).
-    const diskStartedAt = Date.now();
+    const diskStartedAt = tickAt;
     safeFetch(`/api/disk-processes?duration=${diskDuration}`, [], getDiskTimeout())
       .then(diskProcesses => {
         if (diskProcesses.ok) {
@@ -1501,7 +1504,7 @@ async function fetchSlowData() {
     // Stamped with the capture's start, not its end: the next slow tick is then
     // a full interval away and finds the result expired however long the
     // capture ran (see the capture TTLs in dataCache).
-    const networkStartedAt = Date.now();
+    const networkStartedAt = tickAt;
     safeFetch(`/api/network-processes?duration=${nethogsDuration}`, [], getNethogsTimeout())
       .then(networkProcesses => {
         if (networkProcesses.ok) {

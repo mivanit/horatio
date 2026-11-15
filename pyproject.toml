@@ -4,21 +4,21 @@ version = "0"  # placeholder uv requires; the release number is in VERSION
 description = "Homelab status dashboard"
 requires-python = ">=3.10"
 dependencies = [
-    "glances[web]>=4.5.5",  # Web server mode (FastAPI, Uvicorn, Jinja2); >=4.5.5 for security fixes (2026-07)
+    "glances[web]>=4.5.6",  # Web server mode (FastAPI, Uvicorn, Jinja2); >=4.5.6 for security fixes (2026-11)
     "nvidia-ml-py",         # NVIDIA GPU monitoring
     "httpx",                # Async HTTP client for API proxy
 ]
 
 [tool.uv]
-# Security floors for transitive deps (Dependabot alerts, 2026-07).
+# Security floors for transitive deps (Dependabot alerts, 2026-11).
 # These only constrain resolution; they don't add packages to the tree.
 constraint-dependencies = [
     "fastapi>=0.133.0",      # earlier versions cap starlette <1.0, blocking its fixes
     "starlette>=1.3.1",
-    "urllib3>=2.7.0",
-    "cryptography>=48.0.1",
+    "urllib3>=2.8.0",
+    "cryptography>=50.0.0",
     "ecdsa>=0.19.2",         # Minerva timing attack remains unfixed upstream (won't-fix)
-    "pyasn1>=0.6.3",
+    "pyasn1>=0.6.5",
     "idna>=3.15",
     "requests>=2.33.0",
 ]

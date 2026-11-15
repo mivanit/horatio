@@ -67,7 +67,7 @@ accepted the nethogs offer; those stay until removed.
 ```
 
 On a checkout that follows main (or one from before `--update` existed, once), the same is
-`git pull && ./install.sh`. Either way the install is idempotent: re-syncs the venv, re-fetches Chart.js, re-renders the unit, restarts the service,
+`git pull && ./install.sh`. Either way the install is idempotent: re-syncs the venv, fetches Chart.js if it is missing or fails its checksum, re-renders the unit, restarts the service,
 and re-installs the collector when it is installed on this box (its first run is synchronous,
 a minute or three on a box with many drives). The optional-tool offers repeat until the tool
 is installed, or pass `--no-optional`. Pass `--grant-capabilities` on updates only if you want to

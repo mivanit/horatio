@@ -104,15 +104,18 @@ update_checkout() {   # [vX.Y.Z]
     # Unpack beside the checkout: same filesystem, and not in RAM-backed /tmp.
     work=$(mktemp -d "$DASHBOARD_DIR/.update.XXXXXX") || die "mktemp failed."
     trap 'rm -rf "$work"' EXIT
+    trap 'exit 1' HUP INT TERM
     wget -qO "$work/r.tgz" "$TARBALL_URL/v$new" || die "No release v$new to download."
     # gzip | tar rather than tar -z, which some BusyBox builds lack.
     gzip -dc "$work/r.tgz" | tar -xf - -C "$work" || die "Could not unpack v$new."
     # GitHub's archive of tag vX.Y.Z is one directory, horatio-X.Y.Z.
     [ "$(read_version "$work/horatio-$new")" = "$new" ] || die "Unexpected download; nothing changed."
-    cp -R "$work/horatio-$new/." "$DASHBOARD_DIR/" \
+    # VERSION goes last: a copy that failed partway must not read as "Already at".
+    mv "$work/horatio-$new/VERSION" "$work/VERSION"
+    cp -R "$work/horatio-$new/." "$DASHBOARD_DIR/" && cp "$work/VERSION" "$DASHBOARD_DIR/VERSION" \
         || die "Copying v$new failed partway; rerun: sh $0 --update v$new"
     rm -rf "$work"
-    trap - EXIT
+    trap - EXIT HUP INT TERM
     info "Updated v$old -> v$new. To go back: sh $0 --update v$old"
     # The release's installer does the install, so it matches what it installs.
     exec sh "$SCRIPT_DIR/install.sh"

@@ -19,6 +19,11 @@ mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd -P)"
 # The checkout's own index.html and static/ are the sources, never the output.
 [ "$OUT" != "$ROOT" ] || { echo "error: outdir is the checkout itself" >&2; exit 1; }
+# Nor may one of the replaced names be the checkout or hold it (a checkout
+# directory named static, built into its parent).
+for name in index.html static themes demo; do
+  case "$ROOT/" in "$OUT/$name/"*) echo "error: outdir/$name contains the checkout" >&2; exit 1 ;; esac
+done
 rm -rf "$OUT/index.html" "$OUT/static" "$OUT/themes"
 cp "$ROOT/index.html" "$OUT/index.html"
 cp -RL "$ROOT/static" "$OUT/static"
