@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import time
 import unittest.mock
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, TextIO
@@ -673,7 +675,7 @@ def test_history_max_hours_clamps_every_history_read() -> None:
 
     with (
         patch.object(server, "HISTORY_MAX_HOURS", 48.0),
-        patch.object(server, "_read_history", fake_read),
+        patch.object(server, "_read_history_cached", fake_read),
     ):
         assert server._clamp_hours(8760) == 48.0
         assert server._clamp_hours(0) == 0.1
@@ -681,3 +683,83 @@ def test_history_max_hours_clamps_every_history_read() -> None:
         asyncio.run(server.get_history(hours=8760))
         asyncio.run(server.get_history_field("temps", hours=1000))
     assert asked == [48.0, 48.0], f"history reads use the clamped window: {asked}"
+
+
+def test_history_window_cache_unit() -> None:
+    """One parse of the history file answers every reader until the file changes:
+    full reads, since= top-ups and side fields, without changing the shared
+    records; each doubling of the window reads only the bytes it did not hold."""
+    import server
+
+    now: float = time.time()
+
+    def line(age_s: float, pad: int = 0) -> str:
+        stamp: str = datetime.fromtimestamp(now - age_s, timezone.utc).isoformat()
+        return json.dumps(
+            {"timestamp": stamp, "ip": {"lan": []}, "temps": {"a": 1}, "pad": "x" * pad}
+        )
+
+    server.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    # 40 records, 10 minutes apart, ~1 KiB each: the newest is 5 minutes old.
+    lines: list[str] = [line(600 * (40 - i) - 300, 1000) for i in range(40)]
+    server.HISTORY_FILE.write_text("\n".join(lines) + "\n")
+
+    parses: list[int] = []
+    real_parse: Callable[..., Any] = server._parse_history_lines
+
+    def counting_parse(data: bytes) -> Any:
+        parses.append(len(data))
+        return real_parse(data)
+
+    with patch.object(server, "_parse_history_lines", counting_parse):
+        # Growth: an 8 KiB window doubled until it holds 5 hours parses each byte once.
+        window: Any = server._read_history_window(now - 5 * 3600, None, 8192)
+        assert len(parses) > 1, "the window had to grow"
+        assert sum(parses) <= window.size, (
+            f"bytes parsed once: {parses} of {window.size}"
+        )
+        assert [ts for ts, _ in window.records] == sorted(
+            ts for ts, _ in window.records
+        )
+        fresh: Any = server._read_history(5, initial_read_size=8192)
+        assert len(fresh[0]) == 30 and fresh[1:3] == (0, False)
+
+        parses.clear()
+        full: Any = server._read_history_cached(2)
+        assert len(full[0]) == 12 and len(parses) == 1, "the first read parses"
+        again: Any = server._read_history_cached(2)
+        top_up: Any = server._read_history_cached(2, since=now - 1200)
+        wider: Any = server._read_history_cached(6)
+        assert len(parses) == 1, "later reads the window covers parse nothing"
+        assert len(again[0]) == 12 and len(wider[0]) == 36
+        assert [r["timestamp"] for r in top_up[0]] == [
+            r["timestamp"] for r in full[0][-2:]
+        ], "since= returns only the newer records"
+
+        # The routes leave fields out of copies: the shared records keep them.
+        body: dict[str, Any] = json.loads(
+            bytes(asyncio.run(server.get_history(hours=2)).body)
+        )
+        assert body["count"] == 12 and "ip" not in body["records"][0]
+        assert "temps" not in body["records"][0] and "pad" in body["records"][0]
+        field: dict[str, Any] = json.loads(
+            bytes(asyncio.run(server.get_history_field("temps", hours=2)).body)
+        )
+        assert field["records"][0]["temps"] == {"a": 1}, (
+            "the field survived /api/history"
+        )
+        assert "ip" in full[0][0] and len(parses) == 1, "routes read the same window"
+
+        # An appended record invalidates the window.
+        with open(server.HISTORY_FILE, "a") as f:
+            f.write(line(0) + "\n")
+        os.utime(server.HISTORY_FILE, ns=(time.time_ns(), time.time_ns()))
+        assert len(server._read_history_cached(2)[0]) == 13 and len(parses) == 2
+
+        # A window over the cache limit is served but not kept.
+        with patch.object(server, "HISTORY_CACHE_MAX_WINDOW", 1024):
+            assert len(server._read_history_cached(2)[0]) == 13 and len(parses) == 2
+            os.utime(server.HISTORY_FILE, ns=(1, 1))
+            assert len(server._read_history_cached(2)[0]) == 13 and len(parses) == 3
+            assert server._history_cache["window"] is None
+            assert len(server._read_history_cached(2)[0]) == 13 and len(parses) == 4

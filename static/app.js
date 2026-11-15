@@ -14,6 +14,7 @@ const DEFAULT_PING_TARGETS = [
 function createCaptureState({ name, timestampId, headerSelector, durationFn }) {
   const state = {
     capturing: false, error: false, captureStart: null, captureInterval: null, lastCaptureTime: null,
+    requestPending: false,   // this page's own capture request is still out
     start() {
       state.clearError();
       state.capturing = true;
@@ -1459,7 +1460,11 @@ async function fetchSlowData() {
   const useDiskCache = isCacheValid('diskProcesses');
   if (useDiskCache) {
     guard('processes', () => diskCapture.handleResponse(getCache('diskProcesses'), dataCache.diskProcesses.lastUpdate));
-  } else if (cardStatus.processes) {   // no process card (OpenWrt): no capture, no error
+  } else if (cardStatus.processes && !diskCapture.requestPending) {
+    // No process card (OpenWrt): no capture, no error. A capture still out
+    // (longer than the poll, or a refresh click) is waited for, not asked again:
+    // the server would only answer that one is running.
+    diskCapture.requestPending = true;
     if (!diskCapture.capturing) diskCapture.start();
     // Stamped with the capture's start, not its end: the next slow tick is then
     // a full interval away and finds the result expired however long the
@@ -1482,14 +1487,16 @@ async function fetchSlowData() {
         console.error('Disk processes fetch error:', err);
         diskCapture.stop();
         diskCapture.setError();
-      });
+      })
+      .finally(() => { diskCapture.requestPending = false; });
   }
 
   // === NETWORK CAPTURE - runs independently, doesn't block above ===
   const useNetworkCache = isCacheValid('networkProcesses');
   if (useNetworkCache) {
     guard('processes', () => networkCapture.handleResponse(getCache('networkProcesses'), dataCache.networkProcesses.lastUpdate));
-  } else if (cardStatus.processes) {   // as the disk capture above
+  } else if (cardStatus.processes && !networkCapture.requestPending) {   // as the disk capture above
+    networkCapture.requestPending = true;
     if (!networkCapture.capturing) networkCapture.start();
     // Stamped with the capture's start, not its end: the next slow tick is then
     // a full interval away and finds the result expired however long the
@@ -1511,7 +1518,8 @@ async function fetchSlowData() {
         console.error('Network processes fetch error:', err);
         networkCapture.stop();
         networkCapture.setError();
-      });
+      })
+      .finally(() => { networkCapture.requestPending = false; });
   }
 }
 
@@ -2223,6 +2231,8 @@ async function fetchDataOnce() {
 // Startup may finish after Pause or Reconnect. Keep one timer per polling loop.
 function startPolling() {
   if (!isConnected) return;
+  // A hidden tab does not poll (see the visibilitychange handler).
+  if (typeof document !== 'undefined' && document.hidden) return;
   if (pollingInterval === null) pollingInterval = setInterval(fetchData, pollInterval);
   if (slowPollingInterval === null) slowPollingInterval = setInterval(fetchSlowData, SLOW_POLL_INTERVAL);
 }
@@ -2369,6 +2379,29 @@ loadConfig().then(async () => {
 
 // Set up toggle button
 document.getElementById('toggle-btn').addEventListener('click', toggleConnection);
+
+// A hidden tab (another tab in front, a minimised window) stops polling: nobody
+// sees its charts, and every poll costs the server a dozen requests. Coming back
+// shows the time away as a gap, like Reconnect, and polls at once.
+let hiddenSince = null;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (pollingInterval === null && slowPollingInterval === null) return;   // paused, or not started
+    clearInterval(pollingInterval);
+    clearInterval(slowPollingInterval);
+    pollingInterval = null;
+    slowPollingInterval = null;
+    hiddenSince = Date.now();
+  } else if (isConnected) {
+    if (hiddenSince !== null) {
+      fillHistoryGaps(Math.min(Math.floor((Date.now() - hiddenSince) / pollInterval), historyLength));
+      hiddenSince = null;
+    }
+    fetchSlowData();
+    fetchData();
+    startPolling();
+  }
+});
 
 // Set up theme selector. The theme loads in index.html's <head>, before these
 // scripts read their colors from CSS, so choosing one reloads the page.
@@ -3085,6 +3118,8 @@ function extractHistoryValue(record, metric, rangeType = 'avg') {
 // unitType: 'percent' | 'gb' for hasUnitToggle metrics, the selected field's key for fieldSelect ones
 // The BMC's whole-box reading in the power snapshot; every other Watts row is a part of it.
 const POWER_TOTAL_KEY = 'Pwr Consumption';
+// History charts with more records than this draw no per-point markers (see createHistoryChart).
+const HISTORY_MARKER_MAX = 500;   // about 3.5 days of 10-minute records
 
 // mode: the card's modeToggle (config.js HISTORY_METRICS) when it is on, else ''. 'stack':
 // power sources filled on top of each other; 'range': the fans as one min/max band.
@@ -3640,6 +3675,19 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
         borderWidth: 2,
         spanGaps: false
       }];
+    }
+  }
+
+  // On a long range the point markers merge into the line and cost more to draw
+  // than the line does. Past HISTORY_MARKER_MAX records only a point with no
+  // neighbour keeps its marker: with nothing to join it to, the line alone
+  // would not show it.
+  if (records.length > HISTORY_MARKER_MAX) {
+    for (const ds of datasets) {
+      const radius = ds.pointRadius, values = ds.data;
+      if (ds.type === 'bar' || typeof radius !== 'number' || !radius || !Array.isArray(values)) continue;
+      ds.pointRadius = point =>
+        values[point.dataIndex - 1] == null && values[point.dataIndex + 1] == null ? radius : 0;
     }
   }
 

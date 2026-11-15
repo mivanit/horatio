@@ -846,6 +846,58 @@ async function testSlowPollRenderIsolation() {
   assert.equal(errors.length, 2);
 }
 
+// A capture still running when the next poll (or a refresh click) comes is
+// waited for, not requested again; a hidden tab starts no timers.
+async function testCapturePendingAndHiddenTab() {
+  const calls = {}, release = {};
+  const context = vm.createContext({
+    Date, console: { error() {}, warn() {} },
+    document: { getElementById: () => null, querySelector: () => null },
+    setInterval: () => 1, clearInterval() {},
+    nethogsDuration: 3, diskDuration: 1, API_BASE: '/api/4', cardStatus: { processes: { ok: true } },
+    getDiskTimeout: () => 6500, getNethogsTimeout: () => 9500,
+    renderUnifiedProcesses() {}, renderGpuInfo() {}, renderCpuInfo() {}, renderDrives() {}, renderIpInfo() {},
+    renderMail() {}, renderHardware() {}, renderDriveHealth() {}, renderSystemInfo() {}, checkVersion() {},
+    safeFetch(url) {
+      calls[url] = (calls[url] || 0) + 1;
+      if (url.includes('-processes')) return new Promise(resolve => { release[url] = resolve; });
+      return Promise.resolve({ ok: true, data: url.endsWith('/fs') ? [] : url.endsWith('/uptime') ? '1h' : {} });
+    },
+  });
+  evaluate(context,
+    between(config, 'const IP_INFO_TIMEOUT_MS', 'const SLOW_POLL_INTERVAL') +
+    between(config, 'const dataCache =', '// The CPU core temperatures') +
+    between(config, 'function formatTimeAgo', 'function updateCacheDisplay') +
+    between(app, 'function createCaptureState', '// Unified processes table state') +
+    between(app, 'async function fetchSlowData', '// One poll at a time') +
+    between(app, 'function guard', 'async function fetchDataOnce'));
+  const net = '/api/network-processes?duration=3', disk = '/api/disk-processes?duration=1';
+  await context.fetchSlowData();
+  await context.fetchSlowData();
+  assert.deepEqual([calls[net], calls[disk]], [1, 1], 'a capture still out is not requested again');
+  assert.equal(evaluate(context, 'networkCapture.capturing'), true);
+  release[net]({ ok: true, data: [{ pid: 1, name: 'a' }] });
+  release[disk]({ ok: false, data: [], errorType: 'timeout' });
+  await new Promise(setImmediate);
+  assert.equal(evaluate(context, 'networkCapture.requestPending || diskCapture.requestPending'), false);
+  assert.equal(evaluate(context, 'diskCapture.error'), true);
+  await context.fetchSlowData();
+  assert.deepEqual([calls[net], calls[disk]], [1, 2], 'a failed capture is retried; a fresh result is reused');
+
+  const timers = [];
+  const polling = vm.createContext({
+    isConnected: true, pollingInterval: null, slowPollingInterval: null, pollInterval: 2000,
+    SLOW_POLL_INTERVAL: 30000, document: { hidden: true }, fetchData() {}, fetchSlowData() {},
+    setInterval: (callback, delay) => timers.push(delay),
+  });
+  evaluate(polling, between(app, 'function startPolling', '// Toggle connection'));
+  polling.startPolling();
+  assert.deepEqual(timers, [], 'a hidden tab starts no polling');
+  polling.document.hidden = false;
+  polling.startPolling();
+  assert.deepEqual(timers, [2000, 30000], 'a visible one does');
+}
+
 async function testCaptureCacheAge() {
   let now = 103000, captureError = false, captureDelay = 0;
   const calls = {};
@@ -1215,6 +1267,19 @@ async function testThemes() {
   assert.equal(shownAt(400), '20.0%');
   assert.equal(nextFrame, null, 'and the animation ends');
 
+  // A new value takes over an animation still running, from where it had got to.
+  const cancelled = [];
+  animation.requestAnimationFrame = callback => { nextFrame = callback; return 7; };
+  animation.cancelAnimationFrame = id => { cancelled.push(id); nextFrame = null; };
+  animation.animateValue(shown, 40, '%', 1);
+  const halfway = parseFloat(shownAt(100));
+  assert(halfway > 20 && halfway < 40, 'part of the way: ' + halfway);
+  animation.animateValue(shown, 0, '%', 1);
+  assert.deepEqual(cancelled, [7], 'the running animation is cancelled');
+  assert.equal(parseFloat(shownAt(0)), halfway, 'the new one starts from the value on screen');
+  assert.equal(shownAt(400), '0.0%');
+  assert.equal(nextFrame, null);
+
   // The picker: options from themes/index.json; a change stores it and reloads.
   const pickerContext = (stored, fetchImpl) => {
     const dom = makeDOM(['theme-select']), store = new Map(stored ? [['horatioTheme', stored]] : []);
@@ -1258,7 +1323,7 @@ async function testThemes() {
 (async () => {
   for (const test of [testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
-    testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
+    testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testCapturePendingAndHiddenTab, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
     testVersionFooter]) {
     await test();
     console.log(`PASS ${test.name}`);

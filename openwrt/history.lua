@@ -1,6 +1,8 @@
--- Simple JSONL history recording. Records piggyback on API requests at most
--- every RECORD_INTERVAL (config history.record_interval), with a cron POST to
--- /api/history/record twice a day as the floor (see install.sh).
+-- Simple JSONL history recording, every RECORD_INTERVAL (config
+-- history.record_interval). A cron job requests /api/history/tick each minute
+-- (see install.sh) and the tick that finds a record due takes it, so sampling
+-- does not hold up a dashboard request. Without cron, records piggyback on
+-- ordinary API requests instead, a little late (see M.maybe_record).
 -- No RRD dependency — snapshots metrics and appends JSON lines to a file.
 --
 -- uhttpd forks a child per request, so nothing in this module survives between
@@ -14,12 +16,24 @@ local metrics = nil
 local HISTORY_FILE = "/tmp/dashboard-history.jsonl"
 local LAST_RECORD_FILE = "/tmp/dashboard-last-record"  -- epoch of the last append
 local RECORD_LOCK = "/tmp/dashboard-history.lock"      -- stable inode; never unlink a kernel lockfile
-local RECORD_INTERVAL = 600   -- max one piggyback record per this many seconds
+local RECORD_INTERVAL = 600   -- seconds between records
+-- A tick records this much early: cron's minute and the previous record's
+-- stamp are never exactly an interval apart, and a tick that came a second
+-- short would wait a whole minute more.
+local TICK_SLACK = 15
+-- An ordinary request records only when the ticks are this late (cron stopped,
+-- or was never installed): two minutes of ticks missed.
+local PIGGYBACK_GRACE = 120
 local MIN_MANUAL_INTERVAL = 60
 local INITIAL_TAIL_READ = 1048576  -- 1 MiB tail window, doubled until it covers the range
 -- Past this (config history.max_file_mb) the older part of the file is gzipped
 -- to history-<UTC time>.jsonl.gz beside it and the file keeps its newest half.
-M.max_file_bytes = 256 * 1048576
+-- Small, because rotation runs inside a request on the router's CPU and flash:
+-- 16 MiB is some months of records and a few seconds of gzip.
+M.max_file_bytes = 16 * 1048576
+-- Archives kept (config history.max_archives); older ones are deleted after a
+-- rotation so the flash cannot fill.
+M.max_archives = 6
 M.max_read_bytes = 4 * 1048576  -- bound per-request parsing and response memory on routers
 
 local function shell_quote(value)
@@ -36,7 +50,8 @@ function M.init(cfg, metrics_module, dashboard_dir, state_dir)
     end
     local hist_cfg = config.history or {}
     RECORD_INTERVAL = hist_cfg.record_interval or 600
-    M.max_file_bytes = (hist_cfg.max_file_mb or 256) * 1048576
+    M.max_file_bytes = (hist_cfg.max_file_mb or 16) * 1048576
+    M.max_archives = tonumber(hist_cfg.max_archives) or 6
     if dashboard_dir then
         local logs_dir = dashboard_dir .. "/logs"
         os.execute("mkdir -p " .. shell_quote(logs_dir))
@@ -285,6 +300,28 @@ local function reserve_archive()
     end
 end
 
+-- Delete all but the newest M.max_archives archives. Their names carry the UTC
+-- time, so name order is age order. Best effort: a failure here leaves an extra
+-- archive, never a lost record.
+local function prune_archives()
+    local dir, stem = HISTORY_FILE:match("^(.*)/([^/]+)%.jsonl$")
+    if not dir then return end
+    local nixio = require("nixio")
+    local prefix, suffix, names = stem .. "-", ".jsonl.gz", {}
+    for name in (nixio.fs.dir(dir) or function() end) do
+        if name:sub(1, #prefix) == prefix and name:sub(-#suffix) == suffix then
+            names[#names + 1] = name
+        end
+    end
+    table.sort(names)
+    for i = 1, #names - math.max(0, M.max_archives) do
+        local removed, remove_err = os.remove(dir .. "/" .. names[i])
+        if not removed then
+            io.stderr:write("[dashboard] could not delete old history archive: " .. tostring(remove_err) .. "\n")
+        end
+    end
+end
+
 -- Gzip everything but the newest max_file_bytes / 2 (whole lines) to an archive
 -- beside the file, then atomically replace the live file with its newest part.
 -- The writer lock is already held. Until rename succeeds, every failure keeps
@@ -340,6 +377,8 @@ rotate_locked = function()
     if not ok then
         if archive then os.remove(archive) end
         if tmp_created then os.remove(tmp) end
+    elseif archive then
+        prune_archives()
     end
     return ok, err
 end
@@ -411,14 +450,17 @@ local function record(interval, stamp_before)
     end)
 end
 
--- Called on every API request (handler.lua); records if RECORD_INTERVAL has
--- elapsed since the last append. The request that trips this pays ~1 s of
--- sampling plus the pings before it is answered. A failed record is not
--- retried until the next interval.
-function M.maybe_record()
+-- Called on every API request (handler.lua); records if one is due. The
+-- request that records pays ~1 s of sampling plus the pings before it is
+-- answered, so that is left to cron's tick (scheduled = true), which nobody
+-- waits for; an ordinary request records only once the ticks are overdue. A
+-- failed record is not retried until the next interval.
+function M.maybe_record(scheduled)
     if not metrics then return end
-    if not due(os.time(), RECORD_INTERVAL) then return end
-    local result = record(RECORD_INTERVAL, true)
+    local interval = scheduled and math.max(1, RECORD_INTERVAL - TICK_SLACK)
+        or RECORD_INTERVAL + PIGGYBACK_GRACE
+    if not due(os.time(), interval) then return end
+    local result = record(interval, true)
     if result.error then
         io.stderr:write("[dashboard] history recording FAILED: " .. tostring(result.detail) .. "\n")
     end

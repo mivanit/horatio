@@ -688,6 +688,55 @@ do
         "reinitializing a quoted installation path preserves existing history bytes")
 end
 
+-- 22. Cron's tick records when a record is due; an ordinary request leaves it
+-- to the tick and records only once the ticks are overdue (cron stopped).
+do
+    local h, _, path, dir = fixture("tick")
+    local stamp = dir .. "/dashboard-last-record"
+    local function age(seconds) write(stamp, tostring(os.time() - seconds) .. "\n") end
+    age(500)
+    h.maybe_record(true)
+    check(count_records(path) == 0, "a tick well before the interval records nothing")
+    age(590)   -- cron's minute is never exactly an interval after the last stamp
+    h.maybe_record()
+    check(count_records(path) == 0, "an ordinary request leaves a due record to the tick")
+    h.maybe_record(true)
+    check(count_records(path) == 1, "the tick takes the record that is due")
+    h.maybe_record(true)
+    check(count_records(path) == 1, "the next tick finds nothing due")
+    age(660)
+    h.maybe_record()
+    check(count_records(path) == 1, "one missed tick is not yet a reason to record on a request")
+    age(725)
+    h.maybe_record()
+    check(count_records(path) == 2, "with the ticks overdue, an ordinary request records")
+end
+
+-- 23. Rotation keeps the newest max_archives archives and deletes older ones;
+-- files that are not this history's archives are left alone.
+do
+    local h, _, path, dir = fixture("prune")
+    h.max_file_bytes = 3000
+    h.max_archives = 2
+    local logs = dir .. "/logs/"
+    local old = {"history-20000101T000000Z.jsonl.gz", "history-20000102T000000Z.jsonl.gz",
+        "history-20000103T000000Z.jsonl.gz"}
+    for _, name in ipairs(old) do write(logs .. name, "old") end
+    write(logs .. "history-notes.txt", "keep")
+    write(logs .. "other-20000101T000000Z.jsonl.gz", "keep")
+    write(path, rotation_input())
+    local result = h.record_now()
+    local kept = archives(dir)
+    check(result.status == "ok" and result.warning == nil and #kept == 2
+        and kept[1] == logs .. old[3] and contents(logs .. old[1]) == "" and contents(logs .. old[2]) == "",
+        "rotation deletes all but the newest archives", "kept=" .. table.concat(kept, ","))
+    check(contents(logs .. "history-notes.txt") == "keep"
+        and contents(logs .. "other-20000101T000000Z.jsonl.gz") == "keep",
+        "pruning touches only this history's archives")
+    check(archived(kept[2]) .. contents(path) == rotation_input() .. jsonc.stringify(result.record) .. "\n",
+        "the new archive and the live file still hold every record")
+end
+
 os.execute("rm -rf " .. quote(base))
 print(string.format("\n%d passed, %d failed\n", passes, fails))
 os.exit(fails == 0 and 0 or 1)

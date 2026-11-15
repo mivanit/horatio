@@ -129,9 +129,11 @@ print(value if ok else 60)
 ' "${HEALTH_CONFIG:-/etc/horatio/config.json}")
 : "${SMART_TIMEOUT:=60}"
 if command -v smartctl > /dev/null; then
-    for dev in /dev/sd? /dev/nvme?n?; do
+    for dev in /dev/sd* /dev/nvme*n*; do
         [ -b "$dev" ] || continue     # no match leaves the literal glob
         name=$(basename "$dev")
+        # Whole disks only, however many there are (sdaa, nvme10n1): not sda1, nvme0n1p1.
+        [[ $name =~ ^(sd[a-z]+|nvme[0-9]+n[0-9]+)$ ]] || continue
         timeout "$SMART_TIMEOUT" smartctl --nocheck=standby,3 --all --json "$dev" > "$tmp/smart_$name.json" 2> "$tmp/smart_$name.err"
         echo $? > "$tmp/smart_$name.rc"
     done

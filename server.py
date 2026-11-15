@@ -2416,6 +2416,144 @@ def clamp_record_rates(record: dict[str, Any]) -> None:
                         _clamp_stats(drive.get(key), MAX_DISK_IO_MBPS)
 
 
+class _HistoryWindow(NamedTuple):
+    """The parsed tail of the history file: what one read of it found."""
+
+    stat: tuple[int, int]  # the file's (st_mtime_ns, st_size) when it was read
+    size: int  # bytes of the file the window spans
+    records: list[tuple[float, dict[str, Any]]]  # (epoch, record), in file order
+    skipped: int  # non-empty lines that are not a record
+    whole_file: bool  # the window starts at the file's first byte
+    hit_cap: bool  # the byte cap stopped it from growing further
+
+
+def _history_window_covers(
+    window: _HistoryWindow, cutoff: float, since: float | None
+) -> bool:
+    """Whether the window holds every record a (cutoff, since) request can ask for:
+    it starts at the file's start, or with a record older than the cutoff, or (with
+    ``since``) with one at or before ``since``."""
+    if window.whole_file:
+        return True
+    if not window.records:
+        return False
+    first_ts: float = window.records[0][0]
+    return first_ts < cutoff or (since is not None and first_ts <= since)
+
+
+def _parse_history_lines(data: bytes) -> tuple[list[tuple[float, dict[str, Any]]], int]:
+    """Whole JSONL lines as (epoch, record) pairs with served rates clamped, and
+    the count of non-empty lines that are not a record with a valid timestamp."""
+    records: list[tuple[float, dict[str, Any]]] = []
+    skipped: int = 0
+    line: bytes
+    for line in data.split(b"\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record: dict[str, Any] = json.loads(line)
+            ts_str: str = (
+                record.get("timestamp", "") if isinstance(record, dict) else ""
+            )
+            # Handle both formats: with and without Z suffix
+            # (empty/missing/non-string timestamp raises ValueError -> skipped)
+            if not isinstance(ts_str, str):
+                raise ValueError("timestamp is not a string")
+            ts_str = ts_str.replace("Z", "+00:00")
+            ts: float = datetime.fromisoformat(ts_str).timestamp()
+        except (json.JSONDecodeError, ValueError):
+            skipped += 1
+            continue
+        clamp_record_rates(record)
+        records.append((ts, record))
+    return records, skipped
+
+
+def _read_history_window(
+    cutoff: float,
+    since: float | None,
+    initial_read_size: int = HISTORY_INITIAL_TAIL_READ,
+    max_bytes: int = HISTORY_MAX_TAIL_READ,
+) -> _HistoryWindow:
+    """Parse the tail of the history file, growing the window (doubling) until it
+    covers (cutoff, since) or reaches ``max_bytes``. Each doubling reads and
+    parses only the part of the file the window did not hold yet. Raises OSError
+    when the file cannot be read."""
+    f: BinaryIO
+    with open(HISTORY_FILE, "rb") as f:
+        st: os.stat_result = os.fstat(f.fileno())
+        size: int = st.st_size
+        records: list[tuple[float, dict[str, Any]]] = []
+        skipped: int = 0
+        # Bytes from here to the end are parsed (it is the start of a line); None
+        # until a read finds a line boundary to start from.
+        parsed_from: int | None = None
+        read_size: int = initial_read_size
+        while True:
+            capped: int = min(read_size, max_bytes)
+            offset: int = max(0, size - capped)
+            f.seek(offset)
+            data: bytes = f.read(
+                (size if parsed_from is None else parsed_from) - offset
+            )
+            if parsed_from is None:
+                # An unterminated last line is a record still being appended,
+                # not corruption: leave it for the next read.
+                data = data[: data.rfind(b"\n") + 1]
+            start: int | None = offset
+            if offset > 0:
+                # Drop the (likely partial) line the window starts in
+                nl: int = data.find(b"\n")
+                start = offset + nl + 1 if nl != -1 else None
+                data = data[nl + 1 :] if nl != -1 else b""
+            if start is not None:
+                new_records: list[tuple[float, dict[str, Any]]]
+                new_skipped: int
+                new_records, new_skipped = _parse_history_lines(data)
+                records = new_records + records
+                skipped += new_skipped
+                parsed_from = start
+            window: _HistoryWindow = _HistoryWindow(
+                stat=(st.st_mtime_ns, size),
+                size=size - offset,
+                records=records,
+                skipped=skipped,
+                whole_file=offset == 0,
+                # offset > 0 with a maxed window means we can't grow further.
+                hit_cap=offset > 0 and capped >= max_bytes,
+            )
+            if window.hit_cap or _history_window_covers(window, cutoff, since):
+                if skipped:
+                    logger.warning("History read: skipped %d malformed lines", skipped)
+                if window.hit_cap and not _history_window_covers(window, cutoff, since):
+                    logger.warning(
+                        "History read: hit %d-byte cap before covering the range; "
+                        "the window holds the most recent %d records",
+                        max_bytes,
+                        len(records),
+                    )
+                return window
+            read_size *= 2
+
+
+def _serve_history_window(
+    window: _HistoryWindow, cutoff: float, since: float | None
+) -> tuple[list[dict[str, Any]], int, bool, float]:
+    """A request's (records, skipped, truncated, cutoff) from a window: the
+    records at or after the cutoff and (with ``since``) strictly newer than it.
+    The record dicts are the window's own: callers must not change them."""
+    records: list[dict[str, Any]] = [
+        record
+        for ts, record in window.records
+        if ts >= cutoff and (since is None or ts > since)
+    ]
+    truncated: bool = window.hit_cap and not _history_window_covers(
+        window, cutoff, since
+    )
+    return records, window.skipped, truncated, cutoff
+
+
 def _read_history(
     hours: float,
     initial_read_size: int = HISTORY_INITIAL_TAIL_READ,
@@ -2456,82 +2594,13 @@ def _read_history(
 
     e: Exception
     try:
-        f: BinaryIO
-        with open(HISTORY_FILE, "rb") as f:
-            size: int = f.seek(0, os.SEEK_END)
-            read_size: int = initial_read_size
-            while True:
-                capped: int = min(read_size, max_bytes)
-                offset: int = max(0, size - capped)
-                f.seek(offset)
-                data: bytes = f.read()
-                if offset > 0:
-                    # Drop the (likely partial) line the window starts in
-                    nl: int = data.find(b"\n")
-                    data = data[nl + 1 :] if nl != -1 else b""
-                # An unterminated last line is a record still being appended,
-                # not corruption: leave it for the next read.
-                data = data[: data.rfind(b"\n") + 1]
-
-                records: list[dict[str, Any]] = []
-                first_ts: float | None = None
-                skipped: int = 0
-                line: bytes
-                for line in data.split(b"\n"):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record: dict[str, Any] = json.loads(line)
-                        ts_str: str = (
-                            record.get("timestamp", "")
-                            if isinstance(record, dict)
-                            else ""
-                        )
-                        # Handle both formats: with and without Z suffix
-                        # (empty/missing/non-string timestamp raises ValueError -> skipped)
-                        if not isinstance(ts_str, str):
-                            raise ValueError("timestamp is not a string")
-                        ts_str = ts_str.replace("Z", "+00:00")
-                        ts: float = datetime.fromisoformat(ts_str).timestamp()
-                    except (json.JSONDecodeError, ValueError):
-                        skipped += 1
-                        continue
-                    if first_ts is None:
-                        first_ts = ts
-                    if ts >= cutoff and (since is None or ts > since):
-                        records.append(record)
-
-                covered: bool = (
-                    offset == 0
-                    or (first_ts is not None and first_ts < cutoff)
-                    or (
-                        since is not None and first_ts is not None and first_ts <= since
-                    )
-                )
-                # offset > 0 with a maxed window means we can't grow further.
-                hit_cap: bool = offset > 0 and capped >= max_bytes
-                if covered or hit_cap:
-                    truncated: bool = hit_cap and not covered
-                    if skipped:
-                        logger.warning(
-                            "History read: skipped %d malformed lines", skipped
-                        )
-                    if truncated:
-                        logger.warning(
-                            "History read: hit %d-byte cap before covering %.1fh; "
-                            "returning most recent %d records",
-                            max_bytes,
-                            hours,
-                            len(records),
-                        )
-                    for record in records:
-                        clamp_record_rates(record)
-                    return records, skipped, truncated, cutoff
-                read_size *= 2
+        window: _HistoryWindow = _read_history_window(
+            cutoff, since, initial_read_size, max_bytes
+        )
     except Exception as e:
         logger.error("Failed to read history file: %s", e)
         return str(e)
+    return _serve_history_window(window, cutoff, since)
 
 
 def _recording_health() -> dict[str, Any]:
@@ -2612,10 +2681,9 @@ async def get_history(hours: float = 24, since: str | None = None) -> Response:
     since_ts: float | None | Response = _parse_since(since)
     if isinstance(since_ts, Response):
         return since_ts
-    async with _history_read_lock:
-        result: (
-            tuple[list[dict[str, Any]], int, bool, float] | str
-        ) = await asyncio.to_thread(_read_history, hours, since=since_ts)
+    result: tuple[list[dict[str, Any]], int, bool, float] | str = await _history_result(
+        hours, since_ts
+    )
 
     if isinstance(result, str):
         return Response(
@@ -2632,27 +2700,32 @@ async def get_history(hours: float = 24, since: str | None = None) -> Response:
     # Records embed an `ip` block (LAN/public/Tailscale). Nothing in the UI reads it
     # from history — the IP-Info card uses live /api/ip-info — so don't serve a
     # network-topology history to unauthenticated LAN clients. The password-gated
-    # /api/history/raw still exposes it for deliberate export. Records are freshly
-    # parsed per request, so popping in place touches nothing shared.
+    # /api/history/raw still exposes it for deliberate export.
     # The heavy per-record fields are served by /api/history/field/<name> on demand.
-    rec: dict[str, Any]
-    for rec in records:
-        rec.pop("ip", None)
-        name: str
-        for name in HISTORY_SIDE_FIELDS:
-            rec.pop(name, None)
-    body: dict[str, Any] = {
-        "records": records,
-        "count": len(records),
-        "skipped_lines": skipped,
-        "truncated": truncated,
-        "cutoff": cutoff,
-        "now": cutoff + hours * 3600,
-        "recording": _recording_health(),
-    }
-    # A long range is many MB of JSON: encode it off the event loop.
+    # The records are shared with other requests (the parsed-history cache), so
+    # the fields are left out of copies, never popped.
+    left_out: frozenset[str] = frozenset({"ip", *HISTORY_SIDE_FIELDS})
+    recording: dict[str, Any] = _recording_health()
+
+    def encode() -> str:
+        return json.dumps(
+            {
+                "records": [
+                    {key: value for key, value in rec.items() if key not in left_out}
+                    for rec in records
+                ],
+                "count": len(records),
+                "skipped_lines": skipped,
+                "truncated": truncated,
+                "cutoff": cutoff,
+                "now": cutoff + hours * 3600,
+                "recording": recording,
+            }
+        )
+
+    # A long range is many MB of JSON: build and encode it off the event loop.
     return Response(
-        content=await asyncio.to_thread(json.dumps, body), media_type="application/json"
+        content=await asyncio.to_thread(encode), media_type="application/json"
     )
 
 
@@ -2679,10 +2752,9 @@ async def get_history_field(
     since_ts: float | None | Response = _parse_since(since)
     if isinstance(since_ts, Response):
         return since_ts
-    async with _history_read_lock:
-        result: (
-            tuple[list[dict[str, Any]], int, bool, float] | str
-        ) = await asyncio.to_thread(_read_history, hours, since=since_ts)
+    result: tuple[list[dict[str, Any]], int, bool, float] | str = await _history_result(
+        hours, since_ts
+    )
     if isinstance(result, str):
         return Response(
             content=json.dumps({"error": "Failed to read history", "detail": result}),
@@ -5344,10 +5416,9 @@ async def text_view(
     hours = _clamp_hours(hours)
     rows = max(1, min(rows, 500))
     requested_rows: int = rows
-    async with _history_read_lock:
-        result: (
-            tuple[list[dict[str, Any]], int, bool, float] | str
-        ) = await asyncio.to_thread(_read_history_cached, hours)
+    result: tuple[list[dict[str, Any]], int, bool, float] | str = await _history_result(
+        hours, None
+    )
     if isinstance(result, str):
         return Response(
             content=f"Failed to read history: {result}\n",
@@ -5437,11 +5508,18 @@ def _fit_height(body: str, height: int, color: ColorDepth) -> str:
 # Short-lived caches so several terminals polling /text every second cost one
 # live sample per second and one history parse per new record.
 _LIVE_TTL: Final[float] = 1.0
-# One history read at a time: a year-long range over a large file parses up to
+# One history parse at a time: a year-long range over a large file parses up to
 # HISTORY_MAX_TAIL_READ of JSON (hundreds of MB in Python objects); several at
-# once could exhaust a small box. Short and since= reads take milliseconds.
+# once could exhaust a small box. A request the cached window answers does not
+# take the lock.
 _history_read_lock: asyncio.Lock = asyncio.Lock()
-_history_cache: dict[str, Any] = {"key": None, "result": None}
+# The last parsed window, shared by /api/history, /api/history/field and /text:
+# a page opening several history cards, its since= top-ups and every terminal
+# are answered from one parse until the next record is appended.
+_history_cache: dict[str, _HistoryWindow | None] = {"window": None}
+# A window spanning more of the file than this is served but not kept: parsed
+# records take several times their size on disk.
+HISTORY_CACHE_MAX_WINDOW: Final[int] = 8 * 1024 * 1024
 
 
 async def _live_sample() -> dict[str, Any]:
@@ -5452,27 +5530,66 @@ async def _live_sample() -> dict[str, Any]:
     )
 
 
-def _read_history_cached(
-    hours: float,
-) -> tuple[list[dict[str, Any]], int, bool, float] | str:
-    """_read_history, reused until the file changes or a minute passes (the
-    window start moves). Callers must not mutate the returned records."""
+def _history_from_cache(
+    hours: float, since: float | None
+) -> tuple[list[dict[str, Any]], int, bool, float] | None:
+    """A history request answered from the cached window, or None when the file
+    has changed since it was parsed or the window does not reach far enough back
+    (sync: one stat)."""
+    window: _HistoryWindow | None = _history_cache["window"]
+    if window is None:
+        return None
     try:
         st: os.stat_result = HISTORY_FILE.stat()
-        key: tuple[float, int, int, int] | None = (
-            hours,
-            st.st_mtime_ns,
-            st.st_size,
-            int(time.time() // 60),
-        )
     except OSError:
-        key = None
-    if key is not None and _history_cache["key"] == key:
-        return _history_cache["result"]
-    result: tuple[list[dict[str, Any]], int, bool, float] | str = _read_history(hours)
-    if key is not None and not isinstance(result, str):
-        _history_cache.update(key=key, result=result)
-    return result
+        return None
+    if (st.st_mtime_ns, st.st_size) != window.stat:
+        return None
+    cutoff: float = datetime.now(timezone.utc).timestamp() - (hours * 3600)
+    if not (window.hit_cap or _history_window_covers(window, cutoff, since)):
+        return None
+    return _serve_history_window(window, cutoff, since)
+
+
+def _read_history_cached(
+    hours: float, since: float | None = None
+) -> tuple[list[dict[str, Any]], int, bool, float] | str:
+    """_read_history through the cached window: the file is parsed only when it
+    has changed or the request reaches further back than the window (sync).
+    Callers must not mutate the returned records. ``skipped`` counts the whole
+    window's malformed lines, which may span more than this request's range."""
+    hit: tuple[list[dict[str, Any]], int, bool, float] | None = _history_from_cache(
+        hours, since
+    )
+    if hit is not None:
+        return hit
+    cutoff: float = datetime.now(timezone.utc).timestamp() - (hours * 3600)
+    if not HISTORY_FILE.exists():
+        return [], 0, False, cutoff
+    e: Exception
+    try:
+        window: _HistoryWindow = _read_history_window(cutoff, since)
+    except Exception as e:
+        logger.error("Failed to read history file: %s", e)
+        return str(e)
+    _history_cache["window"] = (
+        window if window.size <= HISTORY_CACHE_MAX_WINDOW else None
+    )
+    return _serve_history_window(window, cutoff, since)
+
+
+async def _history_result(
+    hours: float, since: float | None
+) -> tuple[list[dict[str, Any]], int, bool, float] | str:
+    """A history read for a request: from the cached window when it answers the
+    request, else one parse at a time (see _history_read_lock)."""
+    hit: tuple[list[dict[str, Any]], int, bool, float] | None = await asyncio.to_thread(
+        _history_from_cache, hours, since
+    )
+    if hit is not None:
+        return hit
+    async with _history_read_lock:
+        return await asyncio.to_thread(_read_history_cached, hours, since=since)
 
 
 @APP.get("/tui.py")

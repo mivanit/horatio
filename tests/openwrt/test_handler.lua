@@ -13,8 +13,10 @@ package.preload["metrics"] = function()
         fs = function() return {{mnt_point = "/mnt/data", size = 8589934592, used = 4294967296}} end,
     }
 end
+local record_checks = {}
 package.preload["history"] = function()
-    return {init = function() end, maybe_record = function() end}
+    return {init = function() end,
+        maybe_record = function(scheduled) record_checks[#record_checks + 1] = scheduled end}
 end
 
 local output = {}
@@ -41,6 +43,7 @@ for _, case in ipairs({
     -- Same contract as the Python backend; a router checkout has no build.
     {"GET", "/version", 200, "OK", {'"version":"' .. version .. '"', '"build":null'}},
     {"GET", "/list-endpoints", 200, "OK", {'"/version"'}},
+    {"GET", "/history/tick", 200, "OK", {'"status":"ok"'}},
 }) do
     output = {}
     handle_request({REQUEST_METHOD = case[1], PATH_INFO = case[2]})
@@ -59,4 +62,13 @@ for _, case in ipairs({
     print((ok and "PASS " or "FAIL ") .. case[1] .. " " .. case[2]
         .. " -> " .. tostring(code) .. " " .. tostring(reason))
 end
+-- Every request checks whether a history record is due; only cron's tick is
+-- told it may take one on time (an ordinary request must not wait for sampling).
+local ticks, others = 0, 0
+for _, scheduled in ipairs(record_checks) do
+    if scheduled then ticks = ticks + 1 else others = others + 1 end
+end
+local ok = ticks == 1 and others == #record_checks - 1 and #record_checks > 1
+if not ok then failed = failed + 1 end
+print((ok and "PASS " or "FAIL ") .. "only /history/tick records on schedule")
 os.exit(failed == 0 and 0 or 1)

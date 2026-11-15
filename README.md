@@ -134,7 +134,8 @@ curl http://<host>:8080/text?style=simple         # plain ASCII, for scripts and
 | `history.record_interval` | seconds between history records (default 600) |
 | `history.min_record_interval` | minimum seconds between manual "record now" requests, 0 to disable (default 60) |
 | `history.sample_duration`, `history.sample_count` | each record averages `sample_count` samples over `sample_duration` seconds |
-| `history.max_file_mb` | OpenWrt backend only: past this size the older part of `logs/history.jsonl` is gzipped beside it and the file keeps its newest half (default 256). Archives are retained. Rotation needs free space for the compressed archive and the retained half; choose a smaller value on limited flash. History requests read at most the newest 4 MiB and report `truncated` when the requested range does not fit |
+| `history.max_file_mb` | OpenWrt backend only: past this size the older part of `logs/history.jsonl` is gzipped beside it and the file keeps its newest half (default 16, some months of records). Rotation runs on the router inside the request that records, and needs free space for the compressed archive and the retained half. History requests read at most the newest 4 MiB and report `truncated` when the requested range does not fit |
+| `history.max_archives` | OpenWrt backend only: how many of those gzipped archives to keep; older ones are deleted after a rotation so the flash cannot fill (default 6) |
 | `history.max_hours` | Linux server only (OpenWrt reads at most its 4 MiB tail anyway): largest window, in hours, any history read serves (`/api/history`, `/api/history/field/<name>`, `/text`); larger requests are clamped to it. Lower it on a small box: a year-long window parses up to the 64 MB history tail into memory (default 8760, 0.1 to 8760) |
 | `history.processes_enabled`, `history.process_count` | log the top `process_count` processes by CPU and by memory, plus any holding GPU memory, in each history record (`processes`: pid, name always; ppid, create_time, user, status, threads, cpu_percent, rss_mb, disk_read_kbps, disk_write_kbps, gpu_mem_mib + gpus, gpu_util_percent when known and non-zero); default off, 10. Roughly doubles a record's size at 10, so the 64 MB history tail covers fewer days |
 | `thresholds.*_percent`, `temp_celsius`, `network_mbps`, `disk_io_mbps`, `ping_ms` | orange-card thresholds |
@@ -316,7 +317,10 @@ checkout root is a link to it. Edit `www/config.json`: tools that replace the fi
 (`sed -i`, save-by-rename editors) turn the link into a copy nobody reads. If both
 copies exist, the next install run keeps the newer one, saves the other as
 `config.json.bak`, and says so. An existing `config.json` is moved into `www/`
-on install, and uninstall leaves both in place. A kernel file lock serializes recording and
+on install, and uninstall leaves both in place. A cron job requests `/api/history/tick` every
+minute and the tick that finds a record due takes it, so no dashboard request waits for the
+second of sampling; if cron stops, records are taken on ordinary requests instead, up to two
+minutes late. A kernel file lock serializes recording and
 rotation and releases automatically if a request worker exits. A successfully
 saved record whose rotation failed returns a warning; its original history is
 retained. It does not implement `since=` (Refresh reloads the whole window there)

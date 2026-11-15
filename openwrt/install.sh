@@ -267,11 +267,12 @@ uci commit uhttpd
 info "Restarting uhttpd..."
 /etc/init.d/uhttpd restart
 
-# --- History recording cron job: twice daily floor (03:00 and 15:00). ---
-# Records also piggyback on API requests (history.lua maybe_record), so this
-# only matters when nobody has the dashboard open.
-CRON_CMD="0 3,15 * * * wget -qO /dev/null --post-data='' http://$LAN_IP:$PORT/api/history/record # dashboard-history"
-info "Adding history cron job (03:00 and 15:00)..."
+# --- History recording cron job: a tick every minute. ---
+# The tick that finds a record due (config history.record_interval) takes it
+# (history.lua maybe_record), so the second of sampling never holds up a
+# dashboard request. A tick with nothing due reads one small file.
+CRON_CMD="* * * * * wget -qO /dev/null http://$LAN_IP:$PORT/api/history/tick # dashboard-history"
+info "Adding history cron job (a tick every minute)..."
 update_history_cron "$CRON_CMD"
 /etc/init.d/cron restart
 

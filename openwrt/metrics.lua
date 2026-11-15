@@ -6,16 +6,21 @@ local M = {}
 local config = {}
 
 -- uhttpd forks a child per request and the child exits afterwards, so no
--- module-level state survives between requests. Rate metrics therefore
--- measure their own window inside the request (see M.sample), and the
--- public-IP cache lives in a tmpfs file.
+-- module-level state survives between requests. What must outlive a request
+-- lives in tmpfs files: the counters rate metrics are measured against (see
+-- M.rates) and the public-IP cache.
 local PUBLIC_IP_FILE = "/tmp/dashboard-public-ip"
 local PUBLIC_IP_TTL = 600     -- 10 minutes
+local RATES_FILE = "/tmp/dashboard-rates"
+local RATES_FRESH = 1         -- younger than this (s): reuse the stored rates
+local RATES_STALE = 15        -- older than this (s): too old to measure against
 
 local has_timeout = false
 
-function M.init(cfg)
+-- state_dir: where the tmpfs state files go (tests point it elsewhere).
+function M.init(cfg, state_dir)
     config = cfg or {}
+    if state_dir then RATES_FILE = state_dir .. "/dashboard-rates" end
     -- Check if 'timeout' command is available for guarding blocking commands
     local p = io.popen("command -v timeout 2>/dev/null", "r")
     if p then
@@ -70,6 +75,25 @@ local function run_cmd_timeout(seconds, cmd)
         return run_cmd("timeout " .. seconds .. " " .. cmd)
     end
     return run_cmd(cmd)
+end
+
+-- Run several commands at once: all are started before any output is read, so
+-- the wait is the slowest one's, not their sum. Returns outputs in order (nil
+-- where a command could not be started). `seconds` is the timeout guard, as
+-- run_cmd_timeout; nil for none.
+local function run_cmds(seconds, cmds)
+    local prefix = (seconds and has_timeout) and ("timeout " .. seconds .. " ") or ""
+    local pipes, outputs = {}, {}
+    for i, cmd in ipairs(cmds) do
+        pipes[i] = io.popen(prefix .. cmd .. " 2>/dev/null", "r") or false
+    end
+    for i, p in ipairs(pipes) do
+        if p then
+            outputs[i] = p:read("*a")
+            p:close()
+        end
+    end
+    return outputs
 end
 
 -- Validate that a string is a safe hostname/IP (alphanumeric, dots, hyphens, colons)
@@ -144,7 +168,8 @@ end
 
 function M.system_info()
     local hostname = (read_line("/proc/sys/kernel/hostname") or "openwrt"):gsub("%s+$", "")
-    local uname = (run_cmd_timeout(5, "uname -r") or ""):gsub("%s+$", "")
+    -- What `uname -r` prints, without starting a process.
+    local uname = (read_line("/proc/sys/kernel/osrelease") or ""):gsub("%s+$", "")
 
     local distro = ""
     local release = read_file("/etc/openwrt_release")
@@ -240,7 +265,7 @@ function M.memswap()
 end
 
 ------------------------------------------------------------------------
--- Rate-based endpoints: snapshot, sleep 1 s, snapshot, diff.
+-- Rate-based endpoints: the change in /proc counters between two snapshots.
 ------------------------------------------------------------------------
 
 -- Parse /proc/stat into {all = {idle, total}, cores = {{idle, total}, ...}}.
@@ -287,14 +312,9 @@ local function net_snapshot()
     return snap
 end
 
--- One 1 s measurement window serving CPU total, per-core and network rates.
--- Returns {cpu = {total = pct, cores = {pct, ...}}, network = {iface, ...}}
--- where network entries have the same shape /4/network always returned.
-function M.sample()
-    local stat_a, net_a = stat_snapshot(), net_snapshot()
-    os.execute("sleep 1")   -- return value ignored: it differs between Lua 5.1 and 5.2+
-    local stat_b, net_b = stat_snapshot(), net_snapshot()
-
+-- Rates between two snapshot pairs: {cpu = {total = pct, cores = {pct, ...}},
+-- network = {iface, ...}}, network entries shaped as /4/network serves them.
+local function measure(stat_a, net_a, stat_b, net_b)
     local cpu = {total = 0, cores = {}}
     if stat_a and stat_b then
         cpu.total = busy_pct(stat_a.all, stat_b.all)
@@ -326,20 +346,135 @@ function M.sample()
     return {cpu = cpu, network = network}
 end
 
+-- Snapshot, wait 1 s, snapshot. Returns the rates and the second snapshots.
+local function sample_window()
+    local stat_a, net_a = stat_snapshot(), net_snapshot()
+    -- nanosleep where Nixio is present (always on OpenWrt): `sleep` is a process.
+    local ok, nixio = pcall(require, "nixio")
+    if ok and nixio.nanosleep then nixio.nanosleep(1)
+    else os.execute("sleep 1") end  -- return value ignored: it differs between Lua 5.1 and 5.2+
+    local stat_b, net_b = stat_snapshot(), net_snapshot()
+    return measure(stat_a, net_a, stat_b, net_b), stat_b, net_b
+end
+
+-- One 1 s measurement window serving CPU total, per-core and network rates:
+-- what a history record wants, whenever it is taken. Live requests use M.rates.
+function M.sample()
+    return (sample_window())
+end
+
+-- The rates file: the counters of the last measurement, when it was taken
+-- (uptime seconds) and the rates it produced. One line per item, "end" last so
+-- a file caught half-written reads as missing.
+local function read_rates()
+    local content = read_file(RATES_FILE)
+    if not content or not content:match("\nend\n$") then return nil end
+    local state = {
+        stat = {cores = {}}, net = {ifaces = {}},
+        result = {cpu = {total = 0, cores = {}}, network = {}}
+    }
+    for line in content:gmatch("[^\n]+") do
+        local kind, rest = line:match("^(%S+)%s*(.*)$")
+        if kind == "time" then
+            state.time = tonumber(rest)
+            state.net.time = state.time
+        elseif kind == "cpu" or kind == "core" then
+            local idle, total = rest:match("^(%d+) (%d+)$")
+            if not idle then return nil end
+            local entry = {idle = tonumber(idle), total = tonumber(total)}
+            if kind == "cpu" then state.stat.all = entry
+            else state.stat.cores[#state.stat.cores + 1] = entry end
+        elseif kind == "net" then
+            local name, rx, tx = rest:match("^(%S+) (%d+) (%d+)$")
+            if not name then return nil end
+            state.net.ifaces[#state.net.ifaces + 1] = {name = name, rx = tonumber(rx), tx = tonumber(tx)}
+        elseif kind == "rcpu" then
+            state.result.cpu.total = tonumber(rest) or 0
+        elseif kind == "rcore" then
+            state.result.cpu.cores[#state.result.cpu.cores + 1] = tonumber(rest) or 0
+        elseif kind == "rnet" then
+            local name, rx, tx = rest:match("^(%S+) (%S+) (%S+)$")
+            if not name then return nil end
+            state.result.network[#state.result.network + 1] = {
+                interface_name = name,
+                bytes_recv_rate_per_sec = tonumber(rx) or 0,
+                bytes_sent_rate_per_sec = tonumber(tx) or 0
+            }
+        end
+    end
+    if not state.time or not state.stat.all then return nil end
+    return state
+end
+
+-- Best effort: without the file every request measures its own 1 s window.
+local function write_rates(stat, net, result)
+    if not stat or not stat.all or not net then return end
+    local lines = {
+        string.format("time %.2f", net.time),
+        string.format("cpu %.0f %.0f", stat.all.idle, stat.all.total)
+    }
+    for _, c in ipairs(stat.cores) do
+        lines[#lines + 1] = string.format("core %.0f %.0f", c.idle, c.total)
+    end
+    for _, e in ipairs(net.ifaces) do
+        lines[#lines + 1] = string.format("net %s %.0f %.0f", e.name, e.rx, e.tx)
+    end
+    lines[#lines + 1] = "rcpu " .. result.cpu.total
+    for _, pct in ipairs(result.cpu.cores) do lines[#lines + 1] = "rcore " .. pct end
+    for _, e in ipairs(result.network) do
+        lines[#lines + 1] = "rnet " .. e.interface_name .. " "
+            .. e.bytes_recv_rate_per_sec .. " " .. e.bytes_sent_rate_per_sec
+    end
+    lines[#lines + 1] = "end\n"
+    -- Requests run at once; a name of this request's own, then rename, so no
+    -- reader sees another's half-written file.
+    local ok, nixio = pcall(require, "nixio")
+    local tmp = RATES_FILE .. "." .. ((ok and nixio.getpid) and nixio.getpid() or "tmp")
+    local f = io.open(tmp, "w")
+    if not f then return end
+    local written = f:write(table.concat(lines, "\n"))
+    local closed = f:close()
+    if not written or not closed or not os.rename(tmp, RATES_FILE) then os.remove(tmp) end
+end
+
+-- CPU and network rates for the live endpoints, measured from the previous
+-- request's counters to now, the way top does: no waiting inside the request.
+-- (Each of /4/cpu, /4/percpu and /4/network used to sleep 1 s, on every poll.)
+--   * A measurement under RATES_FRESH old is returned as is: the three
+--     endpoints of one poll share it, and no window is too short to mean much.
+--   * No usable previous counters (first request, the dashboard was closed, a
+--     reboot): one 1 s window, as before.
+function M.rates()
+    local prev = read_rates()
+    local age = prev and (get_time() - prev.time)
+    if prev and age >= 0 and age < RATES_FRESH then return prev.result end
+
+    local result, stat, net
+    if prev and age >= 0 and age <= RATES_STALE then
+        stat, net = stat_snapshot(), net_snapshot()
+        local usable = stat and stat.all and net
+            and stat.all.total > prev.stat.all.total and net.time > prev.time
+        if usable then result = measure(prev.stat, prev.net, stat, net) end
+    end
+    if not result then result, stat, net = sample_window() end
+    write_rates(stat, net, result)
+    return result
+end
+
 function M.cpu()
-    return {total = M.sample().cpu.total}
+    return {total = M.rates().cpu.total}
 end
 
 function M.percpu()
     local cores = {}
-    for i, pct in ipairs(M.sample().cpu.cores) do
+    for i, pct in ipairs(M.rates().cpu.cores) do
         cores[i] = {cpu_number = i - 1, total = pct}
     end
     return cores
 end
 
 function M.network()
-    return M.sample().network
+    return M.rates().network
 end
 
 ------------------------------------------------------------------------
@@ -377,7 +512,10 @@ function M.fs()
             local dev, fstype, size, used, _, pct, mount =
                 line:match("^(%S+)%s+(%S+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%%%s+(.+)$")
             if dev and mount and not skip_types[fstype] then
-                local resolved = (run_cmd("readlink -f '" .. dev:gsub("'", "'\\''") .. "'") or dev):gsub("%s+$", "")
+                -- Symlinks resolved (/dev/mapper/x -> /dev/dm-0), as readlink -f
+                -- would, without a process per row. A name that is not a path
+                -- (ubi0:rootfs_data, overlayfs:/overlay) is kept as df printed it.
+                local resolved = nixio.fs.realpath(dev) or dev
                 -- df has no inode columns without BusyBox's FEATURE_DF_FANCY; statvfs
                 -- always works. files == 0 means no fixed inode table (jffs2, ubifs).
                 local st = nixio.fs.statvfs(mount)
@@ -397,54 +535,56 @@ function M.fs()
     return filesystems
 end
 
+-- Paths matching a glob pattern, sorted (as `ls` lists them), without a
+-- process. Required here, not at load, so tests can swap in a fake.
+local function glob(pattern)
+    local paths = {}
+    local iter = require("nixio").fs.glob(pattern)
+    if iter then
+        for path in iter do paths[#paths + 1] = path end
+    end
+    table.sort(paths)
+    return paths
+end
+
 function M.sensors()
     local sensors = {}
 
     -- Thermal zones
-    local tz_list = run_cmd("ls -d /sys/class/thermal/thermal_zone* 2>/dev/null")
-    if tz_list then
-        for tz_path in tz_list:gmatch("%S+") do
-            local temp_str = read_line(tz_path .. "/temp")
-            if temp_str then
-                local temp = tonumber(temp_str)
-                if temp and temp > 0 then
-                    local label = read_line(tz_path .. "/type")
-                        or ("zone" .. (tz_path:match("thermal_zone(%d+)") or ""))
-                    sensors[#sensors + 1] = {
-                        type = "temperature_core",
-                        label = label,
-                        value = round(temp / 1000, 1)
-                    }
-                end
+    for _, tz_path in ipairs(glob("/sys/class/thermal/thermal_zone*")) do
+        local temp_str = read_line(tz_path .. "/temp")
+        if temp_str then
+            local temp = tonumber(temp_str)
+            if temp and temp > 0 then
+                local label = read_line(tz_path .. "/type")
+                    or ("zone" .. (tz_path:match("thermal_zone(%d+)") or ""))
+                sensors[#sensors + 1] = {
+                    type = "temperature_core",
+                    label = label,
+                    value = round(temp / 1000, 1)
+                }
             end
         end
     end
 
     -- hwmon sensors
-    local hwmon_list = run_cmd("ls -d /sys/class/hwmon/hwmon* 2>/dev/null")
-    if hwmon_list then
-        for hw_path in hwmon_list:gmatch("%S+") do
-            local temp_files = run_cmd("ls " .. hw_path .. "/temp*_input 2>/dev/null")
-            if temp_files then
-                for temp_file in temp_files:gmatch("%S+") do
-                    local temp_str = read_line(temp_file)
-                    if temp_str then
-                        local temp = tonumber(temp_str)
-                        if temp and temp > 0 then
-                            local label = read_line(temp_file:gsub("_input$", "_label"))
-                            if not label then
-                                local hwmon_name = read_line(hw_path .. "/name") or "hwmon"
-                                local idx = temp_file:match("temp(%d+)_input") or ""
-                                label = hwmon_name .. " " .. idx
-                            end
-                            sensors[#sensors + 1] = {
-                                type = "temperature_core",
-                                label = label,
-                                value = round(temp / 1000, 1)
-                            }
-                        end
-                    end
+    for _, temp_file in ipairs(glob("/sys/class/hwmon/hwmon*/temp*_input")) do
+        local temp_str = read_line(temp_file)
+        if temp_str then
+            local temp = tonumber(temp_str)
+            if temp and temp > 0 then
+                local label = read_line((temp_file:gsub("_input$", "_label")))
+                if not label then
+                    local hw_path = temp_file:match("^(.*)/[^/]+$")
+                    local hwmon_name = read_line(hw_path .. "/name") or "hwmon"
+                    local idx = temp_file:match("temp(%d+)_input") or ""
+                    label = hwmon_name .. " " .. idx
                 end
+                sensors[#sensors + 1] = {
+                    type = "temperature_core",
+                    label = label,
+                    value = round(temp / 1000, 1)
+                }
             end
         end
     end
@@ -462,17 +602,24 @@ function M.ping()
         return {disabled = true}
     end
 
-    local result = {targets = {}}
+    local addrs, cmds = {}, {}
     for _, t in ipairs(targets) do
         local addr = validate_addr(t.address)
         if addr then
-            local output = run_cmd("ping -c 1 -W 2 " .. addr)
-            local ms = output and output:match("time=(%d+%.?%d*)")
-            if ms then
-                result.targets[addr] = {latency_ms = round(tonumber(ms), 2)}
-            else
-                result.targets[addr] = {error = "timeout"}
-            end
+            addrs[#addrs + 1] = addr
+            cmds[#cmds + 1] = "ping -c 1 -W 2 " .. addr
+        end
+    end
+    -- All targets at once. The guard bounds what -W does not: a name that will
+    -- not resolve.
+    local outputs = run_cmds(5, cmds)
+    local result = {targets = {}}
+    for i, addr in ipairs(addrs) do
+        local ms = outputs[i] and outputs[i]:match("time=(%d+%.?%d*)")
+        if ms then
+            result.targets[addr] = {latency_ms = round(tonumber(ms), 2)}
+        else
+            result.targets[addr] = {error = "timeout"}
         end
     end
     return result
@@ -564,13 +711,18 @@ function M.ip_info()
     end
     if not public then
         public = {}
-        local v4 = run_cmd("wget -qO- -T 3 https://api.ipify.org")
+        -- Both lookups at once: 3 s at worst, not 6.
+        local lookups = run_cmds(nil, {
+            "wget -qO- -T 3 https://api.ipify.org",
+            "wget -qO- -T 3 https://api64.ipify.org"
+        })
+        local v4 = lookups[1]
         if v4 then
             v4 = v4:gsub("%s+", "")
             if v4 ~= "" then public.ipv4 = v4 end
         end
         -- api64 is dual-stack and may return IPv4 when IPv6 is unavailable.
-        local address = run_cmd("wget -qO- -T 3 https://api64.ipify.org")
+        local address = lookups[2]
         if address then
             address = address:gsub("%s+", "")
             if address:find(":") then

@@ -161,6 +161,10 @@ routes["/history/record"] = function(env)
     end
 end
 
+-- Cron's once-a-minute request (install.sh): it does nothing itself, and
+-- handle_request takes the history record when one is due.
+routes["/history/tick"] = function() send_json({status = "ok"}) end
+
 -- Meta
 -- The release from the checkout's VERSION, as the Python backend's /api/version.
 -- Read per request: an update replaces the file without restarting uhttpd's Lua state.
@@ -184,10 +188,11 @@ end
 
 -- Main request handler (called by uhttpd for every /api/* request)
 function handle_request(env)
-    -- Piggyback: record history if interval has elapsed
-    history.maybe_record()
-
     local path = env.PATH_INFO or ""
+    -- Record history if it is due: on cron's tick, or on any request once the
+    -- ticks are overdue (history.maybe_record).
+    history.maybe_record(path == "/history/tick")
+
     local handler = routes[path]
     if handler then
         local ok, err = pcall(handler, env)

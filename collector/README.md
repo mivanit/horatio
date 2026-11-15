@@ -21,7 +21,7 @@ unit mounts the checkout read-only, `logs/` aside). Idempotent, keeps an existin
 ## Requirements
 
 - Linux with systemd, python3, `lsblk`, `journalctl`, and `smartmontools` for the drive rows
-  (`/dev/sd?` and `/dev/nvme?n?`). Without smartmontools every run raises the alarm
+  (every whole `/dev/sd*` disk and `/dev/nvme*n*` namespace). Without smartmontools every run raises the alarm
   `smartmontools not installed: drives are not monitored` (the installer warns too).
 - Optional: `ipmitool` and a BMC (`/dev/ipmi0`, e.g. Dell iDRAC). Without both, the BMC sections
   are skipped with one `info` note, no alarm. Optional: Intel RAPL (`/sys/class/powercap/intel-rapl:*`) for CPU /

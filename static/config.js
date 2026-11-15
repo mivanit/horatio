@@ -39,9 +39,17 @@ let limits = {
 };
 function clampRate(value, cap) { return Math.min(Math.max(value || 0, 0), cap); }
 
-// Read a CSS custom property value
+// Read a CSS custom property value. Kept once read: the charts ask for the same
+// few colours on every poll, and each lookup makes the browser resolve the
+// page's styles. A theme is applied by reloading the page, so none goes stale.
+const cssValues = new Map();
 function getCssColor(varName) {
-  return getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+  let value = cssValues.get(varName);
+  if (value === undefined) {
+    value = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+    cssValues.set(varName, value);
+  }
+  return value;
 }
 
 // `color` at the opacity of two hex digits: withAlpha(c, '20') replaces appending '20'.
@@ -336,6 +344,11 @@ function updateCardWarning(cardId, value, threshold) {
 
 // Animate numeric values smoothly
 function animateValue(element, newValue, suffix = '', decimals = 1) {
+  // A new value replaces an animation still running, from where it had got to:
+  // two at once would each write the element every frame.
+  if (element.valueAnimation != null && typeof cancelAnimationFrame === 'function') {
+    cancelAnimationFrame(element.valueAnimation);
+  }
   const current = parseFloat(element.dataset.value || 0);
   const duration = 400;
   const start = performance.now();
@@ -347,10 +360,10 @@ function animateValue(element, newValue, suffix = '', decimals = 1) {
     const eased = 1 - Math.pow(1 - progress, 3); // easeOutCubic
     const value = current + (newValue - current) * eased;
     element.textContent = value.toFixed(decimals) + suffix;
-    if (progress < 1) requestAnimationFrame(update);
-    else element.dataset.value = newValue;
+    element.dataset.value = progress < 1 ? value : newValue;
+    element.valueAnimation = progress < 1 ? requestAnimationFrame(update) : null;
   }
-  requestAnimationFrame(update);
+  element.valueAnimation = requestAnimationFrame(update);
 }
 
 // GPU colors for multi-GPU support
@@ -385,7 +398,20 @@ function pingWinUp(arr, gaps) {
 
 // Canvas hatch for one slot: faint fill (partial) + solid stripes (full outage),
 // per-target colour; stripes phase-offset by target index so overlaps interleave.
+// A pattern depends only on each target's colour and whether its loss is none,
+// partial or total, so each distinct one is drawn once: an outage would
+// otherwise make a canvas per lost slot on every poll.
+const pingBandPatterns = new Map();
 function pingBandPattern(entries) {   // entries: [{color, loss}]
+  const key = entries.map(e => e.color + (e.loss >= 1 ? '!' : e.loss > 0 ? '~' : '-')).join('|');
+  let pattern = pingBandPatterns.get(key);
+  if (!pattern) {
+    pattern = drawPingBandPattern(entries);
+    pingBandPatterns.set(key, pattern);
+  }
+  return pattern;
+}
+function drawPingBandPattern(entries) {
   const s = 9, c = document.createElement('canvas'); c.width = c.height = s;
   const x = c.getContext('2d');
   entries.forEach(e => {
