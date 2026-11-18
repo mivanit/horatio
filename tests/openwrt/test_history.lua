@@ -735,14 +735,17 @@ do
     local old = {"history-20000101T000000Z.jsonl.gz", "history-20000102T000000Z.jsonl.gz",
         "history-20000103T000000Z.jsonl.gz", "history-notes.txt"}
     for _, name in ipairs(old) do write(logs .. name, "old") end
-    write(path, rotation_input())
+    -- Built once: its timestamps come from the clock, and a second can pass
+    -- before the comparison below.
+    local original = rotation_input()
+    write(path, original)
     local result = h.record_now()
     local kept = archives(dir)
     local untouched = true
     for _, name in ipairs(old) do untouched = untouched and contents(logs .. name) == "old" end
     check(result.status == "ok" and result.warning == nil and #kept == 4 and untouched,
         "rotation keeps every archive", "kept=" .. table.concat(kept, ","))
-    check(archived(kept[4]) .. contents(path) == rotation_input() .. jsonc.stringify(result.record) .. "\n",
+    check(archived(kept[4]) .. contents(path) == original .. jsonc.stringify(result.record) .. "\n",
         "the new archive and the live file still hold every record")
 end
 
