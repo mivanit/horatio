@@ -12,7 +12,8 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
   `history.max_gap_seconds` (default one hour; `0` restores the old behaviour).
 - Service checks: when no round has finished for several intervals, `/api/services`
   says `stale: true` and the card and `/text` show the results as stale, not as the
-  last "up". An unexpected error in a check is logged with its traceback.
+  last "up". This also covers a first round that never finishes after a start with no
+  log. An unexpected error in a check is logged with its traceback.
 - Hardware collector: a `backup_timer` that names no existing unit is an alarm at once
   (`collector: backup-timer: no such timer`).
 - Dashboard: a failed GPU or ping request shows its card again when the card was hidden,

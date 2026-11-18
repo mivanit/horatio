@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -263,6 +264,16 @@ def test_round_is_logged_and_reloaded(tmp_path: Path) -> None:
         assert server.services_snapshot(later)["stale"] is True, (
             "no round for several intervals: the checker has stopped"
         )
+        # No round at all: stale counts from the checker's start, so a first
+        # round that never finishes does not read as pending forever.
+        with (
+            patch.object(server, "_services_rounds", deque()),
+            patch.object(server, "_services_latest", {}),
+        ):
+            assert server.services_snapshot(later)["stale"] is False, "not running"
+            with patch.object(server, "_services_started", now):
+                assert server.services_snapshot(now + 5)["stale"] is False
+                assert server.services_snapshot(later)["stale"] is True
 
         # A line that is not a round is skipped, not fatal.
         with open(log, "a") as f:

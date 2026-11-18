@@ -835,6 +835,9 @@ ServiceRound: TypeAlias = tuple[float, dict[str, bool]]
 _services_rounds: deque[ServiceRound] = deque()
 # Target name -> its newest result ({ok, status, ms?, error?}) plus "checked".
 _services_latest: dict[str, dict[str, Any]] = {}
+# When the checker started (epoch), None while it is not running: with no round
+# on record yet, staleness counts from here.
+_services_started: float | None = None
 
 
 async def _check_http_target(
@@ -2329,6 +2332,8 @@ async def run_service_round(
 async def services_checker() -> None:
     """Background task: a round of service checks every services.check_interval
     seconds, the first one at once. Started only when http_targets is not empty."""
+    global _services_started
+    _services_started = time.time()
     e: Exception
     try:
         cutoff: float = time.time() - SERVICES_UPTIME_HOURS[-1] * 3600
@@ -3554,10 +3559,14 @@ def services_snapshot(now: float) -> dict[str, Any]:
             }
         )
     # The checker died or hung: the newest results are old news, and a reader
-    # must not take the last "up" for the present.
-    stale: bool = bool(_services_rounds) and (
-        now - _services_rounds[-1][0]
-        > 3 * SERVICES_CHECK_INTERVAL + 2 * SERVICES_TIMEOUT
+    # must not take the last "up" for the present. Before any round, the
+    # checker's start stands in, so a first round that never ends is not
+    # "pending" forever.
+    newest: float | None = (
+        _services_rounds[-1][0] if _services_rounds else _services_started
+    )
+    stale: bool = newest is not None and (
+        now - newest > 3 * SERVICES_CHECK_INTERVAL + 2 * SERVICES_TIMEOUT
     )
     return {
         "interval": SERVICES_CHECK_INTERVAL,
