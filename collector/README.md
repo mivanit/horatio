@@ -51,7 +51,8 @@ it survives re-installs. Keys:
 
 A missing file uses built-in defaults (the shipped fault phrases, an empty defect baseline, no
 fan ceiling, a 3 °C GPU temperature margin, no backup timer); malformed JSON is a `collector: load_config crashed` alarm, and the parts that
-need the file (SEL hardware faults, drives) crash with it while the rest still report.
+need the file crash too once they reach a value from it (SEL hardware faults at the first
+hardware event line, drives at the first SAS drive); everything else still reports.
 
 ## The rules live here, nowhere else
 

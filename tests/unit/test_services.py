@@ -313,6 +313,18 @@ def test_text_report_services_line() -> None:
     line: str = next(line for line in lines if line.startswith("Services"))
     assert "* pages UP 99.9%" in line
     assert "* immich DOWN" in line and "* new ?" in line
+    # In colour, the dot of a target not checked yet is muted like its "?",
+    # not the red of a failure.
+    painted: str = next(
+        line
+        for _, line in server._render_latest(
+            record, False, now, color=True, services=services
+        )
+        if "Services" in line
+    )
+    dot_new: str = painted[: painted.index("new")].rsplit("*", 1)[0]
+    dot_down: str = painted[: painted.index("immich")].rsplit("*", 1)[0]
+    assert dot_new.rsplit("\x1b[", 1)[1] != dot_down.rsplit("\x1b[", 1)[1]
     assert not any(
         line.startswith("Services")
         for _, line in server._render_latest(record, False, now)

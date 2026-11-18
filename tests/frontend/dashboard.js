@@ -460,7 +460,7 @@ function testTempLabelsAndLimits() {
     { type: 'temperature_core', label: 'hot', value: 99, warning: 65, critical: 80 },
   ] };
   evaluate(context, `dashboardConfig = { temp_labels: { loc1: 'I350 NIC' },
-    temp_thresholds: { 'I350 NIC': 95, hot: 100, board: 'junk' } };`);
+    temp_thresholds: { 'I350 NIC': 95, loc1: 'junk', hot: 100, board: 'junk' } };`);
   context.tickTemps();
   assert.deepEqual(context.errors, []);
   assert.deepEqual(plain(context.charts.temps.data.labels), ['I350 NIC', 'board', 'hot']);

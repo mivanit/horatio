@@ -419,8 +419,10 @@ function tempDisplayLabel(label) {
 // its temp_labels name. null when it has none.
 function tempLimitFor(label) {
   const limits = dashboardConfig.temp_thresholds;
-  const own = limits?.[label] ?? limits?.[tempDisplayLabel(label)];
-  return typeof own === 'number' && Number.isFinite(own) ? own : null;
+  const valid = v => typeof v === 'number' && Number.isFinite(v);
+  // A junk entry under one name must not hide a valid one under the other.
+  const own = [limits?.[label], limits?.[tempDisplayLabel(label)]].find(valid);
+  return own ?? null;
 }
 
 function abbreviateSensorLabel(label) {

@@ -5360,7 +5360,12 @@ def _render_latest(
             f" {100 * day['up'] / day['checks']:.1f}%" if day.get("checks") else ""
         )
         service_cells.append(
-            _paint("●" if unicode else "*", "ok" if ok else "error", color)
+            _paint(
+                "●" if unicode else "*",
+                # Not checked yet or stale is unknown, not down.
+                "muted" if ok is None else "ok" if ok else "error",
+                color,
+            )
             + " "
             + _paint(str(service.get("name")), "muted", color)
             + " "

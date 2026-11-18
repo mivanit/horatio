@@ -724,7 +724,7 @@ do
     check(count_records(path) == 0, "a short interval is still respected")
     write(dir .. "/dashboard-last-record", tostring(os.time() - 40) .. "\n")
     h.maybe_record()
-    check(count_records(path) == 1, "an interval under two minutes records on an ordinary request, on time")
+    check(count_records(path) == 1, "an interval under five minutes records on an ordinary request, on time")
 end
 
 -- 23. Rotation never deletes an archive, its own or older ones, nor other files.
