@@ -5,6 +5,30 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- Dashboard: a slow or failed public-IP lookup no longer holds back the drive, mail,
+  hardware, fan and power cards or the process captures.
+- Dashboard: the GPU cards hide on a box with no GPU, and turn red with a gap in the
+  chart when GPUs that were there stop reporting. The Ping card hides when ping is
+  turned off instead of reading as a failure. Long sensor names keep their start and end
+  instead of losing their start. The Services card no longer flashes on load.
+- Service checks: a target with a required 3xx `status` is no longer followed past it;
+  an unexpected error in one check no longer freezes every target; `/text` no longer
+  fails now and then while checks run.
+- `/text`: a bad or empty `width`, `height`, `rows` or `hours` gets the usage line or
+  the default, not a JSON error.
+- History settings: values that are not numbers or booleans are refused instead of
+  crashing or silently turning ping or process logging off. An unreadable password
+  file is logged.
+- History records are stamped before the public-IP lookup, so they are not late during
+  an internet outage.
+- Hardware collector: a backup timer with no trigger on record within 30 h of boot is a
+  note ("has not fired since boot"), not an alarm; systemd keeps the last trigger across
+  a reboot only for `Persistent=true` timers. The installer turns the timers on even
+  when the first run reports a crash.
+- OpenWrt: the read-only system image (`/rom`) is no longer listed as a full drive;
+  the installer refreshes opkg's package lists when it has to install something;
+  history rotation syncs to flash before replacing the file.
+- `tui.py`: no back-to-back refetching when the server is slower than the interval.
 - Service uptime: `http_targets` in `config.json` lists URLs the server requests every
   minute (`services.check_interval`). A new Services card shows each one up or down with
   its uptime over the last hour, day and week, and its history card shows outages as a

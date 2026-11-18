@@ -66,8 +66,15 @@ systemctl daemon-reload
 # the collect run at once (OnBootSec is long past), which would race this order.
 systemctl start horatio-sensors.service \
     || { journalctl --unit horatio-sensors.service --lines 30 --no-pager; exit 1; }
+# A failed collect run (one crashed part is enough) still wrote its snapshot with
+# the alarm in it, so the timers go on either way; the installer still exits 1.
+collect_failed=0
 systemctl start horatio-collect.service \
-    || { journalctl --unit horatio-collect.service --lines 30 --no-pager; exit 1; }
-echo "    first snapshots written"
+    || { journalctl --unit horatio-collect.service --lines 30 --no-pager; collect_failed=1; }
 systemctl enable --now horatio-sensors.timer
 systemctl enable --now horatio-collect.timer
+if [ "$collect_failed" = 1 ]; then
+    echo "error: the first collect run failed (log above); the timers are on and will retry" >&2
+    exit 1
+fi
+echo "    first snapshots written"

@@ -117,6 +117,8 @@ update_checkout() {   # [vX.Y.Z]
     rm -rf "$work"
     trap - EXIT HUP INT TERM
     info "Updated v$old -> v$new. To go back: sh $0 --update v$old"
+    # --update would now say "Already at": the files are new, the install is not.
+    info "If the install below fails, rerun it with: sh $0"
     # The release's installer does the install, so it matches what it installs.
     exec sh "$SCRIPT_DIR/install.sh"
 }
@@ -135,9 +137,16 @@ if command -v apk >/dev/null 2>&1; then
     # older uhttpd gets a garbled handler path and the dashboard never starts.
     apk add --upgrade uhttpd uhttpd-mod-lua luci-lib-jsonc luci-lib-nixio
 elif command -v opkg >/dev/null 2>&1; then
-    opkg list-installed | grep -q uhttpd-mod-lua || opkg install uhttpd-mod-lua
-    opkg list-installed | grep -q luci-lib-jsonc || opkg install luci-lib-jsonc
-    opkg list-installed | grep -q luci-lib-nixio || opkg install luci-lib-nixio
+    # opkg's package lists are in RAM and gone after a reboot: without them
+    # every install fails with "Unknown package". Fetched once, only if needed.
+    opkg_get() {
+        opkg list-installed | grep -q "$1" && return 0
+        [ -n "${opkg_updated:-}" ] || { opkg update || true; opkg_updated=1; }
+        opkg install "$1"
+    }
+    opkg_get uhttpd-mod-lua
+    opkg_get luci-lib-jsonc
+    opkg_get luci-lib-nixio
 fi
 # Stock OpenWrt has no timeout; without it a hung df or tailscale call blocks
 # every request (metrics.lua). Optional: the dashboard runs without it.

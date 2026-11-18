@@ -789,7 +789,7 @@ async function testStaticInfoRecovery() {
   evaluate(context, 'dataCache.ipInfo.lastUpdate = null;');
   const pendingPoll = context.fetchSlowData().then(() => { finished = true; });
   await new Promise(setImmediate);
-  assert.equal(finished, false, 'IP lookup remains pending');
+  assert.equal(finished, true, 'the slow poll does not wait for the IP lookup');
   assert.equal(rendered.cpu.length, 1, 'metadata renders before the pending IP lookup finishes');
   assert.equal(calls['/api/4/uptime'], 2, 'one uptime request per slow poll');
   finishIp({ ok: true, data: [] });

@@ -439,7 +439,7 @@ function pingRowsHTML(entries) {
     const rng = (e.down || e.min == null) ? '' : `[${e.min}ms, ${e.max}ms]`;
     const pct = e.pct == null ? '<span></span>'
       : `<span class="r" style="color:hsl(${_pingHue(e.pct)},75%,55%)">${e.pct}%</span>`;
-    return `<span style="color:${e.color}">${e.name}</span>`
+    return `<span style="color:${e.color}">${escapeHtml(e.name)}</span>`
          + `<span class="cur${e.down ? ' down' : ''}">${cur}</span>`
          + `<span class="rng">${rng}</span>${pct}`;
   }).join('');
@@ -589,11 +589,10 @@ async function fetchEndpointList() {
 }
 
 function hideUnavailableCards() {
-  if (!servicesConfigured()) {
-    const services = document.querySelector('[data-card-id="services"]');
-    if (services) services.style.display = 'none';
-    delete cardStatus.services;
-  }
+  // Starts hidden in index.html (no targets is the default), shown here.
+  const services = document.querySelector('[data-card-id="services"]');
+  if (services) services.style.display = servicesConfigured() ? '' : 'none';
+  if (!servicesConfigured()) delete cardStatus.services;
   if (availableEndpoints === null) return;
 
   for (const [cardId, deps] of Object.entries(CARD_ENDPOINT_DEPS)) {

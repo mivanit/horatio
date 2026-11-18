@@ -144,9 +144,16 @@ const CHART_X_AXIS = {
   grid: { display: false },
   border: { display: false }
 };
+// Chart.js gives this axis at most half the canvas height and clips a rotated
+// label that is longer from its start ("k10temp 0" drew as "0temp 0"), so a long
+// name keeps its head and tail instead. The tooltip has the full name.
+function barTickLabel(value) {
+  const label = String(this.getLabelForValue(value));
+  return label.length > 8 ? label.slice(0, 5) + '…' + label.slice(-2) : label;
+}
 const CHART_X_AXIS_BAR = {
   display: true,
-  ticks: { ...CHART_TICK, autoSkip: false, maxRotation: 90, minRotation: 90 },
+  ticks: { ...CHART_TICK, autoSkip: false, maxRotation: 90, minRotation: 90, callback: barTickLabel },
   grid: { display: false },
   border: { display: false }
 };

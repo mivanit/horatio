@@ -337,7 +337,9 @@ def main() -> int:
                         fetched, backoff = now, interval
                     except (OSError, http.client.HTTPException) as e:
                         error, backoff = str(e), min(10.0, backoff * 2)
-                    next_fetch = now + backoff
+                    # From now, not from before the fetch: a fetch slower than
+                    # the interval would otherwise refetch back to back.
+                    next_fetch = time.monotonic() + backoff
                 age: str = (
                     f"{time.monotonic() - fetched:.0f}s ago" if fetched else "never"
                 )

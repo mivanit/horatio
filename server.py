@@ -65,7 +65,7 @@ from typing import (
 import anyio
 import httpx
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import RequestResponseEndpoint
@@ -100,7 +100,7 @@ CONFIG_FILE: Final[Path] = Path(__file__).parent / "config.json"
 
 
 def _read_stamp(path: Path) -> str | None:
-    """First line of a version file, or None when it is missing or empty."""
+    """A version file's text, stripped, or None when it is missing or empty."""
     try:
         return path.read_text().strip() or None
     except OSError:
@@ -376,6 +376,9 @@ def _verify_password(password: str) -> bool:
         salt: bytes = bytes.fromhex(salt_hex)
         expected_hash: bytes = bytes.fromhex(hash_hex)
     except (ValueError, FileNotFoundError):
+        return False
+    except OSError as e:  # e.g. written with sudo: root-owned, unreadable here
+        logger.error("Cannot read %s: %s", PASSWORD_FILE, e)
         return False
 
     computed: bytes = hashlib.pbkdf2_hmac(
@@ -844,7 +847,12 @@ async def _check_http_target(
 
     async def fetch() -> int:
         resp: httpx.Response
-        async with client.stream("GET", target.url, timeout=timeout) as resp:
+        # An expected 3xx is the target's own answer: following it would
+        # never see that status.
+        follow: bool = not (target.status is not None and 300 <= target.status < 400)
+        async with client.stream(
+            "GET", target.url, timeout=timeout, follow_redirects=follow
+        ) as resp:
             return resp.status_code
 
     started: float = time.monotonic()
@@ -854,7 +862,9 @@ async def _check_http_target(
     # asyncio.TimeoutError is not builtin TimeoutError before Python 3.11.
     except (asyncio.TimeoutError, TimeoutError):
         return {"ok": False, "status": None, "error": "timeout"}
-    except (httpx.HTTPError, httpx.InvalidURL, OSError) as e:
+    # Any exception is this target's failure: one escaping here would fail the
+    # whole round's gather and freeze every target at its last result.
+    except Exception as e:
         return {"ok": False, "status": None, "error": type(e).__name__}
     ms: int = round((time.monotonic() - started) * 1000)
     ok: bool = status == target.status if target.status is not None else status < 400
@@ -1897,6 +1907,10 @@ async def collect_history_sample(
         except Exception as e:
             logger.warning("History: failed to fetch fs: %s", e)
 
+    # Stamped before the public-IP lookup, which takes seconds when the WAN is
+    # down: exactly when the record's place on the time axis matters.
+    recorded_at: str = datetime.now(timezone.utc).isoformat()
+
     # Fetch IP info (point-in-time)
     ip_data: dict[str, Any] = {}
     try:
@@ -1907,7 +1921,7 @@ async def collect_history_sample(
 
     # Build the record
     record: dict[str, Any] = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": recorded_at,
         "duration_sec": sample_duration,
     }
 
@@ -2411,8 +2425,10 @@ async def _glances_answers() -> bool:
     try:
         # Its own client: in the shared pool the probe queues behind the page's
         # requests, and a pool timeout would count as a dead Glances.
+        # verify=False: plain HTTP on localhost, and building the TLS context
+        # costs ~10 ms on the event loop at every probe.
         client: httpx.AsyncClient
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(verify=False) as client:
             resp: httpx.Response = await client.get(
                 f"{APP.state.glances_url}/api/4/cpu", timeout=5.0
             )
@@ -3227,7 +3243,8 @@ async def get_history_raw(request: Request) -> Response:
 
 @APP.post("/api/history/record")
 async def trigger_history_record() -> Response:
-    """Manually trigger a history recording (rate-limited to 1/minute)."""
+    """Manually trigger a history recording (at most one per
+    history.min_record_interval seconds; 0 turns the limit off)."""
     global _last_manual_record_time
 
     now: float = time.time()
@@ -3346,7 +3363,7 @@ async def update_history_settings(request: Request) -> Response:
             record_interval = int(record_interval)
             if not (10 <= record_interval <= 86400):
                 errors.append("record_interval must be between 10 and 86400 seconds")
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             errors.append("record_interval must be an integer")
 
     if sample_duration is not None:
@@ -3354,7 +3371,7 @@ async def update_history_settings(request: Request) -> Response:
             sample_duration = int(sample_duration)
             if not (1 <= sample_duration <= 300):
                 errors.append("sample_duration must be between 1 and 300 seconds")
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             errors.append("sample_duration must be an integer")
 
     if sample_count is not None:
@@ -3362,7 +3379,7 @@ async def update_history_settings(request: Request) -> Response:
             sample_count = int(sample_count)
             if not (1 <= sample_count <= 100):
                 errors.append("sample_count must be between 1 and 100")
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             errors.append("sample_count must be an integer")
 
     if min_record_interval is not None:
@@ -3370,7 +3387,7 @@ async def update_history_settings(request: Request) -> Response:
             min_record_interval = int(min_record_interval)
             if not (0 <= min_record_interval <= 3600):
                 errors.append("min_record_interval must be between 0 and 3600 seconds")
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             errors.append("min_record_interval must be an integer")
 
     if process_count is not None:
@@ -3378,8 +3395,14 @@ async def update_history_settings(request: Request) -> Response:
             process_count = int(process_count)
             if not (1 <= process_count <= 50):
                 errors.append("process_count must be between 1 and 50")
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             errors.append("process_count must be an integer")
+
+    flag: str
+    for flag in ("ping_enabled", "processes_enabled"):
+        # Anything but a JSON boolean used to read as "off".
+        if body.get(flag) is not None and not isinstance(body[flag], bool):
+            errors.append(f"{flag} must be true or false")
 
     if errors:
         return Response(
@@ -3932,7 +3955,8 @@ def _get_gpu_processes() -> list[dict[str, Any]]:
 
     # TODO: surface per-line parse warnings to the frontend
 
-    Returns a list of process dicts on success, or an error dict on failure.
+    Returns a list of process dicts ([] when nvidia-smi is missing); raises
+    when it fails.
     """
     result: subprocess.CompletedProcess[str] = subprocess.run(
         [
@@ -4355,7 +4379,9 @@ async def processlist() -> Response:
                 return Response(content=resp.content, status_code=resp.status_code)
 
             # One /proc read per process, and a large body: off the event loop.
-            body: str = await asyncio.to_thread(_sanitized_processlist, resp.json())
+            body: str = await asyncio.to_thread(
+                lambda: _sanitized_processlist(resp.json())
+            )
             return Response(content=body, media_type="application/json")
         except httpx.RequestError as error:
             logger.error("Glances API unavailable: %s", error)
@@ -5854,11 +5880,11 @@ async def text_view(
     view: str = "both",
     style: str = "unicode",
     color: str = "auto",
-    hours: float | None = None,
-    rows: int = 24,
+    hours_arg: str | None = Query(None, alias="hours"),
+    rows_arg: str | None = Query(None, alias="rows"),
     table: bool = False,
-    width: int = TEXT_WIDTH,
-    height: int | None = None,
+    width_arg: str | None = Query(None, alias="width"),
+    height_arg: str | None = Query(None, alias="height"),
     live: bool = True,
 ) -> Response:
     """Plain-text report for terminals: `curl http://<host>:8080/text`.
@@ -5868,6 +5894,16 @@ async def text_view(
     report to N lines (the TUI passes its terminal size). live=0 uses the newest
     record instead of a fresh sample. Documented at /help.
     """
+    # Parsed here, not by FastAPI: a bad number gets the usage line like every
+    # other bad option, and an empty one (width=$COLUMNS with COLUMNS unset) the
+    # default.
+    try:
+        hours: float | None = float(hours_arg) if hours_arg else None
+        rows: int = int(rows_arg) if rows_arg else 24
+        width: int = int(width_arg) if width_arg else TEXT_WIDTH
+        height: int | None = int(height_arg) if height_arg else None
+    except ValueError:
+        return Response(content=TEXT_USAGE, status_code=400, media_type="text/plain")
     if (
         view not in ("latest", "history", "both")
         or style not in ("ascii", "unicode", "simple")
@@ -5909,6 +5945,9 @@ async def text_view(
             logger.warning("/text: live sample failed, using the newest record: %s", e)
     if style == "simple":
         style, color = "ascii", "off"
+    # Read here, on the event loop: the render below runs in a thread, and the
+    # checker appends to the rounds this iterates.
+    services_now: list[dict[str, Any]] = services_snapshot(time.time())["targets"]
     depths: dict[str, ColorDepth] = {"on": "24", "256": "256", "16": "16", "off": False}
     depth: ColorDepth = depths.get(color, "24" if style == "unicode" else False)
 
@@ -5926,7 +5965,7 @@ async def text_view(
             live=sample,
             width=max(TEXT_MIN_WIDTH, min(width, 400)),
             sparks=sparks,
-            services=services_snapshot(time.time())["targets"],
+            services=services_now,
         )
 
     def layout() -> str:

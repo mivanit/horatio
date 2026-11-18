@@ -504,7 +504,8 @@ function M.fs()
         tmpfs=1, devtmpfs=1, proc=1, sysfs=1, devpts=1, debugfs=1,
         cgroup=1, cgroup2=1, pstore=1, securityfs=1, hugetlbfs=1,
         mqueue=1, bpf=1, tracefs=1, binfmt_misc=1, configfs=1,
-        fusectl=1, efivarfs=1
+        fusectl=1, efivarfs=1,
+        squashfs=1  -- /rom, the read-only system image: always 100% full
     }
 
     -- Required here, not at load, so tests can swap in a fake via package.loaded.

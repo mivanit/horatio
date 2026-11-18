@@ -212,9 +212,15 @@ def test_backup_late_and_never_fired(tmp_path: Path) -> None:
     )[0]
     assert state["backup"]["timer"] == "b.timer"
     assert state["alarms"] == ["backup: last trigger 40h ago"]
-    state = collect(
-        tmp_path, {"tmp/backup-timer.name": "b.timer\n", "tmp/backup-timer.txt": ""}
-    )[0]
+    never: dict[str, str | None] = {
+        "tmp/backup-timer.name": "b.timer\n",
+        "tmp/backup-timer.txt": "",
+    }
+    # Up for an hour: only a Persistent=true timer would know its last trigger.
+    state = collect(tmp_path, never)[0]
+    assert state["alarms"] == []
+    assert state["info"] == ["backup: b.timer has not fired since boot (1h ago)"]
+    state = collect(tmp_path, {**never, "uptime": "180000.0 1.0\n"})[0]
     assert state["alarms"] == ["backup: b.timer has never fired"]
 
 

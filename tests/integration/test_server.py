@@ -310,6 +310,10 @@ def test_text_and_downloaded_client(live_server: str) -> None:
     )
     r = httpx.get(f"{base}/text?style=fancy", timeout=10)
     assert r.status_code == 400, f"GET /text?style=fancy is 400: status={r.status_code}"
+    r = httpx.get(f"{base}/text?width=abc", timeout=10)
+    assert r.status_code == 400 and "/help" in r.text, "a bad number is the usage line"
+    r = httpx.get(f"{base}/text?width=&height=", timeout=10)
+    assert r.status_code == 200, "an empty number (unset $COLUMNS) is the default"
 
 
 def test_history_response(live_server: str, record_data: dict[str, Any]) -> None:

@@ -588,15 +588,7 @@ function renderHardware(data) {
   const content = document.getElementById('hardware-content');
   const collector = 'horatio-collect.timer';
 
-  // Both non-snapshot branches reset what the last good snapshot may have set:
-  // the red border, the "N issues" header and the snapshot age.
-  const reset = () => {
-    updateCardCritical('hardware', false);
-    const valueEl = document.getElementById('hardware-value');
-    valueEl.textContent = '--';
-    valueEl.className = 'value';
-    document.querySelector('#hardware-card .cache-time').textContent = '';
-  };
+  const reset = resetHardwareHeader;
   if (data?.status === 'missing') {
     // Expected before the housekeeping installer has run: not a failure.
     content.innerHTML = `<div class="info-item mail-muted">No health snapshot yet (${escapeHtml(data.path || '')}); ` +
@@ -673,6 +665,16 @@ function renderHardware(data) {
   // Any alarm is red; a stale snapshot (alarms unknown, not clear) is orange.
   updateCardCritical('hardware', alarms.length > 0);
   updateCardWarning('hardware', stale || sensorsUnknown ? 1 : 0, 0);
+}
+
+// The non-snapshot branches and a failed fetch reset what the last good snapshot
+// may have set: the red border, the "N issues" header and the snapshot age.
+function resetHardwareHeader() {
+  updateCardCritical('hardware', false);
+  const valueEl = document.getElementById('hardware-value');
+  valueEl.textContent = '--';
+  valueEl.className = 'value';
+  document.querySelector('#hardware-card .cache-time').textContent = '';
 }
 
 // Services card. `data` is /api/services: each config.json http_targets entry
@@ -1481,8 +1483,23 @@ async function fetchSlowData() {
     });
   });
 
-  const [fs, ipInfo, mail, storageHealth, sensorsSnap, services] = await Promise.all([
-    drivesPromise, ipPromise, mailPromise, storageHealthPromise, sensorsPromise, servicesPromise, infoPromise
+  // Not awaited with the rest: the public-IP lookup can take its whole timeout
+  // when the WAN is down, and nothing below depends on it.
+  ipPromise.then(ipInfo => {
+    if (ipInfo.ok) {
+      if (!ipInfo.cached) {
+        updateCache('ipInfo', ipInfo.data);
+      }
+      guard('ip-info', () => renderIpInfo(ipInfo.data));
+    } else {
+      const ipContent = document.getElementById('ip-info-content');
+      ipContent.innerHTML = '<div class="info-item text-error">Error loading IP info</div>';
+      updateCardNoData('ip-info', false);
+    }
+  });
+
+  const [fs, mail, storageHealth, sensorsSnap, services] = await Promise.all([
+    drivesPromise, mailPromise, storageHealthPromise, sensorsPromise, servicesPromise, infoPromise
   ]);
   if (sensorsSnap.ok && !sensorsSnap.cached) updateCache('sensors', sensorsSnap.data);
 
@@ -1499,18 +1516,6 @@ async function fetchSlowData() {
     driveUsageContent.innerHTML = '<div class="drive-usage-item text-error">Error loading drive info</div>';
     document.getElementById('drive-usage-card').style.display = '';   // an empty list hid it; show the error
     updateCardNoData('drive-usage', false);
-  }
-
-  // Handle IP info
-  if (ipInfo.ok) {
-    if (!ipInfo.cached) {
-      updateCache('ipInfo', ipInfo.data);
-    }
-    guard('ip-info', () => renderIpInfo(ipInfo.data));
-  } else if (!ipInfo.ok) {
-    const ipContent = document.getElementById('ip-info-content');
-    ipContent.innerHTML = '<div class="info-item text-error">Error loading IP info</div>';
-    updateCardNoData('ip-info', false);
   }
 
   // Handle mail ('unavailable' means the backend lacks the endpoint and the
@@ -1535,6 +1540,7 @@ async function fetchSlowData() {
     guard('drive-health', () => renderDriveHealth(storageHealth.data));
   } else if (storageHealth.errorType !== 'unavailable') {
     document.getElementById('hardware-content').innerHTML = '<div class="info-item text-error">Error loading hardware health</div>';
+    resetHardwareHeader();
     updateCardNoData('hardware', false);
     setHtml(document.getElementById('drive-health-content'), '<div class="info-item text-error">Error loading drive health</div>');
     updateCardNoData('drive-health', false);
@@ -1545,7 +1551,7 @@ async function fetchSlowData() {
     if (!services.cached) updateCache('services', services.data);
     guard('services', () => renderServices(services.data));
   } else if (services.errorType !== 'unavailable') {
-    document.getElementById('services-content').innerHTML = '<div class="info-item text-error">Error loading services</div>';
+    setHtml(document.getElementById('services-content'), '<div class="info-item text-error">Error loading services</div>');
     updateCardNoData('services', false);
   }
 
@@ -1766,12 +1772,17 @@ async function fetchDataOnce() {
   });
 
   guard('gpu', () => {
+    const showGpuCards = on => ['gpu-card', 'gpu-mem-card'].forEach(id => {
+      const card = document.getElementById(id);
+      if (card) card.style.display = on ? '' : 'none';
+    });
     // GPU (handle multiple GPUs)
     if (gpu.ok) {
       const gpuArray = Array.isArray(gpu.data) ? gpu.data : (gpu.data ? [gpu.data] : []);
       const validGpus = gpuArray.filter(g => g && (g.proc !== undefined || g.mem !== undefined));
 
       if (validGpus.length > 0) {
+        showGpuCards(true);
         // Initialize history arrays if GPU count changed
         if (validGpus.length !== gpuCount) {
           gpuCount = validGpus.length;
@@ -1871,8 +1882,14 @@ async function fetchDataOnce() {
           // textContent removes the spans; rebuild them when GPUs return.
           el.dataset.gpuCount = '0';
         }
-        updateCardNoData('gpu', true);
-        updateCardNoData('gpu-mem', true);
+        // No GPU ever seen: a GPU-less box, hide the cards (as fans and power do).
+        // GPUs that were here and are gone (driver crash): an error, and a gap
+        // in the lines instead of a frozen chart.
+        const gone = gpuCount > 0;
+        if (gone) [...history.gpus, ...history.gpuMems].forEach(arr => pushHistory(arr, null));
+        showGpuCards(gone);
+        updateCardNoData('gpu', !gone);
+        updateCardNoData('gpu-mem', !gone);
         updateCardWarning('gpu', 0, 0);
         updateCardWarning('gpu-mem', 0, 0);
       }
@@ -2273,11 +2290,13 @@ async function fetchDataOnce() {
   guard('ping', () => {
     // Ping (config-driven targets)
     const cfgTargets = dashboardConfig.ping_targets || DEFAULT_PING_TARGETS;
+    const pingCard = document.querySelector('[data-card-id="ping"]');
     if (ping.ok && ping.data.disabled) {
-      updateCardNoData('ping', false);
-      const noDataEl = document.querySelector('[data-card-id="ping"] .no-data-text');
-      if (noDataEl) noDataEl.textContent = 'Disabled';
+      // Turned off in the settings (or no targets on the router): not a failure.
+      if (pingCard) pingCard.style.display = 'none';
+      updateCardNoData('ping', true);
     } else if (ping.ok && ping.data.targets) {
+      if (pingCard) pingCard.style.display = '';
       const targets = ping.data.targets;
       let worstMs = 0;
       cfgTargets.forEach((t, i) => {
@@ -2857,6 +2876,7 @@ async function refreshData(cacheKey, btn) {
         } else if (storageHealth.errorType !== 'unavailable') {
           document.getElementById('hardware-content').innerHTML =
             '<div class="info-item text-error">Error loading hardware health</div>';
+          resetHardwareHeader();
           updateCardNoData('hardware', false);
           setHtml(document.getElementById('drive-health-content'),
             '<div class="info-item text-error">Error loading drive health</div>');
@@ -2870,8 +2890,8 @@ async function refreshData(cacheKey, btn) {
           updateCache('services', services.data);
           renderServices(services.data);
         } else if (services.errorType !== 'unavailable') {
-          document.getElementById('services-content').innerHTML =
-            '<div class="info-item text-error">Error loading services</div>';
+          setHtml(document.getElementById('services-content'),
+            '<div class="info-item text-error">Error loading services</div>');
           updateCardNoData('services', false);
         }
         break;

@@ -525,7 +525,13 @@ def backup():
         age_h = round((state["ts"] - last_trigger) / 3600, 1) if last_trigger else None
         state["backup"] = {"timer": backup_timer, "last_trigger": last_trigger, "age_hours": age_h}
         if age_h is None:
-            alarms.append(f"backup: {backup_timer} has never fired")
+            # systemd remembers the last trigger across a reboot only for
+            # Persistent=true timers, so soon after boot "empty" proves nothing.
+            uptime_h = float(open(os.environ.get("HEALTH_UPTIME", "/proc/uptime")).read().split()[0]) / 3600
+            if uptime_h < BACKUP_MAX_AGE_H:
+                info.append(f"backup: {backup_timer} has not fired since boot ({int(uptime_h)}h ago)")
+            else:
+                alarms.append(f"backup: {backup_timer} has never fired")
         elif age_h > BACKUP_MAX_AGE_H:
             alarms.append(f"backup: last trigger {int(age_h)}h ago")
     else:

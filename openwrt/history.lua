@@ -344,6 +344,9 @@ rotate_locked = function()
         local source = f
         f = nil
         checked(source:close())
+        -- The archive and the new file reach the flash before the rename can:
+        -- a power cut must not keep the rename and lose what it points at.
+        sh("sync")
         checked(os.rename(tmp, HISTORY_FILE))
         tmp_created = false
     end)

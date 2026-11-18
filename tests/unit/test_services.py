@@ -80,6 +80,8 @@ def test_check_round_statuses() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "refused":
             raise httpx.ConnectError("refused")
+        if request.url.host == "bug":
+            raise KeyError("bug")
         if request.url.path == "/moved":
             return httpx.Response(302, headers={"location": "http://s200/"})
         return httpx.Response(int(request.url.host.removeprefix("s")))
@@ -92,8 +94,14 @@ def test_check_round_statuses() -> None:
         server.HttpTarget("wants-401", "http://s401/", 401, False),
         server.HttpTarget("wants-204", "http://s200/", 204, False),
         server.HttpTarget("refused", "http://refused/", None, False),
+        server.HttpTarget("wants-302", "http://s200/moved", 302, False),
+        server.HttpTarget("bug", "http://bug/", None, False),
     ]
     results: dict[str, dict[str, Any]] = run_round(targets, handler)
+    assert results["wants-302"]["ok"], "a required 3xx is not followed away"
+    assert results["bug"] == {"ok": False, "status": None, "error": "KeyError"}, (
+        "an unexpected exception fails its own target, not the round"
+    )
     assert results["ok"]["ok"] and results["ok"]["status"] == 200
     assert isinstance(results["ok"]["ms"], int)
     assert results["redirect"]["ok"], "a redirect is followed to its 200"
