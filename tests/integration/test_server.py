@@ -142,6 +142,8 @@ REQUIRED_ENDPOINTS: list[str] = [
     "/api/mail",
     "/api/storage-health",
     "/api/sensors",
+    "/api/services",
+    "/api/services/history",
     # These return HTTP 200 with empty data or an error payload when tools
     # are unavailable; server errors and timeouts still indicate a failure.
     "/api/gpu-info",
@@ -161,6 +163,8 @@ CUSTOM_ENDPOINTS: list[str] = [
     "/api/mail",
     "/api/storage-health",
     "/api/sensors",
+    "/api/services",
+    "/api/services/history",
     "/api/version",
 ]
 

@@ -5,6 +5,12 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- Service uptime: `http_targets` in `config.json` lists URLs the server requests every
+  minute (`services.check_interval`). A new Services card shows each one up or down with
+  its uptime over the last hour, day and week, and its history card shows outages as a
+  grid over time. Results are logged to `logs/services.jsonl`; `/api/services`,
+  `/api/services/history` and a `Services` line in `/text` serve them. Off until targets
+  are configured; Linux server only.
 - Hardware collector: a part of the 15-min run that crashes (a bug, or a value it cannot
   read) is now a `collector: <part> crashed` alarm, and every other part still reports.
   Before, one crash left the whole snapshot stale and hid every other alarm with it.

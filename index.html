@@ -373,6 +373,23 @@
       </div>
     </div>
 
+    <!-- Services: each config.json http_targets URL, up or down, with its uptime; hidden when there are none -->
+    <div class="card" id="services-card" data-card-id="services">
+      <div class="drag-handle"></div>
+      <div class="card-header">
+        <h2>Services</h2>
+        <button class="history-btn" data-history-metric="services">H</button>
+        <span class="value" id="services-value">--</span>
+        <div class="cache-info">
+          <span class="cache-time"></span>
+          <button class="refresh-btn" data-refresh="services">↻</button>
+        </div>
+      </div>
+      <div class="info-content" id="services-content">
+        Loading...
+      </div>
+    </div>
+
     <div class="card card-full-width" data-card-id="processes">
       <div class="drag-handle"></div>
       <div class="card-header">

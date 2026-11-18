@@ -131,6 +131,8 @@ curl http://<host>:8080/text?style=simple         # plain ASCII, for scripts and
 |---|---|
 | `title`, `title_emoji` | page title and heading |
 | `ping_targets` | `[{address}]` pinged every poll and recorded to history |
+| `http_targets` | Linux server only. `[{name, url}]`: URLs requested every `services.check_interval` seconds, for the Services card and its outage history. A target is up when the request, after redirects, returns a status below 400; `"status": 401` requires that exact status instead, and `"insecure": true` skips the TLS certificate check (self-signed certificates). A failed request is repeated once after 2 s before it counts as down. Absent or `[]` turns the feature off and hides the card (the default). **`config.json` is served to every visitor of the dashboard, so put no passwords or tokens in a URL.** To watch another Horatio, use its `/api/version`. A Horatio that is down checks nothing, so its own downtime shows as "no checks", not as an outage: have two boxes watch each other |
+| `services.check_interval`, `services.timeout` | seconds between rounds of `http_targets` checks (default 60, 10 to 3600) and the longest one request may take in total (default 5, 1 to 30). Each round appends one line to `logs/services.jsonl`, which is never rotated or deleted: about 0.1 MB a day per target at 60 s |
 | `history.record_interval` | seconds between history records (default 600) |
 | `history.min_record_interval` | minimum seconds between manual "record now" requests, 0 to disable (default 60) |
 | `history.sample_duration`, `history.sample_count` | each record averages `sample_count` samples over `sample_duration` seconds |
@@ -202,13 +204,15 @@ again, don't put this on anything besides a trusted LAN!
 | `GET /api/mail`              | Local system mail: `count` and the newest 10 `{date_epoch, subject}`; always 200 with `status` ok/missing/error |
 | `GET /api/storage-health`    | The 15-min collector snapshot (`alarms`, `info`, drives, md, ECC, SEL, backup, failed units, journal errors) with `status` ok/stale/missing/error and `age_sec`; always 200 |
 | `GET /api/sensors`           | The 60 s sensors snapshot (`fans`, `temps`, `power`, `gpus` with nvidia-smi temperatures, driver limits, thermal slowdown and ECC, `alarms`), same shape, stale after 300 s |
+| `GET /api/services`          | Each `http_targets` entry: `ok` (null before its first check), `status`, `ms`, `error`, `checked`, and `uptime` as `{up, checks}` counts over the last `1`, `24` and `168` hours. `checks: 0` means nothing was checked in that window |
+| `GET /api/services/history`  | The outage grid (query: `hours`, default 24): per target, `count` pairs of `[passed, failed]` checks, one per `bucket_sec` seconds from `start` (at most 300 buckets). `[0, 0]` is a bucket with no checks. `truncated: true` means the log could not be read back as far as `start` |
 | `GET /api/history`           | History records (query: `hours`, default 24) without the heavy fields (`temps`, `processes`) and `ip`. Each record also carries `cpu_freq` (min/median/avg/max MHz over every core and burst sample, plus the hardware range) where cpufreq sysfs exists. `since=<timestamp>` (URL-encoded) returns only newer records. Every response has `cutoff` (the window start, for trimming what a client already holds) and `now` (the server's clock, for the next `since`), both epoch seconds. With `since`, `truncated: true` means the read stopped before reaching `since` (refetch without it) and `skipped_lines` counts the unreadable lines in everything the server has parsed, which can reach further back than the records returned |
 | `GET /api/history/field/{name}` | One heavy field over the range, `[{timestamp, <name>}]`: `temps` (every sensor) or `processes` (the per-process rows, when logging is on). The history cards that draw these ask for them alone. Takes `since` like `/api/history` |
 | `POST /api/history/record`   | Record now (rate-limited)                   |
 | `GET /api/history/raw`       | `history.jsonl` as recorded (password): rates as capped when each record was taken, not re-capped |
 | `GET /api/history/settings`  | Current recording settings                  |
 | `POST /api/history/settings` | Update recording settings (password)        |
-| `GET /config.json`           | The config                                  |
+| `GET /config.json`           | The config, as written (including `http_targets` URLs) |
 | `GET /themes/index.json`     | Theme names for the picker (`themes/*.css`) |
 | `GET /text`                  | Console report: `curl "http://<host>:8080/text?width=$COLUMNS"` (query: `view` latest/history/both, `style` unicode/ascii/simple, `color` auto/on/256/16/off, `hours` default 1-3 by width and record interval, `width` default 80, `height`, `live`, `table`, `rows`) |
 | `GET /tui.py`                | The live terminal client, served so it runs without a checkout |

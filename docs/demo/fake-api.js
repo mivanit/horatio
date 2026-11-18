@@ -396,11 +396,58 @@
     ping_enabled: true, processes_enabled: true, process_count: 10,
   };
 
+  // ---- service checks (http_targets) ---------------------------------------
+  const SERVICES = [
+    { name: 'photos', url: 'https://photos.demo.invalid/api/server/ping' },
+    { name: 'files', url: 'https://files.demo.invalid/' },
+    { name: 'docs site', url: 'http://docs.demo.invalid:8000/' },
+  ];
+  const SERVICES_INTERVAL = 60;
+  // Whether service i passed the check at epoch second t: photos is down for 40
+  // minutes at 03:00 UTC every third day, the docs site drops about one check
+  // in 500, files never fails.
+  function serviceUp(i, t) {
+    if (i === 0) return !(Math.floor(t / 86400) % 3 === 0 && t % 86400 >= 10800 && t % 86400 < 13200);
+    if (i === 2) return (Math.floor(t / SERVICES_INTERVAL) * 2654435761) % 4294967296 / 4294967296 >= 0.002;
+    return true;
+  }
+  function servicesSnapshot(t) {
+    const last = Math.floor(t / SERVICES_INTERVAL) * SERVICES_INTERVAL;
+    return { interval: SERVICES_INTERVAL, now: t, targets: SERVICES.map((s, i) => {
+      const uptime = {};
+      for (const hours of [1, 24, 168]) {
+        let up = 0, checks = 0;
+        for (let at = last; at > t - hours * 3600; at -= SERVICES_INTERVAL) { checks++; up += serviceUp(i, at); }
+        uptime[hours] = { up, checks };
+      }
+      const ok = serviceUp(i, last);
+      return { ...s, ok, status: ok ? 200 : null, ms: ok ? 20 + 15 * i + Math.round(8 * noise('svc' + i, t, 60)) : null,
+               error: ok ? null : 'ConnectError', checked: new Date(last * 1000).toISOString(), uptime };
+    }) };
+  }
+  // The server's bucket plan (server.py services_bucket_plan): at most 300 buckets.
+  function servicesHistory(q, t) {
+    const hours = clamp(Number(q.get('hours')) || 24, 0.1, 24 * HISTORY_DAYS);
+    const bucket = Math.max(1, Math.ceil(hours * 3600 / 300 / SERVICES_INTERVAL)) * SERVICES_INTERVAL;
+    const count = Math.max(1, Math.ceil(hours * 3600 / bucket));
+    const start = (Math.floor(t / bucket) + 1) * bucket - count * bucket;
+    const targets = {};
+    SERVICES.forEach((s, i) => {
+      targets[s.name] = Array.from({ length: count }, (_, b) => {
+        const pair = [0, 0];
+        for (let at = start + b * bucket; at < start + (b + 1) * bucket && at <= t; at += SERVICES_INTERVAL) pair[serviceUp(i, at) ? 0 : 1]++;
+        return pair;
+      });
+    });
+    return { start, bucket_sec: bucket, count, now: t, truncated: false, targets };
+  }
+
   // ---- routing ------------------------------------------------------------
   const CONFIG = {
     title: 'Horatio demo',
     title_emoji: '🔭 Horatio demo',
     ping_targets: PING_TARGETS.map(address => ({ address })),
+    http_targets: SERVICES,
     history: { ...HISTORY_SETTINGS, sample_count: SAMPLE_COUNT, max_hours: 24 * HISTORY_DAYS },
     limits: { network_mbps: 1250, disk_io_mbps: 15000 },
     thresholds: {
@@ -415,7 +462,8 @@
     '/4/load', '/4/uptime', '/4/system', '/4/fs',
     '/cpu-info', '/gpu-info', '/ip-info', '/ping', '/gpu-processes', '/disk-processes', '/network-processes',
     '/processlist', '/history', '/history/settings', '/history/record', '/history/field/temps',
-    '/history/field/processes', '/mail', '/storage-health', '/sensors', '/version', '/list-endpoints',
+    '/history/field/processes', '/mail', '/storage-health', '/sensors', '/services', '/services/history',
+    '/version', '/list-endpoints',
   ];
 
   // Path (after /api) -> (query, t) => body, served with status 200.
@@ -479,6 +527,8 @@
     },
     '/storage-health': (q, t) => storageHealth(t),
     '/sensors': (q, t) => sensorsSnapshot(t),
+    '/services': (q, t) => servicesSnapshot(t),
+    '/services/history': (q, t) => servicesHistory(q, t),
     '/history': q => history(q, null),
     '/history/settings': () => ({ ...HISTORY_SETTINGS, password_configured: true, defaults: { ...HISTORY_SETTINGS, processes_enabled: false } }),
   };

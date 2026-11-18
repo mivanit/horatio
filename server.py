@@ -39,12 +39,28 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections import deque
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Sequence,
+)
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, BinaryIO, Final, Literal, NamedTuple, TypeAlias, TypeVar
+from typing import (
+    Any,
+    BinaryIO,
+    Final,
+    Literal,
+    NamedTuple,
+    NoReturn,
+    TypeAlias,
+    TypeVar,
+)
 
 import anyio
 import httpx
@@ -75,6 +91,10 @@ HISTORY_MAX_TAIL_READ: Final[int] = 64 * 1024 * 1024
 # box writes ~70 temps per record; the process rows are several KB): a card
 # that draws one asks for it alone via /api/history/field/<name>.
 HISTORY_SIDE_FIELDS: Final[frozenset[str]] = frozenset({"processes", "temps"})
+# One line per round of service checks (http_targets). Its own file: the checks
+# run every minute, history records every ten. Never rotated, like history.jsonl;
+# the name must not match scripts/history-merge.sh's history-*.jsonl.gz glob.
+SERVICES_FILE: Final[Path] = LOGS_DIR / "services.jsonl"
 PASSWORD_FILE: Final[Path] = Path(__file__).parent / ".password"
 CONFIG_FILE: Final[Path] = Path(__file__).parent / "config.json"
 
@@ -722,6 +742,242 @@ def _read_ping_targets(cfg: dict[str, Any]) -> list[str]:
 
 
 PING_TARGETS: Final[list[str]] = _read_ping_targets(_CONFIG)
+
+
+# ============================================================================
+# Service checks: is each http_targets URL answering, and how often has it been
+# ============================================================================
+
+
+class HttpTarget(NamedTuple):
+    """One http_targets entry."""
+
+    name: str
+    url: str
+    status: int | None  # the exact status required; None = anything below 400
+    insecure: bool  # skip TLS certificate verification
+
+
+def _read_http_targets(cfg: dict[str, Any]) -> list[HttpTarget]:
+    """The http_targets entries, in config order; absent or null means none
+    (the feature is off). A wrong shape is fatal, like ping_targets: the
+    frontend reads the same raw list."""
+    raw: Any = cfg.get("http_targets")
+    if raw is None:
+        return []
+
+    def bad(why: str) -> NoReturn:
+        sys.exit(
+            f'{CONFIG_FILE}: http_targets must be a list of {{"name": "<label>", '
+            f'"url": "http(s)://..."}} objects (optional "status": <code>, '
+            f'"insecure": true): {why}'
+        )
+
+    if not isinstance(raw, list):
+        bad(f"got {json.dumps(raw)}")
+    targets: list[HttpTarget] = []
+    entry: Any
+    for entry in raw:
+        if not isinstance(entry, dict):
+            bad(f"got entry {json.dumps(entry)}")
+        name: Any = entry.get("name")
+        url: Any = entry.get("url")
+        status: Any = entry.get("status")
+        insecure: Any = entry.get("insecure", False)
+        if not isinstance(name, str) or not name.strip():
+            bad(f"entry without a name: {json.dumps(entry)}")
+        if not isinstance(url, str) or not re.match(r"https?://[^/\s]", url):
+            bad(f"{name!r} has no http:// or https:// url")
+        if status is not None and (
+            isinstance(status, bool)
+            or not isinstance(status, int)
+            or not 100 <= status <= 599
+        ):
+            bad(f"{name!r} status must be an HTTP status code, got {status!r}")
+        if not isinstance(insecure, bool):
+            bad(f"{name!r} insecure must be true or false, got {insecure!r}")
+        if any(t.name == name for t in targets):
+            bad(f"two entries are named {name!r}")
+        targets.append(HttpTarget(name, url, status, insecure))
+    return targets
+
+
+HTTP_TARGETS: Final[list[HttpTarget]] = _read_http_targets(_CONFIG)
+_services_cfg: dict[str, Any] = _CONFIG.get("services", {})
+if not isinstance(_services_cfg, dict):
+    logging.getLogger("dashboard").warning(
+        "config.json: 'services' is not an object; using defaults"
+    )
+    _services_cfg = {}
+# Seconds between rounds of checks, and the total time one request may take.
+SERVICES_CHECK_INTERVAL: Final[int] = _cfg_int(
+    _services_cfg, "check_interval", 60, 10, 3600, "services"
+)
+SERVICES_TIMEOUT: Final[float] = _cfg_num(
+    _services_cfg, "timeout", 5, 1, 30, "services"
+)
+# A failed check is repeated once after this long before it counts as down, so
+# a service that is mid-restart is not recorded as an outage.
+SERVICES_RETRY_DELAY: Final[float] = 2.0
+# The Services card's uptime windows (hours); the longest is what is kept in memory.
+SERVICES_UPTIME_HOURS: Final[tuple[int, ...]] = (1, 24, 168)
+# Most columns /api/services/history returns: about one per few pixels of a card.
+SERVICES_MAX_BUCKETS: Final[int] = 300
+
+# A round of checks reduced to what uptime needs: (epoch, {target name: passed}).
+ServiceRound: TypeAlias = tuple[float, dict[str, bool]]
+# The rounds of the last SERVICES_UPTIME_HOURS[-1] hours, oldest first: filled
+# from the file's tail at startup, then by the checker. Only the event loop
+# touches these two.
+_services_rounds: deque[ServiceRound] = deque()
+# Target name -> its newest result ({ok, status, ms?, error?}) plus "checked".
+_services_latest: dict[str, dict[str, Any]] = {}
+
+
+async def _check_http_target(
+    client: httpx.AsyncClient, target: HttpTarget, timeout: float
+) -> dict[str, Any]:
+    """One GET of a target: {ok, status, ms} or {ok: False, status, error}.
+    Only the status line and headers are read, never the body, and ``timeout``
+    bounds the whole request including redirects (httpx's own timeout is per
+    phase)."""
+
+    async def fetch() -> int:
+        resp: httpx.Response
+        async with client.stream("GET", target.url, timeout=timeout) as resp:
+            return resp.status_code
+
+    started: float = time.monotonic()
+    e: Exception
+    try:
+        status: int = await asyncio.wait_for(fetch(), timeout)
+    # asyncio.TimeoutError is not builtin TimeoutError before Python 3.11.
+    except (asyncio.TimeoutError, TimeoutError):
+        return {"ok": False, "status": None, "error": "timeout"}
+    except (httpx.HTTPError, httpx.InvalidURL, OSError) as e:
+        return {"ok": False, "status": None, "error": type(e).__name__}
+    ms: int = round((time.monotonic() - started) * 1000)
+    ok: bool = status == target.status if target.status is not None else status < 400
+    if ok:
+        return {"ok": True, "status": status, "ms": ms}
+    return {"ok": False, "status": status, "error": f"status {status}"}
+
+
+async def check_http_targets(
+    targets: Sequence[HttpTarget],
+    client: httpx.AsyncClient,
+    insecure_client: httpx.AsyncClient,
+    timeout: float,
+    retry_delay: float = SERVICES_RETRY_DELAY,
+) -> dict[str, dict[str, Any]]:
+    """One round: every target at once, a failure retried once. Name -> result."""
+
+    async def one(target: HttpTarget) -> dict[str, Any]:
+        chosen: httpx.AsyncClient = insecure_client if target.insecure else client
+        result: dict[str, Any] = await _check_http_target(chosen, target, timeout)
+        if not result["ok"]:
+            await asyncio.sleep(retry_delay)
+            result = await _check_http_target(chosen, target, timeout)
+        return result
+
+    results: list[dict[str, Any]] = await asyncio.gather(*(one(t) for t in targets))
+    return {t.name: r for t, r in zip(targets, results)}
+
+
+def _service_round(ts: float, record: dict[str, Any]) -> ServiceRound | None:
+    """A services.jsonl record as a ServiceRound; None when it is not one."""
+    targets: Any = record.get("targets")
+    if not isinstance(targets, dict):
+        return None
+    return ts, {
+        name: r.get("ok") is True for name, r in targets.items() if isinstance(r, dict)
+    }
+
+
+def _note_service_round(record: dict[str, Any], ts: float) -> None:
+    """Add a just-finished round to the in-memory window and drop what has aged
+    out of the longest uptime window."""
+    parsed: ServiceRound | None = _service_round(ts, record)
+    if parsed is None:
+        return
+    _services_rounds.append(parsed)
+    cutoff: float = ts - SERVICES_UPTIME_HOURS[-1] * 3600
+    while _services_rounds and _services_rounds[0][0] < cutoff:
+        _services_rounds.popleft()
+    name: str
+    result: dict[str, Any]
+    for name, result in record["targets"].items():
+        _services_latest[name] = {**result, "checked": record["timestamp"]}
+
+
+def services_uptime(
+    rounds: Iterable[ServiceRound],
+    names: Sequence[str],
+    now: float,
+    windows: Sequence[int] = SERVICES_UPTIME_HOURS,
+) -> dict[str, dict[str, dict[str, int]]]:
+    """Per target and window (hours, as a string key): {"up": passed rounds,
+    "checks": rounds that checked it}. Time with no rounds (Horatio down, or the
+    target not configured yet) counts as neither up nor down."""
+    out: dict[str, dict[str, dict[str, int]]] = {
+        name: {str(w): {"up": 0, "checks": 0} for w in windows} for name in names
+    }
+    ts: float
+    oks: dict[str, bool]
+    for ts, oks in rounds:
+        age: float = now - ts
+        live: list[str] = [str(w) for w in windows if 0 <= age <= w * 3600]
+        if not live:
+            continue
+        name: str
+        for name in names:
+            ok: bool | None = oks.get(name)
+            if ok is None:
+                continue
+            key: str
+            for key in live:
+                out[name][key]["checks"] += 1
+                out[name][key]["up"] += ok
+    return out
+
+
+def services_bucket_plan(
+    hours: float, now: float, interval: int
+) -> tuple[float, int, int]:
+    """(start epoch, bucket seconds, bucket count) for a history grid of the last
+    ``hours``: at most SERVICES_MAX_BUCKETS buckets, each a whole number of check
+    intervals, on boundaries that do not move between requests."""
+    span: float = hours * 3600
+    bucket: int = max(1, math.ceil(span / SERVICES_MAX_BUCKETS / interval)) * interval
+    count: int = max(1, math.ceil(span / bucket))
+    end: float = (math.floor(now / bucket) + 1) * bucket
+    return end - count * bucket, bucket, count
+
+
+def bucket_services(
+    rounds: Iterable[ServiceRound],
+    names: Sequence[str],
+    start: float,
+    bucket: int,
+    count: int,
+) -> dict[str, list[list[int]]]:
+    """Per target, ``count`` [passed, failed] pairs, one per ``bucket`` seconds
+    from ``start``. [0, 0] is a bucket with no checks."""
+    out: dict[str, list[list[int]]] = {
+        name: [[0, 0] for _ in range(count)] for name in names
+    }
+    ts: float
+    oks: dict[str, bool]
+    for ts, oks in rounds:
+        i: int = int((ts - start) // bucket)
+        if not 0 <= i < count:
+            continue
+        name: str
+        ok: bool
+        for name, ok in oks.items():
+            if name in out:
+                out[name][i][0 if ok else 1] += 1
+    return out
 
 
 def _run_ping(target: str = "8.8.8.8", timeout: int = 2) -> float | None:
@@ -1933,10 +2189,16 @@ def append_history_record(record: dict[str, Any]) -> None:
     worker threads; the lock keeps two records from interleaving into one torn
     line (a record over the 8 KiB text buffer is more than one write()).
     """
+    _append_jsonl(HISTORY_FILE, record)
+    logger.info("History record saved: %s", record.get("timestamp"))
+
+
+def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
+    """Append one record as a line of ``path`` (history.jsonl, services.jsonl)."""
     line: bytes = json.dumps(record).encode("utf-8") + b"\n"
     LOGS_DIR.mkdir(exist_ok=True)
     f: BinaryIO
-    with _history_write_lock, open(HISTORY_FILE, "a+b") as f:
+    with _history_write_lock, open(path, "a+b") as f:
         if f.seek(0, os.SEEK_END):
             f.seek(-1, os.SEEK_END)
             tail: bytes = f.read(1)
@@ -1949,7 +2211,6 @@ def append_history_record(record: dict[str, Any]) -> None:
         f.seek(0, os.SEEK_END)
         f.write(line)
         f.flush()
-    logger.info("History record saved: %s", record.get("timestamp"))
 
 
 def missing_core_metrics(record: dict[str, Any]) -> list[str]:
@@ -2007,6 +2268,83 @@ async def history_recorder() -> None:
             logger.error("History recording failed: %s", e)
 
         await asyncio.sleep(APP.state.history_record_interval)
+
+
+def _read_service_rounds(cutoff: float) -> tuple[list[ServiceRound], bool]:
+    """The rounds in services.jsonl from ``cutoff`` on (sync), and whether the
+    read stopped at the byte cap before reaching it. No file yet is no rounds;
+    raises OSError when the file cannot be read."""
+    if not SERVICES_FILE.exists():
+        return [], False
+    window: _HistoryWindow = _read_history_window(cutoff, None, path=SERVICES_FILE)
+    rounds: list[ServiceRound] = []
+    ts: float
+    record: dict[str, Any]
+    for ts, record in window.records:
+        parsed: ServiceRound | None = _service_round(ts, record)
+        if parsed is not None and ts >= cutoff:
+            rounds.append(parsed)
+    return rounds, window.hit_cap and not _history_window_covers(window, cutoff, None)
+
+
+async def run_service_round(
+    client: httpx.AsyncClient, insecure_client: httpx.AsyncClient
+) -> dict[str, Any]:
+    """Check every target once, append the round to services.jsonl and add it
+    to the in-memory window. Returns the record written."""
+    now: datetime = datetime.now(timezone.utc)
+    record: dict[str, Any] = {
+        "timestamp": now.isoformat(),
+        "interval": SERVICES_CHECK_INTERVAL,
+        "targets": await check_http_targets(
+            HTTP_TARGETS,
+            client,
+            insecure_client,
+            SERVICES_TIMEOUT,
+            SERVICES_RETRY_DELAY,
+        ),
+    }
+    # In memory first: a full disk must not blank the card's current state.
+    _note_service_round(record, now.timestamp())
+    await asyncio.to_thread(_append_jsonl, SERVICES_FILE, record)
+    return record
+
+
+async def services_checker() -> None:
+    """Background task: a round of service checks every services.check_interval
+    seconds, the first one at once. Started only when http_targets is not empty."""
+    e: Exception
+    try:
+        cutoff: float = time.time() - SERVICES_UPTIME_HOURS[-1] * 3600
+        loaded: list[ServiceRound] = (
+            await asyncio.to_thread(_read_service_rounds, cutoff)
+        )[0]
+        _services_rounds.clear()
+        _services_rounds.extend(loaded)
+    except Exception as e:
+        # Uptime then counts from this start; the checks themselves still run.
+        logger.error("Service checks: cannot read %s: %s", SERVICES_FILE, e)
+    limits: httpx.Limits = httpx.Limits(max_keepalive_connections=0)
+    client: httpx.AsyncClient
+    insecure_client: httpx.AsyncClient
+    # Their own clients, so a slow target never queues behind the page's Glances
+    # requests; no keep-alive, so every round proves a new connection is accepted.
+    async with (
+        httpx.AsyncClient(follow_redirects=True, limits=limits) as client,
+        httpx.AsyncClient(
+            follow_redirects=True, limits=limits, verify=False
+        ) as insecure_client,
+    ):
+        while True:
+            started: float = time.monotonic()
+            try:
+                await run_service_round(client, insecure_client)
+            except Exception:
+                # An unhandled exception would end this task and every later check.
+                logger.exception("service check round failed")
+            await asyncio.sleep(
+                max(1.0, SERVICES_CHECK_INTERVAL - (time.monotonic() - started))
+            )
 
 
 async def wait_for_glances_warm(glances_url: str, timeout: float = 20.0) -> bool:
@@ -2177,6 +2515,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         DEFAULT_HISTORY_RECORD_INTERVAL,
     )
 
+    services_task: asyncio.Task[None] | None = None
+    if HTTP_TARGETS:
+        services_task = asyncio.create_task(services_checker())
+        logger.info(
+            "Service checks enabled (%d targets every %d seconds)",
+            len(HTTP_TARGETS),
+            SERVICES_CHECK_INTERVAL,
+        )
+
     # Give Glances time to start
     await asyncio.sleep(2)
 
@@ -2189,7 +2536,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Shutdown (runs when Ctrl+C is pressed)
     task: asyncio.Task[None]
-    for task in [initial_sample_task, disconnect_task, app.state.history_task]:
+    for task in [
+        initial_sample_task,
+        disconnect_task,
+        app.state.history_task,
+        *([services_task] if services_task else []),
+    ]:
         task.cancel()
         try:
             await task
@@ -2475,13 +2827,15 @@ def _read_history_window(
     since: float | None,
     initial_read_size: int = HISTORY_INITIAL_TAIL_READ,
     max_bytes: int = HISTORY_MAX_TAIL_READ,
+    path: Path | None = None,
 ) -> _HistoryWindow:
-    """Parse the tail of the history file, growing the window (doubling) until it
-    covers (cutoff, since) or reaches ``max_bytes``. Each doubling reads and
+    """Parse the tail of the history file (or ``path``, another JSONL file of
+    timestamped records), growing the window (doubling) until it covers
+    (cutoff, since) or reaches ``max_bytes``. Each doubling reads and
     parses only the part of the file the window did not hold yet. Raises OSError
     when the file cannot be read."""
     f: BinaryIO
-    with open(HISTORY_FILE, "rb") as f:
+    with open(path or HISTORY_FILE, "rb") as f:
         st: os.stat_result = os.fstat(f.fileno())
         size: int = st.st_size
         records: list[tuple[float, dict[str, Any]]] = []
@@ -3148,6 +3502,76 @@ async def ping() -> Response:
         content=json.dumps({"targets": targets}),
         media_type="application/json",
     )
+
+
+def services_snapshot(now: float) -> dict[str, Any]:
+    """The Services card's data: each configured target's newest result and its
+    uptime counts over SERVICES_UPTIME_HOURS. A target not checked yet has
+    ``ok: null``."""
+    names: list[str] = [t.name for t in HTTP_TARGETS]
+    uptime: dict[str, dict[str, dict[str, int]]] = services_uptime(
+        _services_rounds, names, now
+    )
+    targets: list[dict[str, Any]] = []
+    target: HttpTarget
+    for target in HTTP_TARGETS:
+        latest: dict[str, Any] = _services_latest.get(target.name, {})
+        targets.append(
+            {
+                "name": target.name,
+                "url": target.url,
+                "ok": latest.get("ok"),
+                "status": latest.get("status"),
+                "ms": latest.get("ms"),
+                "error": latest.get("error"),
+                "checked": latest.get("checked"),
+                "uptime": uptime[target.name],
+            }
+        )
+    return {"interval": SERVICES_CHECK_INTERVAL, "now": now, "targets": targets}
+
+
+@APP.get("/api/services")
+async def services() -> Response:
+    """Each http_targets service: up or down at the last check, and uptime over
+    the last hour, day and week."""
+    return Response(
+        content=json.dumps(services_snapshot(time.time())),
+        media_type="application/json",
+    )
+
+
+@APP.get("/api/services/history")
+async def services_history(hours: float = 24) -> Response:
+    """Passed and failed checks per target in equal time buckets over the last
+    ``hours``, for the outage grid. ``truncated`` means the log could not be
+    read back that far, so the oldest buckets are empty."""
+    hours = _clamp_hours(hours)
+    now: float = time.time()
+    start: float
+    bucket: int
+    count: int
+    start, bucket, count = services_bucket_plan(hours, now, SERVICES_CHECK_INTERVAL)
+    rounds: Iterable[ServiceRound] = _services_rounds
+    truncated: bool = False
+    if HTTP_TARGETS and hours > SERVICES_UPTIME_HOURS[-1]:
+        e: Exception
+        try:
+            rounds, truncated = await asyncio.to_thread(_read_service_rounds, start)
+        except Exception as e:
+            logger.error("Service history: cannot read %s: %s", SERVICES_FILE, e)
+            truncated = True
+    body: dict[str, Any] = {
+        "start": start,
+        "bucket_sec": bucket,
+        "count": count,
+        "now": now,
+        "truncated": truncated,
+        "targets": bucket_services(
+            rounds, [t.name for t in HTTP_TARGETS], start, bucket, count
+        ),
+    }
+    return Response(content=json.dumps(body), media_type="application/json")
 
 
 _cuda_version: str = ""  # nvidia-smi's CUDA version once read (see _get_gpu_info)
@@ -4233,6 +4657,8 @@ async def list_endpoints() -> Response:
         "/mail",
         "/storage-health",
         "/sensors",
+        "/services",
+        "/services/history",
         "/version",
         "/list-endpoints",
     ]
@@ -4615,9 +5041,11 @@ def _render_latest(
     color: ColorDepth = False,
     thresholds: dict[str, Any] | None = None,
     width: int = TEXT_WIDTH,
+    services: Sequence[dict[str, Any]] | None = None,
 ) -> list[tuple[str, str]]:
     """Snapshot lines as (slot, line). The slot names the history sparkline that
-    belongs beside the line in two-column mode ("" for none)."""
+    belongs beside the line in two-column mode ("" for none). ``services`` is
+    services_snapshot()'s targets list: it is live state, not part of a record."""
     th: dict[str, Any] = thresholds or {}
     lines: list[tuple[str, str]] = []
 
@@ -4825,6 +5253,42 @@ def _render_latest(
             _paint(f"{'Ping':<10}", "ping", color) + " " + "   ".join(cells),
             f"ping:{pings[0][0]}",
         )
+
+    # Services: up or down at the last check and the 24 h uptime, wrapped to
+    # the width (names are free text and there may be many).
+    service_cells: list[str] = []
+    service: dict[str, Any]
+    for service in services or []:
+        ok: Any = service.get("ok")
+        day: dict[str, Any] = (service.get("uptime") or {}).get("24") or {}
+        state: str = (
+            _paint("?", "muted", color)
+            if ok is None
+            else _paint("UP", "ok", color)
+            if ok
+            else _paint("DOWN", "error", color)
+        )
+        share: str = (
+            f" {100 * day['up'] / day['checks']:.1f}%" if day.get("checks") else ""
+        )
+        service_cells.append(
+            _paint("●" if unicode else "*", "ok" if ok else "error", color)
+            + " "
+            + _paint(str(service.get("name")), "muted", color)
+            + " "
+            + state
+            + _paint(share, "muted", color)
+        )
+    service_line: str = _paint(f"{'Services':<10}", "ok", color)
+    on_line: int = 0
+    for cell in service_cells:
+        if on_line and len(_strip_ansi(service_line + cell)) + 3 > width:
+            add(service_line)
+            service_line, on_line = " " * 10, 0
+        service_line += (" " if not on_line else "   ") + cell
+        on_line += 1
+    if on_line:
+        add(service_line)
 
     readings: list[float] = _temps_of(record)
     if readings:
@@ -5190,6 +5654,7 @@ def render_text(
     width: int = TEXT_WIDTH,
     now: datetime | None = None,
     sparks: bool = True,
+    services: Sequence[dict[str, Any]] | None = None,
 ) -> str:
     """Render history records as a console report (pure; unit-tested).
 
@@ -5229,7 +5694,7 @@ def render_text(
     if view in ("latest", "both"):
         if live or records:
             left = _render_latest(
-                live or records[-1], unicode, now, color, thresholds, col_w
+                live or records[-1], unicode, now, color, thresholds, col_w, services
             )
         else:
             left = [("", "No data yet.")]
@@ -5369,12 +5834,15 @@ JSON API (machine-readable; prefer these for exact values)
   GET /api/version               {version, build}: the running release and, on a
                                  git checkout, the commit it was installed from
   GET /api/ping                  ping the configured targets now
+  GET /api/services              each http_targets URL: up or down at the last check,
+                                 uptime {up, checks} over the last 1 / 24 / 168 h
+  GET /api/services/history?hours=24   [passed, failed] checks per target per time bucket
   GET /api/sensors               fans/temps/power snapshot (root collector, when installed)
   GET /api/storage-health        drive SMART/RAID/ECC snapshot (root collector)
   GET /api/4/<plugin>            live Glances metrics, raw (rates not capped): cpu,
                                  mem, memswap, load, network, diskio, fs, sensors, gpu
   GET /config.json               the config file as written: title, ping targets,
-                                 thresholds, limits if set
+                                 http targets, thresholds, limits if set
   GET /themes/index.json         names of the themes in themes/ (see themes/README.md)
 
 Dashboard: http://<host>:8080/   This page: /help
@@ -5458,6 +5926,7 @@ async def text_view(
             live=sample,
             width=max(TEXT_MIN_WIDTH, min(width, 400)),
             sparks=sparks,
+            services=services_snapshot(time.time())["targets"],
         )
 
     def layout() -> str:

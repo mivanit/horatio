@@ -539,8 +539,108 @@ h1 {
   color: var(--text-muted);
 }
 
-/* The hardware card's header verdict sits between the title and the age */
-#hardware-value {
+/* Services card: name, state, response time, then uptime over 1 h / 24 h / 7 d */
+.svc-table {
+  display: grid;
+  /* The name keeps its width (up to 45%); a long error text is what gets cut */
+  grid-template-columns: fit-content(45%) minmax(0, 1fr) repeat(4, auto);
+  gap: 4px 12px;
+  align-items: baseline;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.svc-head {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.svc-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.svc-name a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.svc-name a:hover { text-decoration: underline; }
+
+.svc-num { text-align: right; }
+
+.svc-state {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.svc-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  background: currentColor;
+}
+
+.svc-up { color: var(--color-success); }
+.svc-down { color: var(--color-error-light); }
+.svc-unknown { color: var(--text-muted); }
+
+/* Services history: one row of time buckets per service */
+.history-chart-container.history-grid-container { min-height: 0; }
+
+/* A few rows of cells need less than a chart card's minimum height */
+.history-card:has(.history-grid-container) { min-height: 0; }
+
+.svc-hist {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+  gap: 6px 10px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.svc-cells {
+  display: flex;
+  height: 22px;
+  background: var(--bg-bar);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.svc-cell {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.svc-cell-up { background: var(--color-success); }
+
+/* Each cell sets its own opacity from the failed share of its checks */
+.svc-cell-down { background: var(--color-error); }
+
+.svc-cell:hover { filter: brightness(1.4); }
+
+.svc-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* The hardware and services cards' header verdict sits between the title and the age */
+#hardware-value,
+#services-value {
   margin-left: 10px;
   margin-right: auto;
 }

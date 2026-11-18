@@ -226,7 +226,7 @@ async function testIpInfoTimeout() {
       },
       clearTimeout(timer) { timers.delete(timer); clearTimeout(timer); },
       updateCardNoData: (id, ok) => { statuses[id] = ok; }, updateCacheDisplay() {}, escapeHtml: String,
-      renderGpuInfo() {}, renderDrives() {}, renderMail() {}, renderHardware() {},
+      renderGpuInfo() {}, renderDrives() {}, renderMail() {}, renderHardware() {}, servicesConfigured() { return false; },
       renderDriveHealth() {}, renderSystemInfo() {},
       diskCapture: { handleResponse() {} }, networkCapture: { handleResponse() {} },
     });
@@ -769,7 +769,7 @@ async function testStaticInfoRecovery() {
     renderCpuInfo(data) { rendered.cpu.push(data); statuses['cpu-info'] = true; },
     renderSystemInfo(data, uptime) { rendered.system.push({ data, uptime }); statuses['system-info'] = true; },
     updateCardNoData(id, ok) { statuses[id] = ok; },
-    renderGpuInfo() {}, renderDrives() {}, renderIpInfo() {}, renderMail() {}, renderHardware() {}, renderDriveHealth() {},
+    renderGpuInfo() {}, renderDrives() {}, renderIpInfo() {}, renderMail() {}, renderHardware() {}, servicesConfigured() { return false; }, renderDriveHealth() {},
     diskCapture: { handleResponse() {} }, networkCapture: { handleResponse() {} },
   });
   evaluate(context,
@@ -829,7 +829,7 @@ async function testSlowPollRenderIsolation() {
     },
     updateCardNoData(id, ok) { statuses[id] = ok; },
     renderGpuInfo() { throw new TypeError('bad GPU info'); },
-    renderHardware(data) { return data.status; },
+    renderHardware(data) { return data.status; }, servicesConfigured() { return false; },
     renderCpuInfo: record('cpu'), renderSystemInfo: record('system'), renderDrives: record('drives'),
     renderIpInfo: record('ip'), renderMail: record('mail'), renderDriveHealth: record('drive-health'),
     diskCapture: { handleResponse: record('disk') }, networkCapture: { handleResponse: record('network') },
@@ -857,7 +857,7 @@ async function testCapturePendingAndHiddenTab() {
     nethogsDuration: 3, diskDuration: 1, API_BASE: '/api/4', cardStatus: { processes: { ok: true } },
     getDiskTimeout: () => 6500, getNethogsTimeout: () => 9500,
     renderUnifiedProcesses() {}, renderGpuInfo() {}, renderCpuInfo() {}, renderDrives() {}, renderIpInfo() {},
-    renderMail() {}, renderHardware() {}, renderDriveHealth() {}, renderSystemInfo() {},
+    renderMail() {}, renderHardware() {}, servicesConfigured() { return false; }, renderDriveHealth() {}, renderSystemInfo() {},
     safeFetch(url) {
       calls[url] = (calls[url] || 0) + 1;
       if (url.includes('-processes')) return new Promise(resolve => { release[url] = resolve; });
@@ -908,7 +908,7 @@ async function testCaptureCacheAge() {
     nethogsDuration: 3, diskDuration: 1, API_BASE: '/api/4', cardStatus: { processes: { ok: true } },
     getDiskTimeout: () => 6500, getNethogsTimeout: () => 9500,
     renderUnifiedProcesses() {}, renderGpuInfo() {}, renderCpuInfo() {}, renderDrives() {}, renderIpInfo() {},
-    renderMail() {}, renderHardware() {}, renderDriveHealth() {}, renderSystemInfo() {},
+    renderMail() {}, renderHardware() {}, servicesConfigured() { return false; }, renderDriveHealth() {}, renderSystemInfo() {},
     async safeFetch(url) {
       calls[url] = (calls[url] || 0) + 1;
       if (url.includes('network-processes')) now += captureDelay;  // the tick's captures take time
@@ -1320,8 +1320,54 @@ async function testThemes() {
   assert.deepEqual(plain(s.picked.options.map(o => o.value)), ['default']);
 }
 
+// The Services card and the outage grid, from the real render functions.
+function testServicesCard() {
+  const elements = new Map(['services-value', 'services-content'].map(id =>
+    [id, { id, textContent: '', className: '', innerHTML: '' }]));
+  const flags = {};
+  const context = vm.createContext({
+    document: { getElementById: id => elements.get(id) },
+    setHtml(el, html) { el.innerHTML = html; },
+    escapeHtml: s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'),
+    updateCardNoData(id, ok) { flags.data = ok; },
+    updateCardCritical(id, bad) { flags.critical = bad; },
+  });
+  evaluate(context, between(app, 'function renderServices', '// Shared by the Hardware health'));
+  const target = (name, ok, extra = {}) => ({ name, url: `http://${name}/`, ok, status: ok ? 200 : null,
+    ms: ok ? 12 : null, error: ok === false ? 'timeout' : null,
+    uptime: { 1: { up: 60, checks: 60 }, 24: { up: 1439, checks: 1440 }, 168: { up: 0, checks: 0 } }, ...extra });
+
+  context.renderServices({ targets: [target('pages', true), target('<immich>', true)] });
+  assert.equal(elements.get('services-value').textContent, 'all up');
+  assert.deepEqual(flags, { data: true, critical: false });
+  const html = elements.get('services-content').innerHTML;
+  assert(html.includes('12 ms') && html.includes('>100%<') && html.includes('>99.93%<') && html.includes('>--<'));
+  assert(html.includes('&lt;immich>') && !html.includes('<immich>'), 'names are escaped');
+
+  context.renderServices({ targets: [target('pages', true), target('immich', false)] });
+  assert.equal(elements.get('services-value').textContent, '1 down');
+  assert.equal(flags.critical, true);
+  assert(elements.get('services-content').innerHTML.includes('down (timeout)'));
+
+  context.renderServices({ targets: [target('pages', null)] });
+  assert.equal(elements.get('services-value').textContent, '--', 'nothing checked yet is not "all up"');
+  assert.equal(flags.critical, false);
+
+  // 1439 of 1440 must never round up to 100%.
+  assert.equal(context.uptimeText({ up: 99999, checks: 100000 }).text, '99.99%');
+  assert.equal(context.uptimeText({ up: 9, checks: 10 }).text, '90.0%');
+
+  const grid = context.servicesGridHTML({ start: 0, bucket_sec: 300, count: 3, truncated: false,
+    targets: { pages: [[5, 0], [1, 4], [0, 0]] } });
+  assert.equal((grid.match(/svc-cell-up/g) || []).length, 1);
+  assert.equal((grid.match(/svc-cell-none/g) || []).length, 1);
+  assert(grid.includes('opacity:0.89') && grid.includes('4 of 5 checks failed') && grid.includes('no checks'));
+  assert(grid.includes('>60.0%<'), 'the row total counts only buckets with checks');
+  assert(context.servicesGridHTML({ targets: {} }).includes('No services configured'));
+}
+
 (async () => {
-  for (const test of [testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
+  for (const test of [testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testCapturePendingAndHiddenTab, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
     testVersionFooter]) {

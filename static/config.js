@@ -173,6 +173,7 @@ const cardStatus = {
   'mail': { ok: true, lastSuccess: Date.now() },
   'hardware': { ok: true, lastSuccess: Date.now() },
   'drive-health': { ok: true, lastSuccess: Date.now() },
+  'services': { ok: true, lastSuccess: Date.now() },
 };
 
 // Set Chart.js defaults from the theme, so charts that set no style of their own
@@ -532,6 +533,9 @@ const HISTORY_METRICS = {
     ],
   },
   ping: { name: 'Ping', color: getCssColor('--color-ping-0'), unit: ' ms', multiLine: true, hasMinMax: true },
+  // grid: not a chart. The card draws passed / failed checks per time bucket from this
+  // endpoint (app.js servicesGridHTML); the data is not in the history records.
+  services: { name: 'Services', color: getCssColor('--color-success'), unit: '', grid: '/api/services/history' },
   // Needs per-process logging on (History Settings); one line per process name.
   // fieldSelect: a dropdown picks which stat is drawn (the card's unitType holds its key);
   // an entry's optional decimals sets the tooltip precision (default 1).
@@ -567,6 +571,7 @@ const CARD_ENDPOINT_DEPS = {
   'hardware':     ['/storage-health'],
   'drive-health': ['/storage-health'],
   'power':        ['/sensors'],
+  'services':     ['/services'],
 };
 
 async function fetchEndpointList() {
@@ -584,6 +589,11 @@ async function fetchEndpointList() {
 }
 
 function hideUnavailableCards() {
+  if (!servicesConfigured()) {
+    const services = document.querySelector('[data-card-id="services"]');
+    if (services) services.style.display = 'none';
+    delete cardStatus.services;
+  }
   if (availableEndpoints === null) return;
 
   for (const [cardId, deps] of Object.entries(CARD_ENDPOINT_DEPS)) {
@@ -596,6 +606,13 @@ function hideUnavailableCards() {
   }
 
   updateConnectionStatus();
+}
+
+// The Services card and its history exist only with http_targets in config.json
+// and a backend that checks them (the OpenWrt one does not).
+function servicesConfigured() {
+  return Array.isArray(dashboardConfig.http_targets) && dashboardConfig.http_targets.length > 0 &&
+    (availableEndpoints === null || availableEndpoints.has('/services'));
 }
 
 // Helper to fetch with error tracking and timeout: returns {data, ok, errorType?, status?}
@@ -643,7 +660,8 @@ const dataCache = {
   ipInfo: { ttl: 60000, data: null, lastUpdate: null },
   mail: { ttl: 10000, data: null, lastUpdate: null },
   storageHealth: { ttl: 10000, data: null, lastUpdate: null },
-  sensors: { ttl: 10000, data: null, lastUpdate: null }
+  sensors: { ttl: 10000, data: null, lastUpdate: null },
+  services: { ttl: 10000, data: null, lastUpdate: null }
 };
 
 function isCacheValid(key) {

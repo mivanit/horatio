@@ -675,6 +675,81 @@ function renderHardware(data) {
   updateCardWarning('hardware', stale || sensorsUnknown ? 1 : 0, 0);
 }
 
+// Services card. `data` is /api/services: each config.json http_targets entry
+// with its newest check (`ok` null until the first one finishes) and its
+// {up, checks} counts over the last 1, 24 and 168 hours. The server decides
+// what counts as up; this only prints it.
+function renderServices(data) {
+  const targets = Array.isArray(data?.targets) ? data.targets : [];
+  const down = targets.filter(t => t.ok === false).length;
+  const pending = targets.filter(t => t.ok == null).length;
+  const valueEl = document.getElementById('services-value');
+  valueEl.textContent = down ? `${down} down` : pending === targets.length ? '--' : 'all up';
+  valueEl.className = 'value ' + (down ? 'text-error' : pending === targets.length ? '' : 'text-success');
+
+  const rows = targets.map(t => {
+    const state = t.ok == null ? 'pending' : t.ok ? 'up' : `down (${t.error || 'error'})`;
+    const cls = t.ok == null ? 'svc-unknown' : t.ok ? 'svc-up' : 'svc-down';
+    const uptime = [1, 24, 168].map(h => {
+      const u = uptimeText(t.uptime?.[h]);
+      return `<span class="svc-num${u.cls ? ' ' + u.cls : ''}" title="${escapeHtml(u.title)}">${u.text}</span>`;
+    }).join('');
+    return `<span class="svc-name"><span class="svc-dot ${cls}"></span>` +
+      `<a href="${escapeHtml(t.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(t.url)}">${escapeHtml(t.name)}</a></span>` +
+      `<span class="svc-state ${cls}" title="${escapeHtml(state)}">${escapeHtml(state)}</span>` +
+      `<span class="svc-num">${t.ok && t.ms != null ? `${t.ms} ms` : ''}</span>` + uptime;
+  }).join('');
+  const head = ['', '', '', '1h', '24h', '7d'].map(h => `<span class="svc-head">${h}</span>`).join('');
+  setHtml(document.getElementById('services-content'),
+    `<div class="info-item"><div class="svc-table">${head}${rows}</div></div>`);
+  updateCardNoData('services', true);
+  updateCardCritical('services', down > 0);
+}
+
+// One uptime cell from {up, checks}: text, colour class and a tooltip with the
+// counts. Never shows 100% unless every check passed.
+function uptimeText(u) {
+  if (!u || !u.checks) return { text: '--', cls: '', title: 'no checks in this window' };
+  const title = `${u.up} of ${u.checks} checks passed`;
+  if (u.up === u.checks) return { text: '100%', cls: '', title };
+  if (u.up === 0) return { text: '0%', cls: 'text-error', title };
+  const pct = Math.min(100 * u.up / u.checks, 99.99);
+  return { text: pct.toFixed(pct >= 99.9 ? 2 : 1) + '%', cls: pct < 99 ? 'text-error' : 'text-warning', title };
+}
+
+// Outage grid for the Services history card. `d` is /api/services/history:
+// per target, one [passed, failed] pair per `bucket_sec` from `start`. One row
+// per target, one cell per bucket: green = every check passed, red (stronger
+// with the failed share) = some failed, grey = no checks (Horatio was not
+// running, or the target was not configured yet).
+function servicesGridHTML(d) {
+  const names = Object.keys(d?.targets || {});
+  if (!names.length) return '<div class="no-history-data"><p>No services configured</p></div>';
+  // Buckets shorter than a minute need the seconds to tell their ends apart.
+  const when = t => new Date(t * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+    ...(d.bucket_sec < 60 ? { second: '2-digit' } : {}) });
+  const rows = names.map(name => {
+    let up = 0, checks = 0;
+    const cells = d.targets[name].map(([passed, failed], i) => {
+      const total = passed + failed;
+      up += passed; checks += total;
+      const from = d.start + i * d.bucket_sec;
+      const what = !total ? 'no checks' : failed ? `${failed} of ${total} checks failed` : `${total} checks passed`;
+      const cls = !total ? 'svc-cell-none' : failed ? 'svc-cell-down' : 'svc-cell-up';
+      // A bucket with one failed check in many is still visibly red.
+      const style = failed ? ` style="opacity:${(0.45 + 0.55 * failed / total).toFixed(2)}"` : '';
+      return `<span class="svc-cell ${cls}"${style} title="${escapeHtml(`${when(from)} to ${when(from + d.bucket_sec)}: ${what}`)}"></span>`;
+    }).join('');
+    const u = uptimeText({ up, checks });
+    return `<span class="svc-name">${escapeHtml(name)}</span><span class="svc-cells">${cells}</span>` +
+      `<span class="svc-num${u.cls ? ' ' + u.cls : ''}" title="${escapeHtml(u.title)}">${u.text}</span>`;
+  }).join('');
+  const end = d.start + d.count * d.bucket_sec;
+  const axis = `<span></span><span class="svc-axis"><span>${when(d.start)}</span><span>${when((d.start + end) / 2)}</span><span>${when(end)}</span></span><span></span>`;
+  const note = d.truncated ? '<div class="hw-note">the log could not be read back this far: the oldest cells are empty</div>' : '';
+  return `<div class="svc-hist">${rows}${axis}</div>${note}`;
+}
+
 // Shared by the Hardware health and Drive Health cards.
 const hwRow = (cls, text) => `<div class="hw-row${cls ? ' ' + cls : ''}">${escapeHtml(text)}</div>`;
 const hwSection = (title, rows) => rows.length ? `<div class="info-item"><div class="hw-heading">${title}</div>${rows.join('')}</div>` : '';
@@ -1357,6 +1432,12 @@ async function fetchSlowData() {
   const gpuInfoPromise = isCacheValid('gpuInfo')
     ? Promise.resolve({ data: getCache('gpuInfo'), ok: true, cached: true })
     : safeFetch('/api/gpu-info', []);
+  // No http_targets: the card is hidden and nothing is fetched.
+  const servicesPromise = !servicesConfigured()
+    ? Promise.resolve({ data: null, ok: false, errorType: 'unavailable' })
+    : isCacheValid('services')
+      ? Promise.resolve({ data: getCache('services'), ok: true, cached: true })
+      : safeFetch('/api/services', {});
 
   // Metadata must not wait for the longer public-IP lookup. Uptime is read
   // once per slow poll and shares the metadata update. safeFetch never
@@ -1400,8 +1481,8 @@ async function fetchSlowData() {
     });
   });
 
-  const [fs, ipInfo, mail, storageHealth, sensorsSnap] = await Promise.all([
-    drivesPromise, ipPromise, mailPromise, storageHealthPromise, sensorsPromise, infoPromise
+  const [fs, ipInfo, mail, storageHealth, sensorsSnap, services] = await Promise.all([
+    drivesPromise, ipPromise, mailPromise, storageHealthPromise, sensorsPromise, servicesPromise, infoPromise
   ]);
   if (sensorsSnap.ok && !sensorsSnap.cached) updateCache('sensors', sensorsSnap.data);
 
@@ -1457,6 +1538,15 @@ async function fetchSlowData() {
     updateCardNoData('hardware', false);
     setHtml(document.getElementById('drive-health-content'), '<div class="info-item text-error">Error loading drive health</div>');
     updateCardNoData('drive-health', false);
+  }
+
+  // Handle the service checks (same 'unavailable' rule as mail)
+  if (services.ok) {
+    if (!services.cached) updateCache('services', services.data);
+    guard('services', () => renderServices(services.data));
+  } else if (services.errorType !== 'unavailable') {
+    document.getElementById('services-content').innerHTML = '<div class="info-item text-error">Error loading services</div>';
+    updateCardNoData('services', false);
   }
 
   // === DISK CAPTURE - runs independently, doesn't block above ===
@@ -2774,6 +2864,19 @@ async function refreshData(cacheKey, btn) {
         }
         break;
 
+      case 'services': {
+        const services = await safeFetch('/api/services', {});
+        if (services.ok) {
+          updateCache('services', services.data);
+          renderServices(services.data);
+        } else if (services.errorType !== 'unavailable') {
+          document.getElementById('services-content').innerHTML =
+            '<div class="info-item text-error">Error loading services</div>';
+          updateCardNoData('services', false);
+        }
+        break;
+      }
+
       case 'sensors': {
         // The fans / temps / power cards read the cache on the next fast poll.
         const sensorsSnap = await safeFetch('/api/sensors', {});
@@ -2823,7 +2926,8 @@ const cacheDisplayInterval = setInterval(() => {
       drives: 'drive-usage',
       processes: 'processes',
       ipInfo: 'ip-info',
-      mail: 'mail'
+      mail: 'mail',
+      services: 'services'
       // not storageHealth: the hardware card's header shows the SNAPSHOT's age
       // (renderHardware), which this fetch-age ticker would overwrite every second.
     };
@@ -3796,7 +3900,7 @@ async function createHistoryCard(metric, hours = defaultHistoryHours) {
         <select class="field-select" title="Which stat to draw">${metricInfo.fieldSelect.map(f =>
           `<option value="${escapeHtml(f.key)}">${escapeHtml(f.label)}</option>`).join('')}</select>` : '';
   // Trace selection: "none" then a legend click is the quick way to look at one trace.
-  const traceButtons = `
+  const traceButtons = metricInfo.grid ? '' : `
         <button class="trace-btn" data-traces="none" title="Hide every trace (click a legend entry to show one)">none</button>
         <button class="trace-btn" data-traces="all" title="Show every trace">all</button>`;
 
@@ -3814,8 +3918,8 @@ async function createHistoryCard(metric, hours = defaultHistoryHours) {
         <button class="history-close-btn" title="Close">×</button>
       </div>
     </div>
-    <div class="chart-container history-chart-container">
-      <canvas id="${canvasId}"></canvas>
+    <div class="chart-container history-chart-container${metricInfo.grid ? ' history-grid-container' : ''}">
+      ${metricInfo.grid ? '' : `<canvas id="${canvasId}"></canvas>`}
     </div>
   `;
 
@@ -3954,6 +4058,24 @@ async function loadHistoryData(metric, hours, data) {
   if (!entry) return;
   const mySeq = ++entry.loadSeq;
 
+  // A grid metric (Services) has its own endpoint and no chart: fetch, then
+  // replace the markup, under the same stale-response gate as below.
+  const gridUrl = HISTORY_METRICS[metric].grid;
+  if (gridUrl) {
+    const grid = await safeFetch(`${gridUrl}?hours=${encodeURIComponent(hours)}`, null, 30000);
+    if (historyCards.get(metric) !== entry || entry.loadSeq !== mySeq) return;
+    const box = entry.card.querySelector('.chart-container');
+    if (grid.ok && grid.data) {
+      box.innerHTML = servicesGridHTML(grid.data);
+      entry.hasGrid = true;
+    } else if (entry.hasGrid) {
+      showError(`History refresh failed (${grid.errorType || 'error'}) — showing last data`);
+    } else {
+      box.innerHTML = historyErrorHTML(grid.errorType);
+    }
+    return;
+  }
+
   if (!data) data = await fetchHistoryData(hours, { field: HISTORY_METRICS[metric].sideField || null });
 
   // Stale-response gate. Requests for one card can resolve out of order (a
@@ -4048,7 +4170,7 @@ function removeHistoryCard(metric) {
 
 // Show history for all metrics
 function showAllHistory() {
-  const metrics = Object.keys(HISTORY_METRICS);
+  const metrics = Object.keys(HISTORY_METRICS).filter(m => !HISTORY_METRICS[m].grid || servicesConfigured());
   metrics.forEach(metric => {
     if (!historyCards.has(metric)) {
       createHistoryCard(metric);
@@ -4104,8 +4226,11 @@ async function refreshAllHistory() {
     // One fetch per distinct (range, side field): a side-field card cannot share
     // the main result, which leaves its field out.
     const groups = new Map();
+    const gridLoads = [];
     for (const [metric, entry] of historyCards) {
       const hours = parseFloat(entry.card.querySelector('.history-range-input')?.value) || defaultHistoryHours;
+      // A grid card fetches its own endpoint; it takes no part in the shared history fetch.
+      if (HISTORY_METRICS[metric].grid) { gridLoads.push(loadHistoryData(metric, hours)); continue; }
       const field = HISTORY_METRICS[metric].sideField || null;
       const key = `${field || ''}|${hours}`;
       if (!groups.has(key)) groups.set(key, { hours, field, cards: [] });
@@ -4122,6 +4247,7 @@ async function refreshAllHistory() {
         (parseFloat(entry.card.querySelector('.history-range-input')?.value) || defaultHistoryHours) === hours);
       await Promise.all(current.map(({ metric }) => loadHistoryData(metric, hours, data)));
     }));
+    await Promise.all(gridLoads);
   } catch (err) {
     console.error('History refresh failed:', err);
     const msg = `Refresh failed: ${err.message || err}`;
