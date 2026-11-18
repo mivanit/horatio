@@ -5,6 +5,9 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- `temp_labels` in `config.json` gives temperature sensors display names on the card and
+  in its history chart (records keep the original names). `temp_thresholds` gives single
+  sensors their own limit, on the card and in `/text`'s Temperatures line.
 - History charts no longer draw a line across a stretch with no records longer than
   `history.max_gap_seconds` (default one hour; `0` restores the old behaviour).
 - Service checks: when no round has finished for several intervals, `/api/services`

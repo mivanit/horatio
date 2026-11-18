@@ -39,5 +39,7 @@
     "disk_io_mbps": 50,
     "swap_percent": 10,
     "ping_ms": 100
-  }
+  },
+  "temp_labels": {},
+  "temp_thresholds": {}
 }

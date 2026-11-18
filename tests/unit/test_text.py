@@ -115,3 +115,30 @@ def test_text_view_unit() -> None:
         else:
             os.environ["TZ"] = old_tz
         time.tzset()
+
+
+def test_a_sensor_with_its_own_limit_is_judged_against_it() -> None:
+    """temp_thresholds, under the sensor's name or its temp_labels name."""
+    from unittest.mock import patch
+
+    import server
+
+    record: dict[str, Any] = {"temps": {"loc1": 52.0, "Tctl": 45.0, "junk": None}}
+    assert server._worst_temp(record, 65) == 52.0
+    assert server._temp_key(server._worst_temp(record, 55), 55) == "temp_mid"
+    with (
+        patch.dict(server.TEMP_LABELS, {"loc1": "I350 NIC"}),
+        patch.dict(server.TEMP_THRESHOLDS, {"I350 NIC": 95}),
+    ):
+        assert server._temp_limit("loc1", 65) == 95
+        assert server._temp_limit("Tctl", 65) == 65
+        # loc1 is 43 under its own limit, Tctl 20 under the global one.
+        assert server._worst_temp(record, 65) == 45.0
+        assert server._temp_key(server._worst_temp(record, 55), 55) == "temp_mid", (
+            "Tctl at 45 is within 10 of 55; loc1 no longer decides"
+        )
+        hot: dict[str, Any] = {"temps": {"loc1": 96.0, "Tctl": 30.0}}
+        assert server._temp_key(server._worst_temp(hot, 65), 65) == "error"
+    with patch.dict(server.TEMP_THRESHOLDS, {"loc1": 95}):
+        assert server._temp_limit("loc1", 65) == 95, "the sensor's own name works too"
+    assert server._worst_temp({}, 65) is None

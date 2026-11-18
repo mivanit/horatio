@@ -2163,6 +2163,16 @@ async function fetchDataOnce() {
       if (el) el.textContent = sensorsAge;
     });
 
+    // A sensor with its own limit in config.json (temp_thresholds) turns orange
+    // there, whatever its source said, and red 10 °C later unless the source's
+    // critical line is higher still.
+    temps.forEach(t => {
+      const own = tempLimitFor(t.label);
+      if (own == null) return;
+      t.warning = own;
+      if (!(t.critical > own)) t.critical = own + 10;
+    });
+
     // The per-core readings (e.g. 36 on a two-socket box) collapse into one "Cores" entry whose value
     // is the [min, max] span (a floating bar; tempsChartConfig); the rest stays.
     const { cores, rest: nonCores } = aggregateCoreTemps(temps);
@@ -3525,7 +3535,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
         });
         const color = band && sensor.startsWith(band + ' ') ? colors[0] : colors[i % colors.length];
         return {
-          label: sensor,
+          label: metric === 'temps' ? tempDisplayLabel(sensor) : sensor,
           data: data,
           borderColor: color,
           backgroundColor: stack ? withAlpha(color, '60') : sensor === `${band} max` ? withAlpha(color, '15') : 'transparent',

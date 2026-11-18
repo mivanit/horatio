@@ -5064,6 +5064,55 @@ def _level(value: object, threshold: object, key: str) -> str:
     return "warning" if v is not None and t is not None and v >= t else key
 
 
+def _str_map(key: str, value_types: tuple[type, ...]) -> dict[str, Any]:
+    """A config.json object of name -> value, or {} (with a warning) when it is
+    not one. Entries of the wrong type are dropped."""
+    raw: Any = _CONFIG.get(key)
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        logger.warning("config.json: %s must be an object; ignored", key)
+        return {}
+    return {
+        k: v
+        for k, v in raw.items()
+        if isinstance(v, value_types) and not isinstance(v, bool) and v != ""
+    }
+
+
+# Display names for temperature sensors ({"loc1": "I350 NIC"}); the dashboard
+# applies them, records keep the sensor's own name. Here they only let a
+# temp_thresholds entry be written under either name.
+TEMP_LABELS: Final[dict[str, str]] = _str_map("temp_labels", (str,))
+# A sensor's own limit in °C, for sensors that run hot by design.
+TEMP_THRESHOLDS: Final[dict[str, float]] = _str_map("temp_thresholds", (int, float))
+
+
+def _temp_limit(label: str, default: float) -> float:
+    """The sensor's own limit (temp_thresholds, by its name or its temp_labels
+    name), else ``default``."""
+    name: str | None
+    for name in (label, TEMP_LABELS.get(label)):
+        if name is not None and name in TEMP_THRESHOLDS:
+            return float(TEMP_THRESHOLDS[name])
+    return default
+
+
+def _worst_temp(record: dict[str, Any], threshold: object) -> float | None:
+    """The hottest reading measured against each sensor's own limit, on the
+    global threshold's scale: a sensor 20 °C under its own 95 °C limit counts as
+    20 °C under the global one. None without readings."""
+    base: float = _num(threshold) or 60.0
+    shifted: list[float] = [
+        v - (_temp_limit(label, base) - base)
+        for label, v in (
+            (label, _num(t)) for label, t in (record.get("temps") or {}).items()
+        )
+        if v is not None
+    ]
+    return max(shifted) if shifted else None
+
+
 def _temp_key(value: object, threshold: object) -> str:
     v: float | None
     t: float
@@ -5333,10 +5382,18 @@ def _render_latest(
     if readings:
         add(sec(f"Temperatures ({deg.strip()})", f"{len(readings)} sensors"))
         thr: Any = th.get("temp_celsius")
+        # "max" takes its colour from the sensor nearest its own limit
+        # (temp_thresholds), which need not be the hottest one.
         add(
             "   ".join(
                 _paint(f"{label} ", "muted", color)
-                + _paint(f"{value:>3.0f}", _temp_key(value, thr), color)
+                + _paint(
+                    f"{value:>3.0f}",
+                    _temp_key(
+                        _worst_temp(record, thr) if label == "max" else value, thr
+                    ),
+                    color,
+                )
                 for label, value in (
                     ("min", min(readings)),
                     ("median", statistics.median(readings)),

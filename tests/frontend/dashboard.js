@@ -58,9 +58,11 @@ function liveContext(ids) {
     updateCardNoData: (id, ok) => { statuses[id] = ok; }, updateCardWarning() {},
     console: { error: (...args) => errors.push(args.map(String).join(' ')) },
     performance: { now: () => 0 }, requestAnimationFrame: callback => callback(500),
+    dashboardConfig: {},
   });
   evaluate(context,
     between(charts, '// Data stores', '// Generate time labels') +
+    between(charts, '// config.json temp_labels', 'function abbreviateGpuName') +
     between(config, 'function animateValue', '// GPU colors') +
     between(config, 'function getCache', '// The CPU core temperatures') +
     between(app, 'function guard', 'async function fetchDataOnce'));
@@ -441,6 +443,32 @@ function testDriveTemperatureFreshness() {
 
 // A box with no temperature source (an OpenWrt router without thermal zones)
 // hides the card like fans/power; failed or stale sources keep it red.
+// config.json temp_labels renames a sensor on the card; temp_thresholds gives
+// it its own orange line, under either name.
+function testTempLabelsAndLimits() {
+  const context = liveContext(['temps-value', 'temps-card', 'fans-card', 'power-card']);
+  context.charts = { temps: makeChart(), fans: makeChart() };
+  context.sensorsAgeText = () => '';
+  context.getTempColor = (value, warning, critical) => `${value}/${warning}/${critical}`;
+  evaluate(context,
+    between(config, 'const CORE_TEMP_LABEL', 'function formatTimeAgo') +
+    'function tickTemps() {' + between(app, "  guard('temps',", "  guard('load',") + '}');
+  context.gpu = { ok: false };
+  context.sensors = { ok: true, data: [
+    { type: 'temperature_core', label: 'loc1', value: 52, warning: 120, critical: 110 },
+    { type: 'temperature_core', label: 'board', value: 70, warning: 65, critical: 80 },
+    { type: 'temperature_core', label: 'hot', value: 99, warning: 65, critical: 80 },
+  ] };
+  evaluate(context, `dashboardConfig = { temp_labels: { loc1: 'I350 NIC' },
+    temp_thresholds: { 'I350 NIC': 95, hot: 100, board: 'junk' } };`);
+  context.tickTemps();
+  assert.deepEqual(context.errors, []);
+  assert.deepEqual(plain(context.charts.temps.data.labels), ['I350 NIC', 'board', 'hot']);
+  assert.deepEqual(plain(context.charts.temps.data.datasets[0].backgroundColor),
+    ['52/95/110', '70/65/80', '99/100/110'],
+    'own limit by display name or sensor name; critical stays above it; junk is ignored');
+}
+
 function testTempsWithoutSensors() {
   const context = liveContext(['temps-value', 'temps-card', 'fans-card', 'power-card']);
   context.charts = { temps: makeChart(), fans: makeChart() };
@@ -1388,7 +1416,7 @@ function testServicesCard() {
 }
 
 (async () => {
-  for (const test of [testHistoryGapSkip, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
+  for (const test of [testHistoryGapSkip, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testCapturePendingAndHiddenTab, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
     testVersionFooter]) {
