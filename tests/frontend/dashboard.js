@@ -1350,15 +1350,20 @@ async function testThemes() {
 
 function testHistoryGapSkip() {
   const context = vm.createContext({});
-  evaluate(context, between(app, 'function historyGapSkip', 'async function createHistoryCard'));
-  const seg = (skip, ms) => skip({ p0: { parsed: { x: 0 } }, p1: { parsed: { x: ms } } });
-  const hour = context.historyGapSkip(undefined);
-  assert.equal(seg(hour, 3600e3), undefined, 'exactly the default hour is still joined');
-  assert.equal(seg(hour, 3600e3 + 1), 'transparent', 'longer than an hour is left empty');
-  assert.equal(seg(context.historyGapSkip(120), 600e3), 'transparent', 'the limit comes from config');
-  assert.equal(seg(context.historyGapSkip('7200'), 3600e3 + 1), undefined);
-  assert.equal(context.historyGapSkip(0), null, '0 turns it off');
-  assert.equal(context.historyGapSkip('junk'), null);
+  evaluate(context, between(app, 'function historyGapMs', 'async function createHistoryCard'));
+  assert.equal(context.historyGapMs(undefined), 3600e3, 'the default is an hour');
+  assert.equal(context.historyGapMs(120), 120e3, 'the limit comes from config');
+  assert.equal(context.historyGapMs('7200'), 7200e3);
+  assert.equal(context.historyGapMs(0), Infinity, '0 turns it off');
+  assert.equal(context.historyGapMs(-5), Infinity);
+  assert.equal(context.historyGapMs('junk'), Infinity);
+  // Markers past HISTORY_MARKER_MAX: only a point with no line to either side.
+  const at = min => new Date(min * 60e3);
+  const times = [0, 10, 20, 200, 400, 410, 420].map(at), values = [1, 1, 1, 1, 1, null, 1];
+  const alone = gap => plain(times.map((_, i) => context.historyPointAlone(values, times, i, gap)));
+  assert.deepEqual(alone(3600e3), [false, false, false, true, true, false, true],
+    'a record between two outages, one between an outage and a null, and the last after a null');
+  assert.deepEqual(alone(Infinity), [false, false, false, false, false, false, true], 'gap rule off: only nulls count');
 }
 
 // The Services card and the outage grid, from the real render functions.
@@ -1400,6 +1405,13 @@ function testServicesCard() {
 
   context.renderServices({ targets: [target('pages', null)] });
   assert.equal(elements.get('services-value').textContent, '--', 'nothing checked yet is not "all up"');
+
+  // A failed fetch after a round with a target down: nothing of that round stays.
+  context.renderServices({ targets: [target('pages', true), target('immich', false)] });
+  assert.deepEqual([elements.get('services-value').textContent, flags.critical], ['1 down', true]);
+  context.resetServicesHeader();
+  assert.equal(elements.get('services-value').textContent, '--');
+  assert.equal(elements.get('services-value').className, 'value');
   assert.equal(flags.critical, false);
 
   // 1439 of 1440 must never round up to 100%.

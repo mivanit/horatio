@@ -727,6 +727,27 @@ do
     check(count_records(path) == 1, "an interval under five minutes records on an ordinary request, on time")
 end
 
+-- 22c. record_interval from a hand-edited config: a numeric string is read as
+-- its number; anything else that is not a number means the default.
+do
+    local h = assert(loadfile(script_dir .. "/history.lua"))()
+    check(pcall(h.init, {history = {max_file_mb = "abc"}}, metrics_stub(), base .. "/mb", base .. "/mb")
+            and h.max_file_bytes == 16 * 1048576, "a non-numeric max_file_mb means the default")
+    h.init({history = {max_file_mb = "8"}}, metrics_stub(), base .. "/mb", base .. "/mb")
+    check(h.max_file_bytes == 8 * 1048576, "a quoted max_file_mb is read as its number")
+    for i, case in ipairs({{"600", 600}, {"30", 30}, {"abc", 600}, {true, 600}}) do
+        local dir, m = base .. "/interval-" .. i, metrics_stub()
+        local h = assert(loadfile(script_dir .. "/history.lua"))()
+        h.init({history = {record_interval = case[1]}}, m, dir, dir)
+        write(dir .. "/dashboard-last-record", tostring(os.time() - 5) .. "\n")
+        local ok, err = pcall(h.maybe_record)
+        check(ok and h.get_settings().record_interval == case[2]
+                and count_records(dir .. "/logs/history.jsonl") == 0,
+            "record_interval " .. type(case[1]) .. " " .. tostring(case[1]) .. " is used as " .. case[2],
+            ok and ("got " .. tostring(h.get_settings().record_interval)) or tostring(err))
+    end
+end
+
 -- 23. Rotation never deletes an archive, its own or older ones, nor other files.
 do
     local h, _, path, dir = fixture("keep-archives")

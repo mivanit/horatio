@@ -11,6 +11,7 @@ import io
 import os
 import subprocess
 import tarfile
+import zlib
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,29 @@ class Router:
                 info.size = len(data)
                 info.mode = 0o755
                 tar.addfile(info, io.BytesIO(data))
+
+    def cut_release(self: Router, version: str) -> None:
+        """A download of v<version> that stopped partway: the gzip stream ends
+        after VERSION and the installer, before the archive's last file, at a
+        point where the unpacked part is still a well-formed tar."""
+        raw: io.BytesIO = io.BytesIO()
+        with tarfile.open(fileobj=raw, mode="w") as tar:
+            for path, text in (
+                ("VERSION", version + "\n"),
+                ("openwrt/install.sh", STUB),
+                ("static/app.js", "// the part that never arrived\n"),
+            ):
+                data: bytes = text.encode()
+                info: tarfile.TarInfo = tarfile.TarInfo(f"horatio-{version}/{path}")
+                info.size = len(data)
+                info.mode = 0o755
+                tar.addfile(info, io.BytesIO(data))
+        with tarfile.open(fileobj=io.BytesIO(raw.getvalue())) as tar:
+            keep: int = tar.getmembers()[2].offset
+        packer = zlib.compressobj(wbits=31)
+        (self.tmp / "release.tar.gz").write_bytes(
+            packer.compress(raw.getvalue()[:keep]) + packer.flush(zlib.Z_FULL_FLUSH)
+        )
 
     def update(
         self: Router, *args: str, main: str = "0.2.0", **env: str
@@ -137,3 +161,35 @@ def test_failures_change_nothing(router: Router, case: str) -> None:
     result: subprocess.CompletedProcess[str] = router.update(**env)
     assert result.returncode == 1, result.stdout + result.stderr
     assert router.unchanged()
+
+
+def test_naming_the_current_version_reinstalls_it(router: Router) -> None:
+    # The way back after a copy that failed partway: VERSION still says 0.1.0.
+    router.release("0.1.0")
+    result: subprocess.CompletedProcess[str] = router.update("v0.1.0")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Already at" not in result.stdout
+    assert router.downloads() == [
+        "https://codeload.github.com/mivanit/horatio/tar.gz/refs/tags/v0.1.0"
+    ]
+    assert (router.box / "ran").exists(), "the release's installer ran"
+    assert (router.box / "VERSION").read_text() == "0.1.0\n"
+    assert (router.box / "www/config.json").read_text() == '{"title": "mine"}\n'
+    assert not list(router.box.glob(".update.*"))
+
+
+def test_cut_off_download_changes_nothing(router: Router) -> None:
+    router.cut_release("0.2.0")
+    result: subprocess.CompletedProcess[str] = router.update()
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "incomplete" in result.stdout
+    assert router.unchanged()
+
+
+def test_leftover_download_of_a_killed_update_is_removed(router: Router) -> None:
+    (router.box / ".update.dEaD01").mkdir()
+    (router.box / ".update.dEaD01/r.tgz").write_text("partial")
+    router.release("0.2.0")
+    result: subprocess.CompletedProcess[str] = router.update()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not list(router.box.glob(".update.*"))

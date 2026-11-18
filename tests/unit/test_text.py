@@ -142,3 +142,31 @@ def test_a_sensor_with_its_own_limit_is_judged_against_it() -> None:
     with patch.dict(server.TEMP_THRESHOLDS, {"loc1": 95}):
         assert server._temp_limit("loc1", 65) == 95, "the sensor's own name works too"
     assert server._worst_temp({}, 65) is None
+
+
+def test_gpu_row_temperature_uses_the_gpus_own_limit() -> None:
+    from unittest.mock import patch
+
+    import server
+
+    record: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "gpus": [{"index": 0, "util_percent": 10.0}],
+        "temps": {"GPU 0": 70.0},
+    }
+
+    def gpu_row() -> str:
+        out: str = server.render_text(
+            [record], view="latest", color=True, thresholds={"temp_celsius": 60}
+        )
+        return next(line for line in out.splitlines() if "GPU 0" in line)
+
+    hot: str = server._paint("70°C", "error", True)
+    assert hot in gpu_row(), "over the global limit"
+    with patch.dict(server.TEMP_THRESHOLDS, {"GPU 0": 95}):
+        assert server._paint("70°C", "ok", True) in gpu_row(), "under its own limit"
+    with (
+        patch.dict(server.TEMP_LABELS, {"GPU 0": "P40"}),
+        patch.dict(server.TEMP_THRESHOLDS, {"P40": 75}),
+    ):
+        assert server._paint("70°C", "temp_mid", True) in gpu_row()

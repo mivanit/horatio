@@ -6,7 +6,9 @@ from __future__ import annotations
 import gzip
 import hashlib
 import os
+import resource
 import shutil
+import signal
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -17,7 +19,7 @@ from tests.support import ROOT
 
 SCRIPT: Path = ROOT / "scripts" / "history-merge.sh"
 Run = Callable[..., subprocess.CompletedProcess[str]]
-APPLETS: tuple[str, ...] = ("awk", "sort", "gzip", "cat", "mv", "rm", "touch")
+APPLETS: tuple[str, ...] = ("awk", "sort", "cut", "gzip", "cat", "mv", "rm", "touch")
 
 
 def router(ts: str, v: int = 1) -> str:
@@ -50,10 +52,21 @@ def run(request: pytest.FixtureRequest, tmp_path: Path) -> Run:
             pytest.skip("dash not installed")
         shell = ["dash"]
 
-    def go(*args: str, path: str | None = None) -> subprocess.CompletedProcess[str]:
+    def go(
+        *args: str, path: str | None = None, max_file_bytes: int | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        def cap() -> None:
+            # A write past the limit fails with EFBIG, as one to a full disk does.
+            assert max_file_bytes is not None
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            resource.setrlimit(
+                resource.RLIMIT_FSIZE, (max_bytes := max_file_bytes, max_bytes)
+            )
+
         return subprocess.run(
             [*shell, str(SCRIPT), *args],
             env={**env, "PATH": path} if path else env,
+            preexec_fn=cap if max_file_bytes else None,
             capture_output=True,
             text=True,
             timeout=60,
@@ -165,3 +178,21 @@ def test_failed_sort_writes_nothing(
     assert result.returncode == 1 and "sort failed" in result.stderr
     assert not out.exists()
     assert [p.name for p in tmp_path.iterdir() if p.name.startswith("out")] == []
+
+
+def test_failed_write_writes_nothing(run: Run, tmp_path: Path) -> None:
+    # BusyBox awk exits 0 when its output cannot be written: the last stage must
+    # be a tool that does not, or a cut-short merge is reported as a success.
+    src: Path = tmp_path / "a.jsonl"
+    src.write_text(
+        "".join(
+            router(f"2026-01-01T{h:02}:{m:02}:00") for h in range(24) for m in range(60)
+        )
+    )
+    out: Path = tmp_path / "out.jsonl"
+    result: subprocess.CompletedProcess[str] = run(
+        "-o", str(out), str(src), max_file_bytes=16384
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "write failed" in result.stderr
+    assert not out.exists()

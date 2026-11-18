@@ -155,7 +155,8 @@ function barTickLabel(value) {
 const CHART_X_AXIS_BAR = {
   display: true,
   ticks: { ...CHART_TICK, autoSkip: false, maxRotation: 90, minRotation: 90, callback: barTickLabel },
-  grid: { display: false },
+  // drawTicks off: the 8 px Chart.js keeps for tick marks goes to the labels.
+  grid: { display: false, drawTicks: false },
   border: { display: false }
 };
 

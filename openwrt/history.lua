@@ -52,8 +52,9 @@ function M.init(cfg, metrics_module, dashboard_dir, state_dir)
         RECORD_LOCK = state_dir .. "/dashboard-history.lock"
     end
     local hist_cfg = config.history or {}
-    RECORD_INTERVAL = hist_cfg.record_interval or 600
-    M.max_file_bytes = (hist_cfg.max_file_mb or 16) * 1048576
+    -- tonumber: a quoted number works, anything else falls back to the default.
+    RECORD_INTERVAL = tonumber(hist_cfg.record_interval) or 600
+    M.max_file_bytes = (tonumber(hist_cfg.max_file_mb) or 16) * 1048576
     if dashboard_dir then
         local logs_dir = dashboard_dir .. "/logs"
         os.execute("mkdir -p " .. shell_quote(logs_dir))

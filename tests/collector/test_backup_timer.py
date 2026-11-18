@@ -18,7 +18,10 @@ CAPTURE: str = SOURCE[START : SOURCE.index("\nfi\n", START) + len("\nfi\n")]
 
 
 def capture(
-    reply: str, timer: str | None = "system-backup.timer", load: str = "loaded"
+    reply: str,
+    timer: str | None = "system-backup.timer",
+    load: str = "loaded",
+    load_exit: int = 0,
 ) -> tuple[str, str, list[str]]:
     """Return (backup-timer.txt, backup-timer.err, systemctl argv) for one run
     where `systemctl show` prints `reply`."""
@@ -31,7 +34,9 @@ def capture(
         systemctl: Path = fake_bin / "systemctl"
         systemctl.write_text(
             f'#!/bin/bash\necho "$@" > "{stage}/argv"\n'
-            'case "$*" in *LoadState*) printf "%s\\n" "$FAKE_LOAD" ;; '
+            'case "$*" in *LoadState*) [ "$FAKE_LOAD_EXIT" = 0 ] '
+            '|| { echo "Failed to connect to bus" >&2; exit "$FAKE_LOAD_EXIT"; }; '
+            'printf "%s\\n" "$FAKE_LOAD" ;; '
             '*) printf "%s\\n" "$FAKE_REPLY" ;; esac\n'
         )
         systemctl.chmod(0o755)
@@ -41,6 +46,7 @@ def capture(
             HEALTH_CONFIG=str(stage / "config.json"),
             FAKE_REPLY=reply,
             FAKE_LOAD=load,
+            FAKE_LOAD_EXIT=str(load_exit),
             TZ="UTC",
         )
         subprocess.run(
@@ -89,6 +95,14 @@ def test_a_timer_that_does_not_exist_is_an_error() -> None:
     assert capture("", load="not-found")[:2] == (
         "",
         "no such timer: system-backup.timer",
+    )
+
+
+def test_a_failed_load_state_call_is_an_error() -> None:
+    # Before: stderr discarded and the failure read as "not fired since boot".
+    assert capture("", load_exit=1)[:2] == (
+        "",
+        "Failed to connect to bus\nexit 1 (LoadState)",
     )
 
 

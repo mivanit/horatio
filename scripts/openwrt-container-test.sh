@@ -76,8 +76,11 @@ expect /api/history '"timestamp"'
 
 echo "== Update to the newest release"
 # main's VERSION is the newest release (it changes only in `make release`).
-latest="$(curl -fsS "https://raw.githubusercontent.com/$REPO/main/VERSION" 2> /dev/null | tr -d '[:space:]')" || latest=""
-if [ -z "$latest" ] || [ "$latest" = 0.0.0 ]; then
+latest="$(curl -fsS "https://raw.githubusercontent.com/$REPO/main/VERSION")" \
+    || fail "could not read main's VERSION from GitHub"
+latest="$(printf '%s' "$latest" | tr -d '[:space:]')"
+[ -n "$latest" ] || fail "main's VERSION on GitHub is empty"
+if [ "$latest" = 0.0.0 ]; then
     echo "   skipped: $REPO has no release yet"
     exit 0
 fi

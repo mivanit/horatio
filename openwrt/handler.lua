@@ -27,7 +27,12 @@ local function load_config()
     if not f then return {} end
     local content = f:read("*a")
     f:close()
-    return jsonc.parse(content) or {}
+    local parsed, err = jsonc.parse(content)
+    if type(parsed) ~= "table" then
+        io.stderr:write("[dashboard] www/config.json is not valid JSON (" .. tostring(err) .. "); using defaults\n")
+        return {}
+    end
+    return parsed
 end
 
 local config = load_config()

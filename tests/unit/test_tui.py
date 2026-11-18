@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sys
+
+import pytest
+
 
 def test_tui_unit() -> None:
     """tui.py: terminal detection, escape-safe clipping, URL building; server colour depths."""
@@ -50,3 +54,13 @@ def test_tui_unit() -> None:
     assert fit.count("\n") == 10 and "41 more lines" in fit, (
         f"height fit trims and says how much: {repr(fit[-40:])}"
     )
+
+
+def test_a_url_without_a_scheme_gets_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tui
+
+    seen: list[str] = []
+    monkeypatch.setattr(tui, "fetch", lambda url: seen.append(url) or "")
+    monkeypatch.setattr(sys, "argv", ["tui.py", "myhost:8080", "--once"])
+    assert tui.main() == 0
+    assert seen[0].startswith("http://myhost:8080/text?"), seen

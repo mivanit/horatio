@@ -274,6 +274,8 @@ def main() -> int:
     parser.add_argument("--once", action="store_true", help="print one frame and exit")
     args: Arguments = parser.parse_args(namespace=Arguments())
     base_url: str = args.url or default_url()
+    if "://" not in base_url:
+        base_url = "http://" + base_url
 
     try:
         locale.setlocale(locale.LC_ALL, "")

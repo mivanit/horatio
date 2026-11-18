@@ -12,7 +12,7 @@
 # that merely share a timestamp are all kept. Lines without a timestamp
 # (e.g. a torn last line) are kept too, at the start, where readers skip them.
 #
-# Plain POSIX sh + awk + sort + gzip, so it also runs on a router's BusyBox. sort
+# Plain POSIX sh + awk + sort + cut + gzip, so it also runs on a router's BusyBox. sort
 # holds the data in memory or /tmp (RAM on OpenWrt): merge large histories on a
 # Linux box. To use the result, stop the dashboard, keep the old history.jsonl,
 # and put OUTPUT in its place.
@@ -83,7 +83,7 @@ done | { awk -v countfile="$tmp.count" '
         print ts "\t" $0
     }' || echo "awk failed" >> "$failed"; } \
     | { LC_ALL=C sort -u || echo "sort failed (out of memory or /tmp space?)" >> "$failed"; } \
-    | { awk '{ print substr($0, index($0, "\t") + 1) }' > "$tmp" || echo "write failed" >> "$failed"; }
+    | { cut -f2- > "$tmp" || echo "write failed" >> "$failed"; }
 if [ -s "$failed" ]; then
     echo "error: nothing written:" >&2
     cat "$failed" >&2

@@ -100,13 +100,16 @@ update_checkout() {   # [vX.Y.Z]
     # Never --no-check-certificate: this download becomes code that runs as root.
     [ -n "$new" ] || new=$(wget -qO- "$RAW_URL/main/VERSION" | tr -d '[:space:]') || new=""
     [ -n "$new" ] || die "Could not reach GitHub (HTTPS needs libustream-mbedtls and ca-bundle)."
-    [ "$new" != "$old" ] || { info "Already at v$old."; exit 0; }
+    [ -n "$1" ] || [ "$new" != "$old" ] || { info "Already at v$old."; exit 0; }
     # Unpack beside the checkout: same filesystem, and not in RAM-backed /tmp.
+    # Left by an update that was killed (power loss): mktemp names only.
+    rm -rf "$DASHBOARD_DIR"/.update.??????
     work=$(mktemp -d "$DASHBOARD_DIR/.update.XXXXXX") || die "mktemp failed."
     trap 'rm -rf "$work"' EXIT
     trap 'exit 1' HUP INT TERM
     wget -qO "$work/r.tgz" "$TARBALL_URL/v$new" || die "No release v$new to download."
     # gzip | tar rather than tar -z, which some BusyBox builds lack.
+    gzip -t "$work/r.tgz" || die "Download of v$new is incomplete; nothing changed."
     gzip -dc "$work/r.tgz" | tar -xf - -C "$work" || die "Could not unpack v$new."
     # GitHub's archive of tag vX.Y.Z is one directory, horatio-X.Y.Z.
     [ "$(read_version "$work/horatio-$new")" = "$new" ] || die "Unexpected download; nothing changed."
@@ -117,7 +120,7 @@ update_checkout() {   # [vX.Y.Z]
     rm -rf "$work"
     trap - EXIT HUP INT TERM
     info "Updated v$old -> v$new. To go back: sh $0 --update v$old"
-    # --update would now say "Already at": the files are new, the install is not.
+    # A bare --update would now say "Already at": the files are new, the install is not.
     info "If the install below fails, rerun it with: sh $0"
     # The release's installer does the install, so it matches what it installs.
     exec sh "$SCRIPT_DIR/install.sh"
@@ -132,30 +135,27 @@ command -v uhttpd >/dev/null 2>&1 || { error "uhttpd not found."; exit 1; }
 
 # --- Dependencies ---
 info "Checking dependencies..."
+# Stock OpenWrt has no timeout; without it a hung df or tailscale call blocks
+# every request (metrics.lua). Optional: the dashboard runs without it.
+NO_TIMEOUT="Could not install coreutils-timeout; a hung command can stall the dashboard."
 if command -v apk >/dev/null 2>&1; then
     # uhttpd with its Lua plugin, both at the feed's version: a newer plugin in an
     # older uhttpd gets a garbled handler path and the dashboard never starts.
     apk add --upgrade uhttpd uhttpd-mod-lua luci-lib-jsonc luci-lib-nixio
+    command -v timeout >/dev/null 2>&1 || apk add coreutils-timeout || warn "$NO_TIMEOUT"
 elif command -v opkg >/dev/null 2>&1; then
     # opkg's package lists are in RAM and gone after a reboot: without them
     # every install fails with "Unknown package". Fetched once, only if needed.
     opkg_get() {
         opkg list-installed | grep -q "$1" && return 0
-        [ -n "${opkg_updated:-}" ] || { opkg update || true; opkg_updated=1; }
+        [ -n "${opkg_updated:-}" ] || { opkg update || warn "opkg update failed; installs below may fail with 'Unknown package'"; opkg_updated=1; }
         opkg install "$1"
     }
     opkg_get uhttpd-mod-lua
     opkg_get luci-lib-jsonc
     opkg_get luci-lib-nixio
+    command -v timeout >/dev/null 2>&1 || opkg_get coreutils-timeout || warn "$NO_TIMEOUT"
 fi
-# Stock OpenWrt has no timeout; without it a hung df or tailscale call blocks
-# every request (metrics.lua). Optional: the dashboard runs without it.
-command -v timeout >/dev/null 2>&1 \
-    || apk add coreutils-timeout 2>/dev/null \
-    || { command -v opkg >/dev/null 2>&1 \
-         && { [ -n "${opkg_updated:-}" ] || opkg update >/dev/null 2>&1 || true; } \
-         && opkg install coreutils-timeout 2>/dev/null; } \
-    || warn "Could not install coreutils-timeout; a hung command can stall the dashboard."
 
 # --- Chart.js ---
 # Keep version/hash in sync with the Linux installer. Verify the existing asset
@@ -192,6 +192,7 @@ LAN_IP="${LAN_IP%%/*}"
 if [ -z "$LAN_IP" ]; then
     # Fallback: first non-loopback IPv4
     LAN_IP=$(ip -4 addr show | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | cut -d/ -f1)
+    [ -z "$LAN_IP" ] || warn "network.lan.ipaddr is not set in uci; guessed $LAN_IP (first non-loopback address). If that is not the LAN: LAN_IP=192.168.1.1 sh $0"
 fi
 if [ -z "$LAN_IP" ]; then
     error "Could not detect LAN IP. Set it manually: LAN_IP=192.168.1.1 sh $0"

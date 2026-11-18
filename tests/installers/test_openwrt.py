@@ -285,6 +285,7 @@ class TestOpenWrtInstaller:
             event["args"] for event in self.events("uci")
         ]
         assert len(self.events("ip")) == 1
+        assert "guessed 192.168.2.1 " in result.stdout
 
     def test_only_owned_cron_entries_are_replaced_or_removed(
         self: TestOpenWrtInstaller,

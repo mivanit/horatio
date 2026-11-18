@@ -835,8 +835,9 @@ ServiceRound: TypeAlias = tuple[float, dict[str, bool]]
 _services_rounds: deque[ServiceRound] = deque()
 # Target name -> its newest result ({ok, status, ms?, error?}) plus "checked".
 _services_latest: dict[str, dict[str, Any]] = {}
-# When the checker started (epoch), None while it is not running: with no round
-# on record yet, staleness counts from here.
+# When the checker started (epoch), None until it first runs: with no round on
+# record yet, staleness counts from here. Never reset, so a checker that has
+# died reads as stale.
 _services_started: float | None = None
 
 
@@ -3562,7 +3563,9 @@ def services_snapshot(now: float) -> dict[str, Any]:
     # must not take the last "up" for the present. The clock runs from the
     # newest round or the checker's start, whichever is later: a first round
     # that never ends is not "pending" forever, and a restart after downtime is
-    # not stale on account of the rounds read back from before it.
+    # not stale on account of the rounds read back from before it. Rounds are
+    # stamped at their start, and one with a hanging target lasts two timeouts
+    # (the retry): hence four timeouts of allowance, not two.
     marks: list[float] = [
         t
         for t in (
@@ -3572,7 +3575,7 @@ def services_snapshot(now: float) -> dict[str, Any]:
         if t is not None
     ]
     stale: bool = bool(marks) and (
-        now - max(marks) > 3 * SERVICES_CHECK_INTERVAL + 2 * SERVICES_TIMEOUT
+        now - max(marks) > 3 * SERVICES_CHECK_INTERVAL + 4 * SERVICES_TIMEOUT
     )
     return {
         "interval": SERVICES_CHECK_INTERVAL,
@@ -5246,7 +5249,11 @@ def _render_latest(
             ""
             if t is None
             else _paint(
-                f"{_fmt(t, '.0f')}{deg}", _temp_key(t, th.get("temp_celsius")), color
+                f"{_fmt(t, '.0f')}{deg}",
+                _temp_key(
+                    t, _temp_limit(f"GPU {idx}", _num(th.get("temp_celsius")) or 60.0)
+                ),
+                color,
             )
         )
         row(

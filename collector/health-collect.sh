@@ -105,7 +105,8 @@ if [ -n "$BACKUP_TIMER" ]; then
     else
         # `show` on a unit that does not exist also prints nothing, exit 0. A
         # mistyped name must be an alarm at once, not "has not fired since boot".
-        load=$(timeout 60 systemctl show "$BACKUP_TIMER" --property LoadState --value 2>/dev/null) || load=
+        load=$(timeout 60 systemctl show "$BACKUP_TIMER" --property LoadState --value 2>> "$tmp/backup-timer.err") \
+            || echo "exit $? (LoadState)" >> "$tmp/backup-timer.err"
         [ "$load" != not-found ] || echo "no such timer: $BACKUP_TIMER" >> "$tmp/backup-timer.err"
     fi
     echo "$last" > "$tmp/backup-timer.txt"

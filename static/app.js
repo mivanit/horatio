@@ -713,6 +713,15 @@ function renderServices(data) {
   updateCardWarning('services', stale ? 1 : 0, 0);
 }
 
+// A failed fetch resets what the last good answer may have set: the "all up"
+// header and the red border of a target that was down.
+function resetServicesHeader() {
+  updateCardCritical('services', false);
+  const valueEl = document.getElementById('services-value');
+  valueEl.textContent = '--';
+  valueEl.className = 'value';
+}
+
 // One uptime cell from {up, checks}: text, colour class and a tooltip with the
 // counts. Never shows 100% unless every check passed.
 function uptimeText(u) {
@@ -1557,6 +1566,7 @@ async function fetchSlowData() {
     guard('services', () => renderServices(services.data));
   } else if (services.errorType !== 'unavailable') {
     setHtml(document.getElementById('services-content'), '<div class="info-item text-error">Error loading services</div>');
+    resetServicesHeader();
     updateCardNoData('services', false);
   }
 
@@ -2910,6 +2920,7 @@ async function refreshData(cacheKey, btn) {
         } else if (services.errorType !== 'unavailable') {
           setHtml(document.getElementById('services-content'),
             '<div class="info-item text-error">Error loading services</div>');
+          resetServicesHeader();
           updateCardNoData('services', false);
         }
         break;
@@ -3826,13 +3837,14 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
   // On a long range the point markers merge into the line and cost more to draw
   // than the line does. Past HISTORY_MARKER_MAX records only a point with no
   // neighbour keeps its marker: with nothing to join it to, the line alone
-  // would not show it.
+  // would not show it. A neighbour across a gap (below) is no neighbour: the
+  // segment to it is not drawn.
+  const gapMs = historyGapMs(dashboardConfig.history?.max_gap_seconds);
   if (records.length > HISTORY_MARKER_MAX) {
     for (const ds of datasets) {
       const radius = ds.pointRadius, values = ds.data;
       if (ds.type === 'bar' || typeof radius !== 'number' || !radius || !Array.isArray(values)) continue;
-      ds.pointRadius = point =>
-        values[point.dataIndex - 1] == null && values[point.dataIndex + 1] == null ? radius : 0;
+      ds.pointRadius = point => (historyPointAlone(values, labels, point.dataIndex, gapMs) ? radius : 0);
     }
   }
 
@@ -3893,22 +3905,27 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
   // No records for longer than the gap limit means nothing was measured (the
   // box or the recorder was off): leave the stretch empty instead of joining
   // its two ends. The points and their indexes are untouched.
-  const skipGap = historyGapSkip(dashboardConfig.history?.max_gap_seconds);
-  if (skipGap) {
-    datasets.forEach(ds => {
-      if (ds.type !== 'bar') ds.segment = { borderColor: skipGap, backgroundColor: skipGap };
-    });
-  }
+  const skipGap = ctx => (ctx.p1.parsed.x - ctx.p0.parsed.x > gapMs ? 'transparent' : undefined);
+  datasets.forEach(ds => {
+    if (ds.type !== 'bar') ds.segment = { borderColor: skipGap, backgroundColor: skipGap };
+  });
   return new Chart(ctx, { type: 'line', data: { labels, datasets }, options });
 }
 
-// Chart.js segment styling for history lines: transparent where two records are
-// more than maxGapSeconds apart (config history.max_gap_seconds, default one
-// hour; 0 turns it off and joins every record as before).
-function historyGapSkip(maxGapSeconds) {
+// The longest stretch between two history records that still counts as joined,
+// in ms (config history.max_gap_seconds, default one hour); 0 turns the rule
+// off: every record is joined as before (Infinity).
+function historyGapMs(maxGapSeconds) {
   const seconds = Number(maxGapSeconds ?? 3600);
-  if (!(seconds > 0)) return null;
-  return ctx => (ctx.p1.parsed.x - ctx.p0.parsed.x > seconds * 1000 ? 'transparent' : undefined);
+  return seconds > 0 ? seconds * 1000 : Infinity;
+}
+
+// Whether point i of a history line has no line to either side: each neighbour
+// is absent, null, or more than gapMs away. `times` are
+// the chart's labels (Dates).
+function historyPointAlone(values, times, i, gapMs) {
+  const missing = j => values[j] == null || Math.abs(times[j] - times[i]) > gapMs;
+  return missing(i - 1) && missing(i + 1);
 }
 
 // Create a history card for a metric

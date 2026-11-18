@@ -43,7 +43,7 @@ it survives re-installs. Keys:
 |---|---|
 | `sel_fault_patterns` | case-insensitive substrings of BMC event descriptions that count as a hardware fault (`SEL: N hardware events in 7d`). Routine chatter is excluded by not being listed |
 | `grown_defect_baseline` | `{serial: count}` for SAS drives; alarm when a drive exceeds its own number. An unlisted serial is watched from 0, so a replacement drive alarms as soon as it has defects: add it then |
-| `smart_timeout_s` | seconds each drive's `smartctl` may take in the 15-min run (default 60). Drives are read one at a time and the run has a 20-min limit: 180 + 240 + drives × this must stay under 1200 with room to spare, i.e. 12 drives at the default |
+| `smart_timeout_s` | seconds each drive's `smartctl` may take in the 15-min run (default 60). Drives are read one at a time and the run has a 20-min limit: 180 + 300 + drives × this must stay under 1200 with room to spare, i.e. 11 drives at the default |
 | `ipmi_timeout_s`, `gpu_timeout_s` | seconds each `ipmitool` / `nvidia-smi` call in the sensors run may take before it is killed and reported as an alarm (defaults 20 and 15). Three of each must fit inside `horatio-sensors.service`'s `TimeoutStartSec=2min`, or a hung BMC gets the run killed before its alarm is written |
 | `fan_rpm_alarm_above` | alarm when any fan exceeds this RPM; `null` = off |
 | `gpu_temp_alarm_margin_c` | alarm when a GPU's core or memory temperature is within this many °C of the driver's max operating temperature for it (including the relative GPU T.Limit reading on newer cards); absent = 3, `null` = off (the slowdown, ECC and retired-page GPU alarms stay on) |
@@ -52,7 +52,7 @@ it survives re-installs. Keys:
 A missing file uses built-in defaults (the shipped fault phrases, an empty defect baseline, no
 fan ceiling, a 3 °C GPU temperature margin, no backup timer); malformed JSON is a `collector: load_config crashed` alarm, and the parts that
 need the file crash too once they reach a value from it (SEL hardware faults at the first
-hardware event line, drives at the first SAS drive); everything else still reports.
+hardware event line, each SAS drive as its own error row); everything else still reports.
 
 ## The rules live here, nowhere else
 
