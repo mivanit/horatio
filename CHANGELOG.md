@@ -5,6 +5,8 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-18
+
 - OpenWrt `--update` (these apply to updates made after this release: a router updates
   with the script it already has): `--update vX.Y.Z` always downloads and reinstalls,
   the current version included, so an update that stopped partway can be repaired or
