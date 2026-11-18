@@ -264,6 +264,16 @@ def test_round_is_logged_and_reloaded(tmp_path: Path) -> None:
         assert server.services_snapshot(later)["stale"] is True, (
             "no round for several intervals: the checker has stopped"
         )
+        # A restart after downtime: the rounds read back are old, the checker
+        # is new. Not stale until the new checker itself falls behind.
+        with patch.object(server, "_services_started", later - 5):
+            assert server.services_snapshot(later)["stale"] is False
+            assert (
+                server.services_snapshot(
+                    later + 4 * server.SERVICES_CHECK_INTERVAL + 60
+                )["stale"]
+                is True
+            )
         # No round at all: stale counts from the checker's start, so a first
         # round that never finishes does not read as pending forever.
         with (

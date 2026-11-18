@@ -3559,14 +3559,20 @@ def services_snapshot(now: float) -> dict[str, Any]:
             }
         )
     # The checker died or hung: the newest results are old news, and a reader
-    # must not take the last "up" for the present. Before any round, the
-    # checker's start stands in, so a first round that never ends is not
-    # "pending" forever.
-    newest: float | None = (
-        _services_rounds[-1][0] if _services_rounds else _services_started
-    )
-    stale: bool = newest is not None and (
-        now - newest > 3 * SERVICES_CHECK_INTERVAL + 2 * SERVICES_TIMEOUT
+    # must not take the last "up" for the present. The clock runs from the
+    # newest round or the checker's start, whichever is later: a first round
+    # that never ends is not "pending" forever, and a restart after downtime is
+    # not stale on account of the rounds read back from before it.
+    marks: list[float] = [
+        t
+        for t in (
+            _services_rounds[-1][0] if _services_rounds else None,
+            _services_started,
+        )
+        if t is not None
+    ]
+    stale: bool = bool(marks) and (
+        now - max(marks) > 3 * SERVICES_CHECK_INTERVAL + 2 * SERVICES_TIMEOUT
     )
     return {
         "interval": SERVICES_CHECK_INTERVAL,
