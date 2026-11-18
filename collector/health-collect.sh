@@ -75,8 +75,10 @@ timeout 60  journalctl --priority err --since -24hours --quiet --no-pager --outp
 # Ask the TIMER, never `systemctl show system-backup.service`: a oneshot that is
 # not running is unloaded and `show` prints defaults for it. With
 # --timestamp=unix (systemd >= 247) LastTriggerUSec is "@<epoch>", or empty when
-# the timer never fired; the "@" is stripped here. No date(1) round trip: a
-# locale or format it could not parse would have read as "never fired".
+# the timer never fired. Some versions (seen on 255) ignore the flag for `show`
+# and print a date like "Tue 2026-11-17 03:10:05 UTC", so date(1) converts
+# either form to epoch seconds. A value it cannot parse is an error in the
+# sidecar (a collector alarm), never a silent "never fired".
 # The timer's name is the config's `backup_timer` (absent or null = this box has
 # no backup timer: no section, no alarm). Chosen here, once,
 # and handed to the python via backup-timer.name. A config that does not parse
@@ -95,7 +97,11 @@ echo "$BACKUP_TIMER" > "$tmp/backup-timer.name"
 if [ -n "$BACKUP_TIMER" ]; then
     last=$(timeout 60 systemctl show "$BACKUP_TIMER" --property LastTriggerUSec --value --timestamp=unix 2>> "$tmp/backup-timer.err") \
         || echo "exit $?" >> "$tmp/backup-timer.err"
-    echo "${last#@}" > "$tmp/backup-timer.txt"
+    if [ -n "$last" ]; then
+        last=$(date --date="$last" +%s 2>> "$tmp/backup-timer.err") \
+            || { echo "exit $?" >> "$tmp/backup-timer.err"; last=; }
+    fi
+    echo "$last" > "$tmp/backup-timer.txt"
 fi
 
 # smartctl's exit status is a BITMASK, so the python step decodes it:
