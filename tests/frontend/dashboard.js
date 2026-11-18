@@ -1331,6 +1331,7 @@ function testServicesCard() {
     escapeHtml: s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'),
     updateCardNoData(id, ok) { flags.data = ok; },
     updateCardCritical(id, bad) { flags.critical = bad; },
+    updateCardWarning(id, value, threshold) { flags.warning = value > threshold; },
   });
   evaluate(context, between(app, 'function renderServices', '// Shared by the Hardware health'));
   const target = (name, ok, extra = {}) => ({ name, url: `http://${name}/`, ok, status: ok ? 200 : null,
@@ -1339,7 +1340,7 @@ function testServicesCard() {
 
   context.renderServices({ targets: [target('pages', true), target('<immich>', true)] });
   assert.equal(elements.get('services-value').textContent, 'all up');
-  assert.deepEqual(flags, { data: true, critical: false });
+  assert.deepEqual(flags, { data: true, critical: false, warning: false });
   const html = elements.get('services-content').innerHTML;
   assert(html.includes('12 ms') && html.includes('>100%<') && html.includes('>99.93%<') && html.includes('>--<'));
   assert(html.includes('&lt;immich>') && !html.includes('<immich>'), 'names are escaped');
@@ -1348,6 +1349,13 @@ function testServicesCard() {
   assert.equal(elements.get('services-value').textContent, '1 down');
   assert.equal(flags.critical, true);
   assert(elements.get('services-content').innerHTML.includes('down (timeout)'));
+
+  // The checker stopped: the last results are not shown as the present.
+  context.renderServices({ stale: true, targets: [target('pages', true), target('immich', false)] });
+  assert.equal(elements.get('services-value').textContent, 'stale');
+  assert.deepEqual(flags, { data: true, critical: false, warning: true });
+  assert(elements.get('services-content').innerHTML.includes('stale, was up'));
+  assert(!elements.get('services-content').innerHTML.includes('svc-dot svc-up'));
 
   context.renderServices({ targets: [target('pages', null)] });
   assert.equal(elements.get('services-value').textContent, '--', 'nothing checked yet is not "all up"');

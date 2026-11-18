@@ -865,6 +865,8 @@ async def _check_http_target(
     # Any exception is this target's failure: one escaping here would fail the
     # whole round's gather and freeze every target at its last result.
     except Exception as e:
+        if not isinstance(e, (httpx.HTTPError, httpx.InvalidURL, OSError)):
+            logger.exception("Service check of %s failed unexpectedly", target.name)
         return {"ok": False, "status": None, "error": type(e).__name__}
     ms: int = round((time.monotonic() - started) * 1000)
     ok: bool = status == target.status if target.status is not None else status < 400
@@ -3551,7 +3553,18 @@ def services_snapshot(now: float) -> dict[str, Any]:
                 "uptime": uptime[target.name],
             }
         )
-    return {"interval": SERVICES_CHECK_INTERVAL, "now": now, "targets": targets}
+    # The checker died or hung: the newest results are old news, and a reader
+    # must not take the last "up" for the present.
+    stale: bool = bool(_services_rounds) and (
+        now - _services_rounds[-1][0]
+        > 3 * SERVICES_CHECK_INTERVAL + 2 * SERVICES_TIMEOUT
+    )
+    return {
+        "interval": SERVICES_CHECK_INTERVAL,
+        "now": now,
+        "stale": stale,
+        "targets": targets,
+    }
 
 
 @APP.get("/api/services")
@@ -5899,10 +5912,11 @@ async def text_view(
     # default.
     try:
         hours: float | None = float(hours_arg) if hours_arg else None
-        rows: int = int(rows_arg) if rows_arg else 24
-        width: int = int(width_arg) if width_arg else TEXT_WIDTH
-        height: int | None = int(height_arg) if height_arg else None
-    except ValueError:
+        # int(float()): width=80.0 was accepted before and still is.
+        rows: int = int(float(rows_arg)) if rows_arg else 24
+        width: int = int(float(width_arg)) if width_arg else TEXT_WIDTH
+        height: int | None = int(float(height_arg)) if height_arg else None
+    except (ValueError, OverflowError):
         return Response(content=TEXT_USAGE, status_code=400, media_type="text/plain")
     if (
         view not in ("latest", "history", "both")
@@ -5947,7 +5961,13 @@ async def text_view(
         style, color = "ascii", "off"
     # Read here, on the event loop: the render below runs in a thread, and the
     # checker appends to the rounds this iterates.
-    services_now: list[dict[str, Any]] = services_snapshot(time.time())["targets"]
+    services_now: list[dict[str, Any]] = []
+    if view != "history":
+        snapshot: dict[str, Any] = services_snapshot(time.time())
+        # Stale results draw as "?", not as the last UP or DOWN.
+        services_now = [
+            {**t, "ok": None} if snapshot["stale"] else t for t in snapshot["targets"]
+        ]
     depths: dict[str, ColorDepth] = {"on": "24", "256": "256", "16": "16", "off": False}
     depth: ColorDepth = depths.get(color, "24" if style == "unicode" else False)
 

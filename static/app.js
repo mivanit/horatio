@@ -653,7 +653,7 @@ function renderHardware(data) {
   const backup = [];
   if (data.backup) {
     const b = data.backup;
-    backup.push(hwRow('', b.age_hours != null ? `last run ${Math.round(b.age_hours)} h ago` : 'never run'));
+    backup.push(hwRow('', b.age_hours != null ? `last run ${Math.round(b.age_hours)} h ago` : 'no run on record'));
     backup.push(hwRow('hw-note', `check: systemctl list-timers ${b.timer}; journalctl --unit ${backupService(b.timer)} --since -2days`));
   }
 
@@ -686,12 +686,16 @@ function renderServices(data) {
   const down = targets.filter(t => t.ok === false).length;
   const pending = targets.filter(t => t.ok == null).length;
   const valueEl = document.getElementById('services-value');
-  valueEl.textContent = down ? `${down} down` : pending === targets.length ? '--' : 'all up';
-  valueEl.className = 'value ' + (down ? 'text-error' : pending === targets.length ? '' : 'text-success');
+  // The server says the checker has stopped: the results below are the last
+  // ones it got, not the present.
+  const stale = data?.stale === true;
+  valueEl.textContent = stale ? 'stale' : down ? `${down} down` : pending === targets.length ? '--' : 'all up';
+  valueEl.className = 'value ' + (stale ? 'text-warning' : down ? 'text-error' : pending === targets.length ? '' : 'text-success');
 
   const rows = targets.map(t => {
-    const state = t.ok == null ? 'pending' : t.ok ? 'up' : `down (${t.error || 'error'})`;
-    const cls = t.ok == null ? 'svc-unknown' : t.ok ? 'svc-up' : 'svc-down';
+    const last = t.ok == null ? 'pending' : t.ok ? 'up' : `down (${t.error || 'error'})`;
+    const state = stale && t.ok != null ? `stale, was ${last}` : last;
+    const cls = stale || t.ok == null ? 'svc-unknown' : t.ok ? 'svc-up' : 'svc-down';
     const uptime = [1, 24, 168].map(h => {
       const u = uptimeText(t.uptime?.[h]);
       return `<span class="svc-num${u.cls ? ' ' + u.cls : ''}" title="${escapeHtml(u.title)}">${u.text}</span>`;
@@ -705,7 +709,8 @@ function renderServices(data) {
   setHtml(document.getElementById('services-content'),
     `<div class="info-item"><div class="svc-table">${head}${rows}</div></div>`);
   updateCardNoData('services', true);
-  updateCardCritical('services', down > 0);
+  updateCardCritical('services', !stale && down > 0);
+  updateCardWarning('services', stale ? 1 : 0, 0);
 }
 
 // One uptime cell from {up, checks}: text, colour class and a tooltip with the

@@ -5,6 +5,13 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- Service checks: when no round has finished for several intervals, `/api/services`
+  says `stale: true` and the card and `/text` show the results as stale, not as the
+  last "up". An unexpected error in a check is logged with its traceback.
+- Hardware collector: a `backup_timer` that names no existing unit is an alarm at once
+  (`collector: backup-timer: no such timer`).
+- Dashboard: a failed GPU or ping request shows its card again when the card was hidden,
+  so the header never counts a failure you cannot see.
 - Dashboard: a slow or failed public-IP lookup no longer holds back the drive, mail,
   hardware, fan and power cards or the process captures.
 - Dashboard: the GPU cards hide on a box with no GPU, and turn red with a gap in the

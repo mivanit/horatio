@@ -151,7 +151,10 @@ fi
 # Stock OpenWrt has no timeout; without it a hung df or tailscale call blocks
 # every request (metrics.lua). Optional: the dashboard runs without it.
 command -v timeout >/dev/null 2>&1 \
-    || apk add coreutils-timeout 2>/dev/null || opkg install coreutils-timeout 2>/dev/null \
+    || apk add coreutils-timeout 2>/dev/null \
+    || { command -v opkg >/dev/null 2>&1 \
+         && { [ -n "${opkg_updated:-}" ] || opkg update >/dev/null 2>&1 || true; } \
+         && opkg install coreutils-timeout 2>/dev/null; } \
     || warn "Could not install coreutils-timeout; a hung command can stall the dashboard."
 
 # --- Chart.js ---

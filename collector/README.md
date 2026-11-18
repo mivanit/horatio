@@ -47,7 +47,7 @@ it survives re-installs. Keys:
 | `ipmi_timeout_s`, `gpu_timeout_s` | seconds each `ipmitool` / `nvidia-smi` call in the sensors run may take before it is killed and reported as an alarm (defaults 20 and 15). Three of each must fit inside `horatio-sensors.service`'s `TimeoutStartSec=2min`, or a hung BMC gets the run killed before its alarm is written |
 | `fan_rpm_alarm_above` | alarm when any fan exceeds this RPM; `null` = off |
 | `gpu_temp_alarm_margin_c` | alarm when a GPU's core or memory temperature is within this many °C of the driver's max operating temperature for it (including the relative GPU T.Limit reading on newer cards); absent = 3, `null` = off (the slowdown, ECC and retired-page GPU alarms stay on) |
-| `backup_timer` | systemd timer whose last trigger is checked (alarm after 30 h); `null` = none |
+| `backup_timer` | systemd timer whose last trigger is checked (alarm after 30 h); `null` = none. Give it `Persistent=true`: systemd forgets the last trigger of other timers at reboot, so until the timer next fires the snapshot only notes `has not fired since boot` (an alarm once the box has been up 30 h) |
 
 A missing file uses built-in defaults (the shipped fault phrases, an empty defect baseline, no
 fan ceiling, a 3 °C GPU temperature margin, no backup timer); malformed JSON is a `collector: load_config crashed` alarm, and the parts that
@@ -86,6 +86,7 @@ and the run still exits 1. Nothing is mailed for an alarm: only a failed
 | `GPU N: K uncorrected ECC errors since driver load` / `GPU N: retired pages pending` | `nvidia-smi -q -d ECC,PAGE_RETIREMENT`; pending pages retire at the next driver reload (reboot). Repeats mean the card is failing |
 | `<sensor>: status <not ok>` | `sudo ipmitool sdr type fan` / `type temperature`: the BMC's own threshold crossed |
 | `backup: <timer> has never fired` / `backup: last trigger Nh ago` / `unit failed: <backup service>` | `journalctl --unit <service>`; root's mail has the tail |
+| `collector: backup-timer: no such timer: <timer>` | `backup_timer` in the config names a unit systemd does not know: fix the name |
 | `unit failed: X` | `systemctl status X` |
 | `journal: N error-level messages` | `sudo journalctl --priority err --since -24hours`; `journal_errors.distinct` has the deduped texts. Known noise is filtered by `JOURNAL_IGNORE` in `health-collect.sh`; extend it |
 | `collector: N SEL lines with unrecognised date format` | ipmitool's date format changed (locale or version): fix `SEL_DATE` in `health-collect.sh` |

@@ -346,7 +346,9 @@ rotate_locked = function()
         checked(source:close())
         -- The archive and the new file reach the flash before the rename can:
         -- a power cut must not keep the rename and lose what it points at.
-        sh("sync")
+        -- Bounded where timeout exists: this runs under the record lock, and a
+        -- hung mount elsewhere on the router must not hold it forever.
+        sh("if command -v timeout >/dev/null 2>&1; then timeout 30 sync; else sync; fi")
         checked(os.rename(tmp, HISTORY_FILE))
         tmp_created = false
     end)

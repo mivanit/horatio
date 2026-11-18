@@ -258,6 +258,11 @@ def test_round_is_logged_and_reloaded(tmp_path: Path) -> None:
         assert snapshot["targets"][1]["error"] == "status 503"
         assert snapshot["targets"][1]["uptime"]["168"] == {"up": 0, "checks": 2}
         assert snapshot["targets"][1]["checked"] == lines[1]["timestamp"]
+        assert snapshot["stale"] is False
+        later: float = now + 4 * server.SERVICES_CHECK_INTERVAL + 60
+        assert server.services_snapshot(later)["stale"] is True, (
+            "no round for several intervals: the checker has stopped"
+        )
 
         # A line that is not a round is skipped, not fatal.
         with open(log, "a") as f:

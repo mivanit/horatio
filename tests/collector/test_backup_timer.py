@@ -18,7 +18,7 @@ CAPTURE: str = SOURCE[START : SOURCE.index("\nfi\n", START) + len("\nfi\n")]
 
 
 def capture(
-    reply: str, timer: str | None = "system-backup.timer"
+    reply: str, timer: str | None = "system-backup.timer", load: str = "loaded"
 ) -> tuple[str, str, list[str]]:
     """Return (backup-timer.txt, backup-timer.err, systemctl argv) for one run
     where `systemctl show` prints `reply`."""
@@ -30,7 +30,9 @@ def capture(
         fake_bin.mkdir()
         systemctl: Path = fake_bin / "systemctl"
         systemctl.write_text(
-            f'#!/bin/bash\necho "$@" > "{stage}/argv"\nprintf "%s\\n" "$FAKE_REPLY"\n'
+            f'#!/bin/bash\necho "$@" > "{stage}/argv"\n'
+            'case "$*" in *LoadState*) printf "%s\\n" "$FAKE_LOAD" ;; '
+            '*) printf "%s\\n" "$FAKE_REPLY" ;; esac\n'
         )
         systemctl.chmod(0o755)
         env: dict[str, str] = dict(
@@ -38,6 +40,7 @@ def capture(
             PATH=f"{fake_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
             HEALTH_CONFIG=str(stage / "config.json"),
             FAKE_REPLY=reply,
+            FAKE_LOAD=load,
             TZ="UTC",
         )
         subprocess.run(
@@ -79,6 +82,14 @@ def test_date_from_systemd_that_ignores_the_unix_flag_is_epoch_seconds() -> None
 
 def test_never_fired_stays_empty_without_an_error() -> None:
     assert capture("")[:2] == ("", "")
+
+
+def test_a_timer_that_does_not_exist_is_an_error() -> None:
+    # `systemctl show` on a missing unit prints an empty value and exits 0.
+    assert capture("", load="not-found")[:2] == (
+        "",
+        "no such timer: system-backup.timer",
+    )
 
 
 def test_unparsable_value_is_an_error_not_a_number() -> None:
