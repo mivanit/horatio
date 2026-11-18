@@ -5,6 +5,32 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- OpenWrt `--update` (these apply to updates made after this release: a router updates
+  with the script it already has): `--update vX.Y.Z` always downloads and reinstalls,
+  the current version included, so an update that stopped partway can be repaired or
+  undone; a cut-off download is refused before anything is unpacked; the temporary
+  folder of an update that was killed is removed by the next one. If the install step
+  of an update fails, run `sh openwrt/install.sh`.
+- OpenWrt installer: failures of `opkg update` and of the optional `coreutils-timeout`
+  install are shown instead of hidden; when `network.lan.ipaddr` is not set, the
+  installer names the address it guessed and how to override it.
+- OpenWrt: a `www/config.json` that is not valid JSON is reported in `logread` (the
+  backend runs on defaults); a quoted or non-numeric `history.record_interval` or
+  `history.max_file_mb` no longer breaks the backend.
+- `scripts/history-merge.sh`: a failed write (full disk) under BusyBox is an error, not
+  a shorter merge reported as a success.
+- Hardware collector: a failing `systemctl` call while checking that the backup timer
+  exists is an alarm (`collector: backup-timer: ...`), not "no run on record".
+- Service checks: with a timeout longer than the check interval, a healthy checker with
+  one hanging target no longer reads as stale for a few seconds each round.
+- `/text`: a GPU row's temperature is coloured by `temp_thresholds["GPU N"]` when set.
+- `tui.py`: an address without `http://` works.
+- History charts: on long ranges a single record between two outages is drawn as a
+  point instead of nothing.
+- Dashboard: a failed services request clears the "all up" header and the red border
+  of the last good answer. Sensor names of 7 characters fit under their bars on the
+  smallest card.
+
 - `temp_labels` in `config.json` gives temperature sensors display names on the card and
   in its history chart (records keep the original names). `temp_thresholds` gives single
   sensors their own limit, on the card and in `/text`'s Temperatures line.

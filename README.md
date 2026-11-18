@@ -143,7 +143,7 @@ curl http://<host>:8080/text?style=simple         # plain ASCII, for scripts and
 | `thresholds.*_percent`, `temp_celsius`, `network_mbps`, `disk_io_mbps`, `ping_ms` | orange-card thresholds |
 | `thresholds.power_max_watts`, `power_psu_watts`, `power_warn_fraction` | the power bar's right edge, its dashed PSU line, and the orange threshold as a fraction of the PSU |
 | `temp_labels` | display names for temperature sensors, e.g. `{"loc1": "I350 NIC"}`, used by the Temperatures card and its history chart. History records keep the sensor's own name, so renaming never splits a series |
-| `temp_thresholds` | a limit in °C for single sensors that run hot by design, e.g. `{"I350 NIC": 95}` (the sensor's own name or its `temp_labels` name). On the card that sensor turns orange at its limit instead of at its source's or `thresholds.temp_celsius`. In `/text` the Temperatures line's `max` is coloured by the sensor nearest its own limit; the history `MaxT` row still uses `thresholds.temp_celsius` |
+| `temp_thresholds` | a limit in °C for single sensors that run hot by design, e.g. `{"I350 NIC": 95}` (the sensor's own name as Glances reports it, or its `temp_labels` name; the card's short forms "Pkg", "NVMe" and "Cores" are not names). On the card that sensor turns orange at its limit instead of at its source's or `thresholds.temp_celsius`. In `/text` the Temperatures line's `max` is coloured by the sensor nearest its own limit, and a GPU row's temperature by `GPU N`'s limit; the history `MaxT` row still uses `thresholds.temp_celsius` |
 | `limits.network_mbps`, `limits.disk_io_mbps` | ceilings (MB/s) for each network interface and each drive, because Glances' rates occasionally come out absurd (default 1250, i.e. 10 Gbit/s, and 15000). A sample over the cap counts as the cap, so a spike is shortened, not removed. Totals are the sums of the capped interfaces / drives and are not capped themselves (bridges, veths and tunnels count the same traffic more than once). Applies to the live cards, history and `/text`, not to the raw `/api/4/*` endpoints or to history on the OpenWrt backend. A record that hit a cap lists it under `rate_capped` (`metric`, `interface` or `device` + `drive`, `samples` of `of`, `raw_max`, `cap`) and the server logs it; each record notes the caps it was taken under in `rate_caps`. The server reads the limits at startup (restart after changing them); the page reads them on load. Records without `rate_caps` (recorded before the caps) are clamped when read; records with it are served as recorded, so a changed cap applies to new records only |
 
 Runtime settings (poll interval, chart length, grid columns, card order, theme) live in the browser.
@@ -319,14 +319,17 @@ sh install.sh --uninstall
 downloads that release's tarball over HTTPS (needs `libustream-mbedtls` and `ca-bundle`, on
 stock images), checks its `VERSION`, and copies it over the checkout; `www/`, `config.json`
 and `logs/` are not in a release and stay. Files a release deleted stay behind in the
-checkout, harmless since uhttpd serves only `www/`. The installer stamps the asset URLs in `www/index.html` with the version
+checkout; a deleted theme stays listed, since `www/` is rebuilt from the checkout.
+`--update vX.Y.Z` always downloads and reinstalls that version, the current one included:
+that is the repair after an update that stopped partway. The installer stamps the asset URLs in `www/index.html` with the version
 (`?v=`), as uhttpd sends no cache headers and browsers would keep the old scripts.
 
 Requires `uhttpd-mod-lua`, `luci-lib-jsonc`, and `luci-lib-nixio` (installed by the
 script). uhttpd serves only `www/`, never the checkout: the installer copies
 `index.html`, `static/` and `themes/` there (and lists the themes in `www/themes/index.json`),
 so rerun it after updating or adding a theme. The config lives at
-`www/config.json` (served as `/config.json`, read by the API); `config.json` in the
+`www/config.json` (served as `/config.json`, read by the API; if it is not valid JSON the
+backend runs on defaults and says so in `logread`); `config.json` in the
 checkout root is a link to it. Edit `www/config.json`: tools that replace the file
 (`sed -i`, save-by-rename editors) turn the link into a copy nobody reads. If both
 copies exist, the next install run keeps the newer one, saves the other as
