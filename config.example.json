@@ -18,7 +18,8 @@
     "sample_count": 5,
     "processes_enabled": false,
     "process_count": 10,
-    "max_hours": 8760
+    "max_hours": 8760,
+    "max_gap_seconds": 3600
   },
   "limits": {
     "network_mbps": 1250,

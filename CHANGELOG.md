@@ -5,6 +5,8 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- History charts no longer draw a line across a stretch with no records longer than
+  `history.max_gap_seconds` (default one hour; `0` restores the old behaviour).
 - Service checks: when no round has finished for several intervals, `/api/services`
   says `stale: true` and the card and `/text` show the results as stale, not as the
   last "up". An unexpected error in a check is logged with its traceback.

@@ -1320,6 +1320,19 @@ async function testThemes() {
   assert.deepEqual(plain(s.picked.options.map(o => o.value)), ['default']);
 }
 
+function testHistoryGapSkip() {
+  const context = vm.createContext({});
+  evaluate(context, between(app, 'function historyGapSkip', 'async function createHistoryCard'));
+  const seg = (skip, ms) => skip({ p0: { parsed: { x: 0 } }, p1: { parsed: { x: ms } } });
+  const hour = context.historyGapSkip(undefined);
+  assert.equal(seg(hour, 3600e3), undefined, 'exactly the default hour is still joined');
+  assert.equal(seg(hour, 3600e3 + 1), 'transparent', 'longer than an hour is left empty');
+  assert.equal(seg(context.historyGapSkip(120), 600e3), 'transparent', 'the limit comes from config');
+  assert.equal(seg(context.historyGapSkip('7200'), 3600e3 + 1), undefined);
+  assert.equal(context.historyGapSkip(0), null, '0 turns it off');
+  assert.equal(context.historyGapSkip('junk'), null);
+}
+
 // The Services card and the outage grid, from the real render functions.
 function testServicesCard() {
   const elements = new Map(['services-value', 'services-content'].map(id =>
@@ -1375,7 +1388,7 @@ function testServicesCard() {
 }
 
 (async () => {
-  for (const test of [testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
+  for (const test of [testHistoryGapSkip, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testCapturePendingAndHiddenTab, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
     testVersionFooter]) {

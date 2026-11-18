@@ -3880,7 +3880,25 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
       (i) => new Date(records[i].timestamp).toLocaleString()
     );
   }
+  // No records for longer than the gap limit means nothing was measured (the
+  // box or the recorder was off): leave the stretch empty instead of joining
+  // its two ends. The points and their indexes are untouched.
+  const skipGap = historyGapSkip(dashboardConfig.history?.max_gap_seconds);
+  if (skipGap) {
+    datasets.forEach(ds => {
+      if (ds.type !== 'bar') ds.segment = { borderColor: skipGap, backgroundColor: skipGap };
+    });
+  }
   return new Chart(ctx, { type: 'line', data: { labels, datasets }, options });
+}
+
+// Chart.js segment styling for history lines: transparent where two records are
+// more than maxGapSeconds apart (config history.max_gap_seconds, default one
+// hour; 0 turns it off and joins every record as before).
+function historyGapSkip(maxGapSeconds) {
+  const seconds = Number(maxGapSeconds ?? 3600);
+  if (!(seconds > 0)) return null;
+  return ctx => (ctx.p1.parsed.x - ctx.p0.parsed.x > seconds * 1000 ? 'transparent' : undefined);
 }
 
 // Create a history card for a metric
