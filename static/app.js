@@ -1896,7 +1896,9 @@ async function fetchDataOnce() {
       charts.gpu.update();
       charts.gpuMem.update();
     } else {
-      // Don't plot anything on failure
+      // Don't plot anything on failure. A failure is shown, never counted on a
+      // hidden card ('unavailable' is the router, where the cards stay hidden).
+      if (gpu.errorType !== 'unavailable') showGpuCards(true);
       updateCardNoData('gpu', false);
       updateCardNoData('gpu-mem', false);
     }
@@ -2314,6 +2316,7 @@ async function fetchDataOnce() {
       updateCardNoData('ping', true);
       updateCardWarning('ping', worstMs, thresholds.ping_ms);
     } else {
+      if (pingCard) pingCard.style.display = '';   // a failure is shown, never counted on a hidden card
       updateCardNoData('ping', false);
     }
   });

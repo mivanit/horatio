@@ -70,7 +70,7 @@ systemctl start horatio-sensors.service \
 # the alarm in it, so the timers go on either way; the installer still exits 1.
 collect_failed=0
 systemctl start horatio-collect.service \
-    || { journalctl --unit horatio-collect.service --lines 30 --no-pager; collect_failed=1; }
+    || { journalctl --unit horatio-collect.service --lines 30 --no-pager || true; collect_failed=1; }
 systemctl enable --now horatio-sensors.timer
 systemctl enable --now horatio-collect.timer
 if [ "$collect_failed" = 1 ]; then
