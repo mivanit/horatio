@@ -5,6 +5,14 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- Hardware collector: a part of the 15-min run that crashes (a bug, or a value it cannot
+  read) is now a `collector: <part> crashed` alarm, and every other part still reports.
+  Before, one crash left the whole snapshot stale and hid every other alarm with it.
+  The run still exits 1, so root is still mailed.
+- Hardware collector: the backup timer's last trigger is read correctly on systemd
+  versions that ignore `--timestamp=unix` for `systemctl show` (seen on 255). That
+  date reached `int()` and crashed every run.
+
 ## [0.1.0] - 2026-11-15
 
 - `scripts/history-merge.sh`: merge the history of several boxes, or a box's archives,

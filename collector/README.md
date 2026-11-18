@@ -50,8 +50,8 @@ it survives re-installs. Keys:
 | `backup_timer` | systemd timer whose last trigger is checked (alarm after 30 h); `null` = none |
 
 A missing file uses built-in defaults (the shipped fault phrases, an empty defect baseline, no
-fan ceiling, a 3 °C GPU temperature margin, no backup timer); malformed JSON crashes the run on purpose, so the snapshot goes
-stale and that is loud.
+fan ceiling, a 3 °C GPU temperature margin, no backup timer); malformed JSON is a `collector: load_config crashed` alarm, and the parts that
+need the file (SEL hardware faults, drives) crash with it while the rest still report.
 
 ## The rules live here, nowhere else
 
@@ -62,7 +62,9 @@ is fresh; a stale or missing one shows as "sensors stale" (alarms unknown), neve
 `info` carries non-problems worth knowing (a drive in standby, a scrub in progress,
 no self-test on record). Any capture that failed or timed out is itself an alarm
 (`collector: …`), so a partial snapshot never reads as healthy; the 15-min run also alarms when
-the 60 s file is missing or older than 5 minutes. Nothing is mailed for an alarm: only a failed
+the 60 s file is missing or older than 5 minutes. A part of the 15-min run that crashes on a
+value it cannot handle is a `collector: <part> crashed: …` alarm; the other parts still report,
+and the run still exits 1. Nothing is mailed for an alarm: only a failed
 15-min run mails root (its unit's `ExecStopPost=`); the 60 s unit never mails.
 
 | alarm starts with | first move |
@@ -88,6 +90,7 @@ the 60 s file is missing or older than 5 minutes. Nothing is mailed for an alarm
 | `journal: N error-level messages` | `sudo journalctl --priority err --since -24hours`; `journal_errors.distinct` has the deduped texts. Known noise is filtered by `JOURNAL_IGNORE` in `health-collect.sh`; extend it |
 | `collector: N SEL lines with unrecognised date format` | ipmitool's date format changed (locale or version): fix `SEL_DATE` in `health-collect.sh` |
 | `collector: <cmd>: …` | that command failed inside a collector: run it by hand as root |
+| `collector: <part> crashed: …` | a bug or an input the 15-min run cannot read; that part's section is missing from the snapshot. Traceback: `journalctl --unit horatio-collect.service` |
 | `collector: sensors snapshot Ns old` / `no sensors snapshot` | `systemctl status horatio-sensors.timer horatio-sensors.service` |
 | `sensors stale` (dashboard) | the 60 s file is over 5 minutes old or unreadable, so the fan / GPU alarms are unknown: same as above |
 | `stale` (dashboard) | `systemctl status horatio-collect.timer`; `sudo systemctl start horatio-collect.service` |
@@ -101,7 +104,8 @@ query fields are retried without those counters; the other GPU readings and alar
 
 The python of each script runs standalone against a directory of hand-written capture files,
 with `HEALTH_SYSBLOCK` pointed at a fake sysfs tree. Every file the bash stage would have written
-must exist (the python crashes on a missing one, on purpose), so start from the `touch` line:
+must exist (a missing one crashes the part that reads it), so start from the `touch` line.
+`tests/collector/test_collect.py` does exactly this for every part:
 
 ```bash
 mkdir -p /tmp/stage /tmp/fake-sysblock
