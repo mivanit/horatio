@@ -149,7 +149,8 @@ const CHART_X_AXIS = {
 // name keeps its head and tail instead. The tooltip has the full name.
 function barTickLabel(value) {
   const label = String(this.getLabelForValue(value));
-  return label.length > 8 ? label.slice(0, 5) + '…' + label.slice(-2) : label;
+  // 7 characters fit the shortest card; 8 still lost the first one on bodel.
+  return label.length > 7 ? label.slice(0, 4) + '…' + label.slice(-2) : label;
 }
 const CHART_X_AXIS_BAR = {
   display: true,
