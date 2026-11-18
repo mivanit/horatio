@@ -90,7 +90,7 @@ and the run still exits 1. Nothing is mailed for an alarm: only a failed
 | `journal: N error-level messages` | `sudo journalctl --priority err --since -24hours`; `journal_errors.distinct` has the deduped texts. Known noise is filtered by `JOURNAL_IGNORE` in `health-collect.sh`; extend it |
 | `collector: N SEL lines with unrecognised date format` | ipmitool's date format changed (locale or version): fix `SEL_DATE` in `health-collect.sh` |
 | `collector: <cmd>: …` | that command failed inside a collector: run it by hand as root |
-| `collector: <part> crashed: …` | a bug or an input the 15-min run cannot read; that part's section is missing from the snapshot. Traceback: `journalctl --unit horatio-collect.service` |
+| `collector: <part> crashed: …` | a bug or an input the 15-min run cannot read; that part's section is missing from the snapshot (for `smart crashed: sdX`, only that drive: it shows as an error row and the other drives are still checked). Traceback: `journalctl --unit horatio-collect.service` |
 | `collector: sensors snapshot Ns old` / `no sensors snapshot` | `systemctl status horatio-sensors.timer horatio-sensors.service` |
 | `sensors stale` (dashboard) | the 60 s file is over 5 minutes old or unreadable, so the fan / GPU alarms are unknown: same as above |
 | `stale` (dashboard) | `systemctl status horatio-collect.timer`; `sudo systemctl start horatio-collect.service` |

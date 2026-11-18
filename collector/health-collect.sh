@@ -95,7 +95,9 @@ print(config.get("backup_timer") or "")
     || echo "exit $?" >> "$tmp/backup-timer.err"
 echo "$BACKUP_TIMER" > "$tmp/backup-timer.name"
 if [ -n "$BACKUP_TIMER" ]; then
-    last=$(timeout 60 systemctl show "$BACKUP_TIMER" --property LastTriggerUSec --value --timestamp=unix 2>> "$tmp/backup-timer.err") \
+    # TZ=UTC: the date form is then always "... UTC", never a zone abbreviation
+    # date(1) would have to guess at.
+    last=$(TZ=UTC timeout 60 systemctl show "$BACKUP_TIMER" --property LastTriggerUSec --value --timestamp=unix 2>> "$tmp/backup-timer.err") \
         || echo "exit $?" >> "$tmp/backup-timer.err"
     if [ -n "$last" ]; then
         last=$(date --date="$last" +%s 2>> "$tmp/backup-timer.err") \
@@ -334,14 +336,14 @@ part(edac)
 
 # ---- drives ------------------------------------------------------------------
 def smart():
-    drives = []
-    for path in sorted(glob.glob(os.path.join(tmp, "smart_*.rc"))):     # sdX and nvmeXnY
-        name = os.path.basename(path)[6:-3]      # smart_<name>.rc
+    drives = state["drives"] = []
+
+    def drive(name):
         rc = int(read(f"smart_{name}.rc"))
         if rc == 3:                              # standby: left asleep, nothing read
             drives.append({"device": name, "standby": True})
             info.append(f"{name}: standby")
-            continue
+            return
 
         try:
             with open(os.path.join(tmp, f"smart_{name}.json")) as f:
@@ -358,7 +360,7 @@ def smart():
                   or f"smartctl exit {rc}, no JSON"
             drives.append({"device": name, "error": why})
             alarms.append(f"{name}: unreadable ({why})")
-            continue
+            return
 
         serial = s.get("serial_number")
         entry = {
@@ -434,7 +436,19 @@ def smart():
                 alarms.append(f"{name}: {', '.join(bad)}")
 
         drives.append(entry)
-    state["drives"] = drives
+
+    # One drive at a time: a crash on one must not leave the drives after it
+    # unchecked, so it is that drive's alarm and error row and the loop goes on.
+    for path in sorted(glob.glob(os.path.join(tmp, "smart_*.rc"))):     # sdX and nvmeXnY
+        name = os.path.basename(path)[6:-3]      # smart_<name>.rc
+        try:
+            drive(name)
+        except Exception as e:
+            why = f"{type(e).__name__}: {e}"
+            crashed.append("smart")
+            alarms.append(f"collector: smart crashed: {name}: {why}")
+            drives.append({"device": name, "error": f"collector crashed ({why})"})
+            traceback.print_exc()
 part(smart)
 
 # ---- what each drive holds (lsblk, no privileges) ---------------------------

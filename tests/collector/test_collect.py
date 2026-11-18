@@ -326,5 +326,29 @@ def test_malformed_config_crashes_only_what_needs_it(tmp_path: Path) -> None:
         ["ECC", "1 uncorrectable errors since boot"],
         ["collector", "smart crashed"],
     ]
-    assert "drives" not in state
+    assert [(d["device"], "error" in d) for d in state["drives"]] == [("sda", True)]
     assert state["edac"]["ue_total"] == 1
+
+
+def test_a_drive_that_crashes_the_check_costs_only_itself(tmp_path: Path) -> None:
+    ok: dict[str, Any] = {"serial_number": "S", "smart_status": {"passed": True}}
+    state: dict[str, Any]
+    rc: int
+    state, rc, _ = collect(
+        tmp_path,
+        {
+            **smart(tmp_path, "sda", 0, ok),
+            **smart(tmp_path, "sdb", 0, {**ok, "scsi_grown_defect_list": "many"}),
+            **smart(tmp_path, "sdc", 0, {**ok, "smart_status": {"passed": False}}),
+        },
+    )
+    assert rc == 1
+    assert [(d["device"], "error" in d) for d in state["drives"]] == [
+        ("sda", False),
+        ("sdb", True),
+        ("sdc", False),
+    ]
+    assert [a.split(": ")[:3] for a in state["alarms"]] == [
+        ["collector", "smart crashed", "sdb"],
+        ["sdc", "SMART health FAILED"],
+    ]
