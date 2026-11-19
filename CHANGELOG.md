@@ -5,6 +5,8 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-18
+
 - History cards line up: every chart and the Services grid show the whole requested
   range on a plot of the same width, with the same time ticks, so one moment is at the
   same place on every card. A box with less history than the range shows it at the
