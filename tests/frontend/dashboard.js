@@ -1459,11 +1459,12 @@ function testServicesCard() {
   assert(grid.includes('>60.0%<'), 'the row total counts only buckets with checks');
   assert(grid.includes('margin-left:0.000%;width:100.000%'), 'no window given: the buckets fill the row');
   // The last hour up to the server's clock, as the history charts draw it; the
-  // buckets start 30 s before it and end 30 s after.
+  // buckets end on the next round minute, so they begin a minute into it.
   context.dashboardConfig.http_targets = [{ name: '<pages>', url: 'http://pages.test/<x>' }];
-  const hour = context.servicesGridHTML({ start: 570, bucket_sec: 60, count: 61, now: 4200, truncated: false,
-    targets: { '<pages>': Array(61).fill([1, 0]) } }, 1, 1000);
-  assert(hour.includes('margin-left:-0.833%;width:101.667%'));
+  const hour = context.servicesGridHTML({ start: 660, bucket_sec: 60, count: 60, now: 4200, truncated: false,
+    targets: { '<pages>': Array(60).fill([1, 0]) } }, 1, 1000);
+  assert(hour.includes('margin-left:1.667%;width:100.000%'));
+  assert(hour.includes('its one check passed') && !hour.includes('1 checks'));
   assert(hour.includes('<a class="svc-label" href="http://pages.test/&lt;x>"') &&
     hour.includes('title="http://pages.test/&lt;x>">&lt;pages></a>'), 'the name links to its address');
   assert(grid.includes('<span class="svc-label">pages</span>'), 'no address known: plain text');

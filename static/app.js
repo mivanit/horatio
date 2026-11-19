@@ -741,7 +741,8 @@ function uptimeText(u) {
 // The cells are laid out as the history charts' plots are: the last `hours` up to
 // the server's clock, starting HISTORY_AXIS_WIDTH in (where a chart has its y
 // axis, a row has its uptime) and `width` px wide, with the same time ticks.
-// The buckets' own span is a little longer and is cut to that window.
+// The buckets end on a round boundary just after the server's clock, so they
+// begin up to one bucket into that window: the oldest sliver of a row is empty.
 function servicesGridHTML(d, hours, width) {
   const names = Object.keys(d?.targets || {});
   if (!names.length) return '<div class="no-history-data"><p>No services configured</p></div>';
@@ -768,7 +769,8 @@ function servicesGridHTML(d, hours, width) {
       const from = d.start + i * d.bucket_sec;
       // "checks" are this one target's, over the bucket: say so, or 1 of 5
       // reads as one target of five.
-      const what = !total ? 'no checks' : failed ? `${failed} of its ${total} checks failed` : `all ${total} checks passed`;
+      const what = !total ? 'no checks' : total === 1 ? `its one check ${failed ? 'failed' : 'passed'}`
+        : failed ? `${failed} of its ${total} checks failed` : `all ${total} checks passed`;
       const cls = !total ? 'svc-cell-none' : failed ? 'svc-cell-down' : 'svc-cell-up';
       // A bucket with one failed check in many is still visibly red.
       const style = failed ? ` style="opacity:${(0.45 + 0.55 * failed / total).toFixed(2)}"` : '';
@@ -3906,12 +3908,13 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
           scale.ticks = xTicks.map(tick => ({ value: tick.value }));
         },
         afterFit: scale => { scale.paddingLeft = scale.paddingRight = 0; },
-        grid: CHART_GRID
+        // offset: the ping loss bars would also move the grid lines off the ticks.
+        grid: { ...CHART_GRID, offset: false }
       },
       y: {
         min: 0, stacked: metric === 'power' && mode === 'stack',
         ticks: { ...CHART_TICK, callback: axisNumber },
-        title: { display: !!displayUnit.trim(), text: displayUnit.trim(), color: CHART_TICK.color, font: { size: CHART_FONT_SIZE - 4 }, padding: 0 },
+        title: { display: !!displayUnit.trim(), text: displayUnit.trim(), color: CHART_TICK.color, font: { size: Math.max(10, CHART_FONT_SIZE - 4) }, padding: 0 },
         afterFit: scale => { scale.width = HISTORY_AXIS_WIDTH; },
         grid: CHART_GRID
       }

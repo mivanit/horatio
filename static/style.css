@@ -623,7 +623,7 @@ h1 {
   overflow: hidden;
 }
 
-/* The buckets; wider than the window by up to a bucket at each end, and cut by .svc-cells */
+/* The buckets: they begin up to one bucket into the window and end as far past it, cut by .svc-cells */
 .svc-track {
   display: flex;
   height: 100%;
