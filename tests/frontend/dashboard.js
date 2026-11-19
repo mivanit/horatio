@@ -1403,6 +1403,7 @@ function testServicesCard() {
     updateCardNoData(id, ok) { flags.data = ok; },
     updateCardCritical(id, bad) { flags.critical = bad; },
     updateCardWarning(id, value, threshold) { flags.warning = value > threshold; },
+    dashboardConfig: {},
   });
   evaluate(context, 'const CHART_FONT_SIZE = 16;' + HISTORY_AXES);
   evaluate(context, between(app, 'function renderServices', '// Shared by the Hardware health'));
@@ -1448,15 +1449,17 @@ function testServicesCard() {
     targets: { pages: [[5, 0], [1, 4], [0, 0]] } });
   assert.equal((grid.match(/svc-cell-up/g) || []).length, 1);
   assert.equal((grid.match(/svc-cell-none/g) || []).length, 1);
-  assert(grid.includes('opacity:0.89') && grid.includes('4 of 5 checks failed') && grid.includes('no checks'));
+  assert(grid.includes('opacity:0.89') && grid.includes('pages, ') && grid.includes('4 of its 5 checks failed') && grid.includes('no checks'));
   assert(grid.includes('>60.0%<'), 'the row total counts only buckets with checks');
   assert(grid.includes('margin-left:0.000%;width:100.000%'), 'no window given: the buckets fill the row');
   // The last hour up to the server's clock, as the history charts draw it; the
   // buckets start 30 s before it and end 30 s after.
+  context.dashboardConfig.http_targets = [{ name: '<pages>', url: 'http://pages.test/<x>' }];
   const hour = context.servicesGridHTML({ start: 570, bucket_sec: 60, count: 61, now: 4200, truncated: false,
     targets: { '<pages>': Array(61).fill([1, 0]) } }, 1, 1000);
   assert(hour.includes('margin-left:-0.833%;width:101.667%'));
-  assert(hour.includes('grid-template-columns:84px ') && hour.includes('class="svc-label">&lt;pages><'));
+  assert(hour.includes('title="http://pages.test/&lt;x>">&lt;pages><'), 'the name shows its address on hover');
+  assert(hour.includes('grid-template-columns:84px '));
   const ticks = hour.match(/<span style="left:[0-9.]+%">\d\d:\d\d<\/span>/g) || [];
   assert(ticks.length >= 5, 'the charts\' time ticks under the cells');
   assert(context.servicesGridHTML({ targets: {} }).includes('No services configured'));

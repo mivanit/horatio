@@ -753,22 +753,27 @@ function servicesGridHTML(d, hours, width) {
   const to = windowed ? d.now : end, from = windowed ? to - hours * 3600 : d.start;
   const percent = seconds => (seconds / (to - from) * 100).toFixed(3) + '%';
   const track = `margin-left:${percent(d.start - from)};width:${percent(end - d.start)}`;
+  // The history has names only; the addresses are in the config.
+  const targets = Array.isArray(dashboardConfig.http_targets) ? dashboardConfig.http_targets : [];
+  const urls = new Map(targets.map(t => [t.name, t.url]));
   const rows = names.map(name => {
     let up = 0, checks = 0;
     const cells = d.targets[name].map(([passed, failed], i) => {
       const total = passed + failed;
       up += passed; checks += total;
       const from = d.start + i * d.bucket_sec;
-      const what = !total ? 'no checks' : failed ? `${failed} of ${total} checks failed` : `${total} checks passed`;
+      // "checks" are this one target's, over the bucket: say so, or 1 of 5
+      // reads as one target of five.
+      const what = !total ? 'no checks' : failed ? `${failed} of its ${total} checks failed` : `all ${total} checks passed`;
       const cls = !total ? 'svc-cell-none' : failed ? 'svc-cell-down' : 'svc-cell-up';
       // A bucket with one failed check in many is still visibly red.
       const style = failed ? ` style="opacity:${(0.45 + 0.55 * failed / total).toFixed(2)}"` : '';
-      return `<span class="svc-cell ${cls}"${style} title="${escapeHtml(`${when(from)} to ${when(from + d.bucket_sec)}: ${what}`)}"></span>`;
+      return `<span class="svc-cell ${cls}"${style} title="${escapeHtml(`${name}, ${when(from)} to ${when(from + d.bucket_sec)}: ${what}`)}"></span>`;
     }).join('');
     const u = uptimeText({ up, checks });
     return `<span class="svc-num${u.cls ? ' ' + u.cls : ''}" title="${escapeHtml(u.title)}">${u.text}</span>` +
       `<span class="svc-cells"><span class="svc-track" style="${track}">${cells}</span>` +
-      `<span class="svc-label">${escapeHtml(name)}</span></span>`;
+      `<span class="svc-label" title="${escapeHtml(urls.get(name) || name)}">${escapeHtml(name)}</span></span>`;
   }).join('');
   const ticks = historyTicks(from * 1000, to * 1000, width).map(tick =>
     `<span style="left:${((tick.value / 1000 - from) / (to - from) * 100).toFixed(3)}%">${tick.label}</span>`).join('');
