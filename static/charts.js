@@ -128,6 +128,52 @@ const CHART_TOOLTIP = {
 };
 const CHART_GRID = { color: getCssColor('--border-color') };
 const CHART_TICK = { color: getCssColor('--text-muted'), font: { size: CHART_FONT_SIZE } };
+
+// A y-axis number in at most five characters, so axes of one width fit them all.
+function axisNumber(v) {
+  const size = Math.abs(v);
+  if (size >= 1e6) return +(v / 1e6).toFixed(1) + 'M';
+  if (size >= 1e4) return +(v / 1e3).toFixed(1) + 'k';
+  return v.toLocaleString(undefined, { maximumFractionDigits: size < 10 ? 2 : 1 });
+}
+
+// Every history card keeps this much for its y axis (the unit and five-character
+// numbers), so the plots, and the Services grid beside them, start at the same place.
+const HISTORY_AXIS_WIDTH = Math.round(CHART_FONT_SIZE * 5.25);
+// Room right of every history plot, so the newest point's marker is not cut off.
+// Fixed, where Chart.js would size it by each chart's own markers.
+const HISTORY_PLOT_INSET = 8;
+
+// Ticks for a history time axis `width` px wide, from `min` to `max` (ms):
+// [{ value, label }] at round local times, a whole number of steps from midnight.
+// Midnight is labelled with its date. A tick whose label would reach past either
+// end is left out, so the axis needs no room beyond the plot.
+const HISTORY_TICK_MINUTES = [1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720];
+const HISTORY_TICK_DAYS = [1, 2, 3, 7, 14, 30, 60, 90, 180, 365];
+const HISTORY_TICK_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function historyTicks(min, max, width) {
+  const span = max - min;
+  if (!(span > 0) || !(width > 0)) return [];
+  const labelPx = CHART_FONT_SIZE * 0.6 * 6;  // "HH:mm", "MMM dd" in the chart font
+  const most = Math.max(1, Math.floor(width / (labelPx * 1.6)));
+  const minutes = HISTORY_TICK_MINUTES.find(m => span / (m * 60000) <= most);
+  const days = minutes ? 0 : HISTORY_TICK_DAYS.find(d => span / (d * 86400000) <= most) || 365;
+  const midnight = new Date(min);
+  midnight.setHours(0, 0, 0, 0);
+  const two = n => String(n).padStart(2, '0');
+  const ticks = [];
+  for (let k = 0; ; k++) {
+    const at = new Date(midnight);
+    if (minutes) at.setTime(midnight.getTime() + k * minutes * 60000);
+    else at.setDate(at.getDate() + k * days);  // by calendar day: a DST day is not 24 h
+    const value = at.getTime(), px = (value - min) / span * width;
+    if (value > max) break;
+    if (px < labelPx / 2 || px > width - labelPx / 2) continue;
+    const dated = !minutes || (!at.getHours() && !at.getMinutes());
+    ticks.push({ value, label: dated ? `${HISTORY_TICK_MONTHS[at.getMonth()]} ${at.getDate()}` : `${two(at.getHours())}:${two(at.getMinutes())}` });
+  }
+  return ticks;
+}
 const CHART_X_AXIS = {
   display: true,
   ticks: {
@@ -391,7 +437,7 @@ function fansChartConfig() {
     data: { labels: [], datasets: [{ data: [], backgroundColor: getCssColor('--color-download'), borderWidth: 0, borderRadius: CHART_RADIUS }] },
     tooltip: { displayColors: false, callbacks: { label: (ctx) => ctx.parsed.y.toFixed(0) + ' RPM' } },
     xAxis: CHART_X_AXIS_BAR,
-    yAxis: makeYAxis({ tickFormat: (v) => v >= 1000 ? (v/1000).toFixed(1) + 'k' : v })
+    yAxis: makeYAxis({ tickFormat: axisNumber })
   });
 }
 

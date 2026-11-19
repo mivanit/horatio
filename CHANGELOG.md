@@ -5,6 +5,16 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- History cards line up: every chart and the Services grid show the whole requested
+  range on a plot of the same width, with the same time ticks, so one moment is at the
+  same place on every card. A box with less history than the range shows it at the
+  right of a partly empty chart instead of stretched across it. In the Services grid
+  the target's name now sits on its row and the uptime is to the left.
+- Ping history is no longer squeezed into the middle of its chart.
+- History time axes have ticks at round times (every 5 minutes for an hour, every few
+  hours for a day, with the date at midnight) instead of one label for a short range.
+  History y axes name their unit and shorten large numbers (`12.5k`, `2M`).
+
 ## [0.2.0] - 2026-11-18
 
 - OpenWrt `--update` (these apply to updates made after this release: a router updates

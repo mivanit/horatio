@@ -738,12 +738,21 @@ function uptimeText(u) {
 // per target, one cell per bucket: green = every check passed, red (stronger
 // with the failed share) = some failed, grey = no checks (Horatio was not
 // running, or the target was not configured yet).
-function servicesGridHTML(d) {
+// The cells are laid out as the history charts' plots are: the last `hours` up to
+// the server's clock, starting HISTORY_AXIS_WIDTH in (where a chart has its y
+// axis, a row has its uptime) and `width` px wide, with the same time ticks.
+// The buckets' own span is a little longer and is cut to that window.
+function servicesGridHTML(d, hours, width) {
   const names = Object.keys(d?.targets || {});
   if (!names.length) return '<div class="no-history-data"><p>No services configured</p></div>';
   // Buckets shorter than a minute need the seconds to tell their ends apart.
   const when = t => new Date(t * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
     ...(d.bucket_sec < 60 ? { second: '2-digit' } : {}) });
+  const end = d.start + d.count * d.bucket_sec;
+  const windowed = hours > 0 && typeof d.now === 'number';
+  const to = windowed ? d.now : end, from = windowed ? to - hours * 3600 : d.start;
+  const percent = seconds => (seconds / (to - from) * 100).toFixed(3) + '%';
+  const track = `margin-left:${percent(d.start - from)};width:${percent(end - d.start)}`;
   const rows = names.map(name => {
     let up = 0, checks = 0;
     const cells = d.targets[name].map(([passed, failed], i) => {
@@ -757,13 +766,14 @@ function servicesGridHTML(d) {
       return `<span class="svc-cell ${cls}"${style} title="${escapeHtml(`${when(from)} to ${when(from + d.bucket_sec)}: ${what}`)}"></span>`;
     }).join('');
     const u = uptimeText({ up, checks });
-    return `<span class="svc-name">${escapeHtml(name)}</span><span class="svc-cells">${cells}</span>` +
-      `<span class="svc-num${u.cls ? ' ' + u.cls : ''}" title="${escapeHtml(u.title)}">${u.text}</span>`;
+    return `<span class="svc-num${u.cls ? ' ' + u.cls : ''}" title="${escapeHtml(u.title)}">${u.text}</span>` +
+      `<span class="svc-cells"><span class="svc-track" style="${track}">${cells}</span>` +
+      `<span class="svc-label">${escapeHtml(name)}</span></span>`;
   }).join('');
-  const end = d.start + d.count * d.bucket_sec;
-  const axis = `<span></span><span class="svc-axis"><span>${when(d.start)}</span><span>${when((d.start + end) / 2)}</span><span>${when(end)}</span></span><span></span>`;
+  const ticks = historyTicks(from * 1000, to * 1000, width).map(tick =>
+    `<span style="left:${((tick.value / 1000 - from) / (to - from) * 100).toFixed(3)}%">${tick.label}</span>`).join('');
   const note = d.truncated ? '<div class="hw-note">the log could not be read back this far: the oldest cells are empty</div>' : '';
-  return `<div class="svc-hist">${rows}${axis}</div>${note}`;
+  return `<div class="svc-hist" style="grid-template-columns:${HISTORY_AXIS_WIDTH}px minmax(0,1fr);padding-right:${HISTORY_PLOT_INSET}px">${rows}<span></span><span class="svc-axis">${ticks}</span></div>${note}`;
 }
 
 // Shared by the Hardware health and Drive Health cards.
@@ -3279,7 +3289,7 @@ const HISTORY_MARKER_MAX = 500;   // about 3.5 days of 10-minute records
 
 // mode: the card's modeToggle (config.js HISTORY_METRICS) when it is on, else ''. 'stack':
 // power sources filled on top of each other; 'range': the fans as one min/max band.
-function createHistoryChart(canvasId, metric, records, unitType = 'percent', hours = 24, mode = '') {
+function createHistoryChart(canvasId, metric, records, unitType = 'percent', hours = 24, mode = '', range = null) {
   const ctx = document.getElementById(canvasId);
   const metricInfo = HISTORY_METRICS[metric];
   const isDual = metricInfo.dual;
@@ -3848,6 +3858,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
     }
   }
 
+  let xTicks = [];
   const options = {
     responsive: true,
     maintainAspectRatio: false,
@@ -3868,17 +3879,33 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
         }
       }
     },
+    // Every history card has the same plot: the whole requested range (`range`,
+    // when the server reports its clock), a y axis of one width, one inset on the
+    // right and no room kept beside the plot for labels. The same moment is then
+    // at the same place on every card, the Services grid included (servicesGridHTML).
+    layout: { autoPadding: false, padding: { right: HISTORY_PLOT_INSET, top: showLegend ? 0 : HISTORY_PLOT_INSET } },
     scales: {
       x: {
         type: 'time',
-        time: {
-          unit: hours < 1 ? 'minute' : hours > 48 ? 'day' : 'hour',
-          displayFormats: { minute: 'HH:mm', hour: 'HH:mm', day: 'MMM d' }
+        ...(range && { min: range.min, max: range.max }),
+        // Chart.js would pad both ends for the ping loss bars.
+        offset: false,
+        time: { unit: hours > 48 ? 'day' : 'hour' },
+        ticks: { ...CHART_TICK, maxRotation: 0, autoSkip: false, callback: (value, i) => xTicks[i]?.label },
+        afterBuildTicks: scale => {
+          xTicks = historyTicks(scale.min, scale.max, scale.width);
+          scale.ticks = xTicks.map(tick => ({ value: tick.value }));
         },
-        ticks: { ...CHART_TICK, maxRotation: 0 },
+        afterFit: scale => { scale.paddingLeft = scale.paddingRight = 0; },
         grid: CHART_GRID
       },
-      y: { min: 0, stacked: metric === 'power' && mode === 'stack', ticks: CHART_TICK, grid: CHART_GRID }
+      y: {
+        min: 0, stacked: metric === 'power' && mode === 'stack',
+        ticks: { ...CHART_TICK, callback: axisNumber },
+        title: { display: !!displayUnit.trim(), text: displayUnit.trim(), color: CHART_TICK.color, font: { size: CHART_FONT_SIZE - 4 }, padding: 0 },
+        afterFit: scale => { scale.width = HISTORY_AXIS_WIDTH; },
+        grid: CHART_GRID
+      }
     },
     animation: { duration: 0 }
   };
@@ -4139,7 +4166,7 @@ async function loadHistoryData(metric, hours, data) {
     if (historyCards.get(metric) !== entry || entry.loadSeq !== mySeq) return;
     const box = entry.card.querySelector('.chart-container');
     if (grid.ok && grid.data) {
-      box.innerHTML = servicesGridHTML(grid.data);
+      box.innerHTML = servicesGridHTML(grid.data, hours, box.clientWidth - HISTORY_AXIS_WIDTH - HISTORY_PLOT_INSET);
       entry.hasGrid = true;
     } else if (entry.hasGrid) {
       showError(`History refresh failed (${grid.errorType || 'error'}) — showing last data`);
@@ -4194,7 +4221,9 @@ async function loadHistoryData(metric, hours, data) {
   }
   const canvasId = `chart-${entry.card.dataset.historyId}`;
   entry.card.querySelector('.chart-container').innerHTML = `<canvas id="${canvasId}"></canvas>`;
-  entry.chart = createHistoryChart(canvasId, metric, data.records, entry.unitType || 'percent', hours, entry.mode);
+  const range = typeof data.cutoff === 'number' && typeof data.now === 'number'
+    ? { min: data.cutoff * 1000, max: data.now * 1000 } : null;
+  entry.chart = createHistoryChart(canvasId, metric, data.records, entry.unitType || 'percent', hours, entry.mode, range);
   if (hiddenByLabel.size) {
     entry.chart.data.datasets.forEach((ds, i) => {
       if (hiddenByLabel.has(ds.label)) entry.chart.setDatasetVisibility(i, !hiddenByLabel.get(ds.label));

@@ -1366,6 +1366,31 @@ function testHistoryGapSkip() {
   assert.deepEqual(alone(Infinity), [false, false, false, false, false, false, true], 'gap rule off: only nulls count');
 }
 
+// What every history card's axes are built from (charts.js).
+const HISTORY_AXES = between(charts, '// A y-axis number', 'const CHART_X_AXIS');
+
+function testHistoryAxes() {
+  const context = vm.createContext({ CHART_FONT_SIZE: 16 });
+  evaluate(context, HISTORY_AXES + '; globalThis.HISTORY_AXIS_WIDTH = HISTORY_AXIS_WIDTH;');
+  const labels = (from, to, width) => plain(context.historyTicks(from.getTime(), to.getTime(), width)).map(t => t.label);
+  // Local times throughout, as the axis shows them.
+  assert.deepEqual(labels(new Date(2026, 10, 18, 19, 55), new Date(2026, 10, 18, 20, 55), 1180),
+    ['20:00', '20:05', '20:10', '20:15', '20:20', '20:25', '20:30', '20:35', '20:40', '20:45', '20:50'],
+    'round five-minute steps; a tick at either end of the axis is left out');
+  assert.deepEqual(labels(new Date(2026, 10, 17, 20, 55), new Date(2026, 10, 18, 20, 55), 1000),
+    ['Nov 18', '03:00', '06:00', '09:00', '12:00', '15:00', '18:00'], 'midnight carries the date; 21:00 is too near the end');
+  assert.deepEqual(labels(new Date(2026, 10, 17, 20, 55), new Date(2026, 10, 18, 20, 55), 400),
+    ['Nov 18', '06:00', '12:00', '18:00'], 'a narrow axis takes longer steps');
+  const month = labels(new Date(2026, 9, 19, 20, 55), new Date(2026, 10, 18, 20, 55), 1180);
+  assert.deepEqual(month, ['Oct 22', 'Oct 25', 'Oct 28', 'Oct 31', 'Nov 3', 'Nov 6', 'Nov 9', 'Nov 12', 'Nov 15', 'Nov 18']);
+  assert.deepEqual(labels(new Date(0), new Date(0), 1000), []);
+  assert.deepEqual(labels(new Date(0), new Date(3600e3), 0), []);
+
+  const number = v => context.axisNumber(v).replace(/[^0-9kM]/g, '.');
+  assert.deepEqual([0, 40, 0.125, 1500, 12500, 2000000].map(number), ['0', '40', '0.13', '1.500', '12.5k', '2M']);
+  assert.equal(context.HISTORY_AXIS_WIDTH, 84);
+}
+
 // The Services card and the outage grid, from the real render functions.
 function testServicesCard() {
   const elements = new Map(['services-value', 'services-content'].map(id =>
@@ -1379,6 +1404,7 @@ function testServicesCard() {
     updateCardCritical(id, bad) { flags.critical = bad; },
     updateCardWarning(id, value, threshold) { flags.warning = value > threshold; },
   });
+  evaluate(context, 'const CHART_FONT_SIZE = 16;' + HISTORY_AXES);
   evaluate(context, between(app, 'function renderServices', '// Shared by the Hardware health'));
   const target = (name, ok, extra = {}) => ({ name, url: `http://${name}/`, ok, status: ok ? 200 : null,
     ms: ok ? 12 : null, error: ok === false ? 'timeout' : null,
@@ -1424,11 +1450,20 @@ function testServicesCard() {
   assert.equal((grid.match(/svc-cell-none/g) || []).length, 1);
   assert(grid.includes('opacity:0.89') && grid.includes('4 of 5 checks failed') && grid.includes('no checks'));
   assert(grid.includes('>60.0%<'), 'the row total counts only buckets with checks');
+  assert(grid.includes('margin-left:0.000%;width:100.000%'), 'no window given: the buckets fill the row');
+  // The last hour up to the server's clock, as the history charts draw it; the
+  // buckets start 30 s before it and end 30 s after.
+  const hour = context.servicesGridHTML({ start: 570, bucket_sec: 60, count: 61, now: 4200, truncated: false,
+    targets: { '<pages>': Array(61).fill([1, 0]) } }, 1, 1000);
+  assert(hour.includes('margin-left:-0.833%;width:101.667%'));
+  assert(hour.includes('grid-template-columns:84px ') && hour.includes('class="svc-label">&lt;pages><'));
+  const ticks = hour.match(/<span style="left:[0-9.]+%">\d\d:\d\d<\/span>/g) || [];
+  assert(ticks.length >= 5, 'the charts\' time ticks under the cells');
   assert(context.servicesGridHTML({ targets: {} }).includes('No services configured'));
 }
 
 (async () => {
-  for (const test of [testHistoryGapSkip, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
+  for (const test of [testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testCapturePendingAndHiddenTab, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
     testVersionFooter]) {

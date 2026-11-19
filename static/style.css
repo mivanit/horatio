@@ -601,22 +601,53 @@ h1 {
 /* A few rows of cells need less than a chart card's minimum height */
 .history-card:has(.history-grid-container) { min-height: 0; }
 
+/* servicesGridHTML sets the first column as wide as a history chart's y axis,
+   so the cells line up with the charts' plots. */
 .svc-hist {
   display: grid;
-  grid-template-columns: max-content minmax(0, 1fr) max-content;
-  gap: 6px 10px;
+  grid-template-columns: max-content minmax(0, 1fr);
+  row-gap: 6px;
   align-items: center;
   font-size: 12px;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
 
+.svc-hist .svc-num { padding-right: 8px; }
+
 .svc-cells {
-  display: flex;
+  position: relative;
   height: 22px;
   background: var(--bg-bar);
-  border-radius: var(--radius);
+  border-radius: var(--radius-xs);
   overflow: hidden;
+}
+
+/* The buckets; wider than the window by up to a bucket at each end, and cut by .svc-cells */
+.svc-track {
+  display: flex;
+  height: 100%;
+}
+
+/* The target's name, over the oldest end of its row. Clicks and hovers go
+   through to the cells under it. */
+.svc-label {
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  bottom: 3px;
+  max-width: calc(100% - 6px);
+  padding: 0 7px;
+  display: flex;
+  align-items: center;
+  background: color-mix(in srgb, var(--bg-card) 82%, transparent);
+  color: var(--text-primary);
+  border-radius: var(--radius-xs);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
 }
 
 .svc-cell {
@@ -631,11 +662,19 @@ h1 {
 
 .svc-cell:hover { filter: brightness(1.4); }
 
+/* The charts' time ticks, at the same places and in the same type */
 .svc-axis {
-  display: flex;
-  justify-content: space-between;
-  font-size: 10px;
+  position: relative;
+  height: calc(var(--chart-font-size) * 1.2px);
+  font-size: calc(var(--chart-font-size) * 1px);
   color: var(--text-muted);
+}
+
+.svc-axis span {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
 }
 
 /* The hardware and services cards' header verdict sits between the title and the age */
