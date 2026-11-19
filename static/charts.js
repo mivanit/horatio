@@ -437,7 +437,8 @@ function fansChartConfig() {
     data: { labels: [], datasets: [{ data: [], backgroundColor: getCssColor('--color-download'), borderWidth: 0, borderRadius: CHART_RADIUS }] },
     tooltip: { displayColors: false, callbacks: { label: (ctx) => ctx.parsed.y.toFixed(0) + ' RPM' } },
     xAxis: CHART_X_AXIS_BAR,
-    yAxis: makeYAxis({ tickFormat: axisNumber })
+    // Not axisNumber: fans run in the low thousands, where it writes "1,500".
+    yAxis: makeYAxis({ tickFormat: (v) => v >= 1000 ? (v/1000).toFixed(1) + 'k' : v })
   });
 }
 

@@ -9,7 +9,9 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
   range on a plot of the same width, with the same time ticks, so one moment is at the
   same place on every card. A box with less history than the range shows it at the
   right of a partly empty chart instead of stretched across it. In the Services grid
-  the target's name now sits on its row and the uptime is to the left.
+  the target's name now sits on its row and the uptime is to the left. The name is a
+  link to the target's address, and each cell's tooltip names the target and says
+  how many of its checks failed.
 - Ping history is no longer squeezed into the middle of its chart.
 - History time axes have ticks at round times (every 5 minutes for an hour, every few
   hours for a day, with the date at midnight) instead of one label for a short range.
