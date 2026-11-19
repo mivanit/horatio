@@ -629,7 +629,7 @@ h1 {
   height: 100%;
 }
 
-/* The target's name, over the oldest end of its row; hovering it shows the address */
+/* The target's name, over the oldest end of its row: a link to its address */
 .svc-label {
   position: absolute;
   left: 12px;
@@ -646,8 +646,10 @@ h1 {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  cursor: default;
+  text-decoration: none;
 }
+
+a.svc-label:hover { text-decoration: underline; }
 
 .svc-cell {
   flex: 1 1 0;

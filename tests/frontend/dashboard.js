@@ -1458,7 +1458,9 @@ function testServicesCard() {
   const hour = context.servicesGridHTML({ start: 570, bucket_sec: 60, count: 61, now: 4200, truncated: false,
     targets: { '<pages>': Array(61).fill([1, 0]) } }, 1, 1000);
   assert(hour.includes('margin-left:-0.833%;width:101.667%'));
-  assert(hour.includes('title="http://pages.test/&lt;x>">&lt;pages><'), 'the name shows its address on hover');
+  assert(hour.includes('<a class="svc-label" href="http://pages.test/&lt;x>"') &&
+    hour.includes('title="http://pages.test/&lt;x>">&lt;pages></a>'), 'the name links to its address');
+  assert(grid.includes('<span class="svc-label">pages</span>'), 'no address known: plain text');
   assert(hour.includes('grid-template-columns:84px '));
   const ticks = hour.match(/<span style="left:[0-9.]+%">\d\d:\d\d<\/span>/g) || [];
   assert(ticks.length >= 5, 'the charts\' time ticks under the cells');

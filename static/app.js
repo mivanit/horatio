@@ -756,6 +756,10 @@ function servicesGridHTML(d, hours, width) {
   // The history has names only; the addresses are in the config.
   const targets = Array.isArray(dashboardConfig.http_targets) ? dashboardConfig.http_targets : [];
   const urls = new Map(targets.map(t => [t.name, t.url]));
+  // A link, as on the Services card: the browser's own menu copies the address.
+  const label = name => urls.get(name)
+    ? `<a class="svc-label" href="${escapeHtml(urls.get(name))}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(urls.get(name))}">${escapeHtml(name)}</a>`
+    : `<span class="svc-label">${escapeHtml(name)}</span>`;
   const rows = names.map(name => {
     let up = 0, checks = 0;
     const cells = d.targets[name].map(([passed, failed], i) => {
@@ -773,7 +777,7 @@ function servicesGridHTML(d, hours, width) {
     const u = uptimeText({ up, checks });
     return `<span class="svc-num${u.cls ? ' ' + u.cls : ''}" title="${escapeHtml(u.title)}">${u.text}</span>` +
       `<span class="svc-cells"><span class="svc-track" style="${track}">${cells}</span>` +
-      `<span class="svc-label" title="${escapeHtml(urls.get(name) || name)}">${escapeHtml(name)}</span></span>`;
+      label(name) + '</span>';
   }).join('');
   const ticks = historyTicks(from * 1000, to * 1000, width).map(tick =>
     `<span style="left:${((tick.value / 1000 - from) / (to - from) * 100).toFixed(3)}%">${tick.label}</span>`).join('');
