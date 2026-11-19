@@ -95,6 +95,8 @@
   box-shadow: var(--bevel-raised), 2px 2px 0 var(--shadow-color);
 }
 .card { padding: 3px 10px 10px; }
+/* Flat, like a window: the base style fades history cards into the page colour. */
+.history-card { background: var(--bg-card); }
 .card-header {
   background: linear-gradient(90deg, #000080, #1084d0);
   color: #fff;
