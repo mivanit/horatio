@@ -1386,8 +1386,14 @@ function testHistoryAxes() {
   assert.deepEqual(labels(new Date(0), new Date(0), 1000), []);
   assert.deepEqual(labels(new Date(0), new Date(3600e3), 0), []);
 
-  const number = v => context.axisNumber(v).replace(/[^0-9kM]/g, '.');
-  assert.deepEqual([0, 40, 0.125, 1500, 12500, 2000000].map(number), ['0', '40', '0.13', '1.500', '12.5k', '2M']);
+  // As Chart.js calls it: the value, its index, and all the ticks.
+  const axis = values => values.map((v, i) =>
+    context.axisNumber(v, i, values.map(value => ({ value }))).replace(/[^0-9kM]/g, '.'));
+  assert.deepEqual(axis([0, 0.002, 0.004, 0.006]), ['0', '0.002', '0.004', '0.006'], 'decimals follow the step');
+  assert.deepEqual(axis([0, 2.5, 5, 7.5]), ['0', '2.5', '5', '7.5']);
+  assert.deepEqual(axis([0, 20, 40]), ['0', '20', '40']);
+  assert.deepEqual(axis([0, 500, 1000, 1500]), ['0', '500', '1.000', '1.500']);
+  assert.deepEqual(axis([0, 12500, 2000000]), ['0', '12.5k', '2M']);
   assert.equal(context.HISTORY_AXIS_WIDTH, 84);
 }
 

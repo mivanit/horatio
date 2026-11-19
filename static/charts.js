@@ -129,12 +129,16 @@ const CHART_TOOLTIP = {
 const CHART_GRID = { color: getCssColor('--border-color') };
 const CHART_TICK = { color: getCssColor('--text-muted'), font: { size: CHART_FONT_SIZE } };
 
-// A y-axis number in at most five characters, so axes of one width fit them all.
-function axisNumber(v) {
+// A y-axis number, short enough that axes of one width fit them all. A Chart.js
+// tick callback: the decimals are those of the step between ticks, so ticks
+// 0.002 apart (an idle box's MB/s) do not all read "0".
+function axisNumber(v, i, ticks) {
   const size = Math.abs(v);
   if (size >= 1e6) return +(v / 1e6).toFixed(1) + 'M';
   if (size >= 1e4) return +(v / 1e3).toFixed(1) + 'k';
-  return v.toLocaleString(undefined, { maximumFractionDigits: size < 10 ? 2 : 1 });
+  const step = ticks && ticks.length > 1 ? Math.abs(ticks[1].value - ticks[0].value) : 1;
+  const decimals = (String(+step.toPrecision(4)).split('.')[1] || '').length;
+  return v.toLocaleString(undefined, { maximumFractionDigits: Math.min(decimals, 4) });
 }
 
 // Every history card keeps this much for its y axis (the unit and five-character
