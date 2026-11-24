@@ -421,9 +421,33 @@
         uptime[hours] = { up, checks };
       }
       const ok = serviceUp(i, last);
+      // The first failed check of the current outage, looking back at most a week like the server.
+      let downSince = null;
+      for (let at = last; !ok && at > t - 168 * 3600 && !serviceUp(i, at); at -= SERVICES_INTERVAL) downSince = at;
       return { ...s, ok, status: ok ? 200 : null, ms: ok ? 20 + 15 * i + Math.round(8 * noise('svc' + i, t, 60)) : null,
-               error: ok ? null : 'ConnectError', checked: new Date(last * 1000).toISOString(), uptime };
+               error: ok ? null : 'ConnectError', checked: new Date(last * 1000).toISOString(), down_since: downSince, uptime };
     }) };
+  }
+  // The server's merged list (server.py alarms_snapshot). The demo box's collectors
+  // report no alarms, so what is active is whichever demo service is down; `recent`
+  // is one GPU that ran hot for twenty minutes yesterday.
+  function alarmsSnapshot(t) {
+    const services = servicesSnapshot(t).targets;
+    const iso = at => new Date(at * 1000).toISOString().replace('.000Z', '+00:00');
+    const day = Math.floor(t / 86400) * 86400;
+    const hot = { source: 'sensors', key: 'gpu/1/temp/memory', text: 'GPU 1: memory 83 C >= max operating 85 C - 3', since: day - 9 * 3600 };
+    return {
+      now: t,
+      sources: { state: { status: 'ok', age_sec: Math.round(t % 900) }, sensors: { status: 'ok', age_sec: Math.round(t % 60) },
+                 services: { status: 'ok', targets: services.length } },
+      active: services.filter(s => s.ok === false).map(s => ({
+        source: 'services', key: 'service/' + s.name, text: `${s.name}: down (${s.error})`, value: null, since: s.down_since, initial: null })),
+      held: [],
+      recent: [
+        { timestamp: iso(hot.since), event: 'raised', ...hot },
+        { timestamp: iso(hot.since + 1200), event: 'cleared', ...hot, active_for_s: 1200 },
+      ],
+    };
   }
   // The server's bucket plan (server.py services_bucket_plan): at most 300 buckets.
   function servicesHistory(q, t) {
@@ -462,7 +486,7 @@
     '/4/load', '/4/uptime', '/4/system', '/4/fs',
     '/cpu-info', '/gpu-info', '/ip-info', '/ping', '/gpu-processes', '/disk-processes', '/network-processes',
     '/processlist', '/history', '/history/settings', '/history/record', '/history/field/temps',
-    '/history/field/processes', '/mail', '/storage-health', '/sensors', '/services', '/services/history',
+    '/history/field/processes', '/mail', '/storage-health', '/sensors', '/alarms', '/services', '/services/history',
     '/version', '/list-endpoints',
   ];
 
@@ -527,6 +551,7 @@
     },
     '/storage-health': (q, t) => storageHealth(t),
     '/sensors': (q, t) => sensorsSnapshot(t),
+    '/alarms': (q, t) => alarmsSnapshot(t),
     '/services': (q, t) => servicesSnapshot(t),
     '/services/history': (q, t) => servicesHistory(q, t),
     '/history': q => history(q, null),

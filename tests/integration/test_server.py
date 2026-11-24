@@ -113,6 +113,12 @@ SCHEMAS: dict[str, Callable[[Any], bool]] = {
     "/api/sensors": lambda d: (
         isinstance(d, dict) and {"status", "age_sec", "path"} <= d.keys()
     ),
+    "/api/alarms": lambda d: (
+        isinstance(d, dict)
+        and {"now", "sources", "active", "held", "recent"} <= d.keys()
+        and {"state", "sensors", "services"} <= d["sources"].keys()
+        and all(isinstance(d[k], list) for k in ("active", "held", "recent"))
+    ),
     "/config.json": lambda d: isinstance(d, dict),
 }
 
@@ -142,6 +148,7 @@ REQUIRED_ENDPOINTS: list[str] = [
     "/api/mail",
     "/api/storage-health",
     "/api/sensors",
+    "/api/alarms",
     "/api/services",
     "/api/services/history",
     # These return HTTP 200 with empty data or an error payload when tools
@@ -163,6 +170,7 @@ CUSTOM_ENDPOINTS: list[str] = [
     "/api/mail",
     "/api/storage-health",
     "/api/sensors",
+    "/api/alarms",
     "/api/services",
     "/api/services/history",
     "/api/version",

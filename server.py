@@ -45,6 +45,7 @@ from collections.abc import (
     Awaitable,
     Callable,
     Iterable,
+    Reversible,
     Sequence,
 )
 from contextlib import asynccontextmanager
@@ -954,6 +955,33 @@ def services_uptime(
             for key in live:
                 out[name][key]["checks"] += 1
                 out[name][key]["up"] += ok
+    return out
+
+
+def services_down_since(
+    rounds: Reversible[ServiceRound], names: Sequence[str]
+) -> dict[str, float | None]:
+    """For each target whose newest check failed, the time (epoch) of the first
+    round of its current unbroken run of failures; None for a target that is up
+    or was never checked. Rounds that did not check a target are skipped. Only
+    what is in memory counts, so the answer is at most SERVICES_UPTIME_HOURS[-1]
+    hours back."""
+    out: dict[str, float | None] = {name: None for name in names}
+    undecided: set[str] = set(names)
+    ts: float
+    oks: dict[str, bool]
+    for ts, oks in reversed(rounds):
+        name: str
+        for name in list(undecided):
+            ok: bool | None = oks.get(name)
+            if ok is None:
+                continue
+            if ok:
+                undecided.discard(name)
+            else:
+                out[name] = ts
+        if not undecided:
+            break
     return out
 
 
@@ -3543,6 +3571,7 @@ def services_snapshot(now: float) -> dict[str, Any]:
     uptime: dict[str, dict[str, dict[str, int]]] = services_uptime(
         _services_rounds, names, now
     )
+    down_since: dict[str, float | None] = services_down_since(_services_rounds, names)
     targets: list[dict[str, Any]] = []
     target: HttpTarget
     for target in HTTP_TARGETS:
@@ -3556,6 +3585,8 @@ def services_snapshot(now: float) -> dict[str, Any]:
                 "ms": latest.get("ms"),
                 "error": latest.get("error"),
                 "checked": latest.get("checked"),
+                # Epoch of the first failed check of the current outage, or null.
+                "down_since": down_since[target.name],
                 "uptime": uptime[target.name],
             }
         )
@@ -4663,6 +4694,153 @@ async def sensors_snapshot() -> Response:
     return Response(content=json.dumps(result), media_type="application/json")
 
 
+# One list of everything that is wrong right now. The two collector snapshots
+# each have their own ``alarms`` and the service checks a third notion of
+# "down"; a reader that looked at one of them missed the rest. The collectors
+# also say since when (``alarm_items``) and append every change to a log beside
+# the snapshots (collector/README.md); this only merges and serves.
+ALARMS_PATH: Final[str] = "/var/lib/horatio/alarms.jsonl"
+ALARMS_RECENT: Final[int] = 50
+# Read from the end of the log: 50 events are a few KiB, so this is generous.
+ALARMS_TAIL_BYTES: Final[int] = 256 * 1024
+_ALARM_FIELDS: Final[tuple[str, ...]] = ("key", "text", "value", "since", "initial")
+
+
+def _read_alarm_events(
+    path: str = ALARMS_PATH,
+    limit: int = ALARMS_RECENT,
+    max_bytes: int = ALARMS_TAIL_BYTES,
+) -> list[dict[str, Any]]:
+    """The newest ``limit`` lines of the collectors' alarm log, oldest first
+    (sync). Never raises: no file, an unreadable one or a torn line is fewer
+    events, not an error."""
+    try:
+        f: BinaryIO
+        with open(path, "rb") as f:
+            size: int = f.seek(0, os.SEEK_END)
+            start: int = max(0, size - max_bytes)
+            f.seek(start)
+            lines: list[bytes] = f.read().split(b"\n")
+    except OSError:
+        return []
+    if start > 0:
+        lines = lines[1:]  # the read began mid-line
+    events: list[dict[str, Any]] = []
+    line: bytes
+    for line in lines:
+        try:
+            event: Any = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and isinstance(event.get("event"), str):
+            events.append(event)
+    return events[-limit:]
+
+
+def _snapshot_alarms(
+    source: str, snapshot: dict[str, Any], held: bool = False
+) -> list[dict[str, Any]]:
+    """One collector snapshot's alarms (or, with ``held``, the ones it could not
+    re-check) as ``{source, key, text, value, since, initial}`` rows. A snapshot
+    from a collector without ``alarm_items`` gives rows with only the text."""
+    rows: list[dict[str, Any]] = []
+    if held:
+        items: Any = [
+            item
+            for item in snapshot.get("alarm_held") or []
+            if isinstance(item, dict) and "unchecked_since" in item
+        ]
+    else:
+        texts: Any = snapshot.get("alarms")
+        items = snapshot.get("alarm_items")
+        if not isinstance(items, list):
+            items = [{"text": text} for text in texts or [] if isinstance(text, str)]
+    item: Any
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+            continue
+        row: dict[str, Any] = {"source": source}
+        row.update({k: item.get(k) for k in _ALARM_FIELDS})
+        if held:
+            row["unchecked_since"] = item.get("unchecked_since")
+        rows.append(row)
+    return rows
+
+
+def alarms_snapshot(
+    now: float,
+    state: dict[str, Any],
+    sensors: dict[str, Any],
+    services: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Everything wrong right now, from the three places that know.
+
+    ``active`` follows the Hardware card's rule: the 15-min snapshot's alarms
+    count whenever it can be read (``sources.state.status`` says if it is
+    stale), the 60 s snapshot's only while it is fresh, a service only while
+    the checks are running. So a source that is not ``ok`` means "unknown",
+    never "clear". ``held`` are alarms a collector could not re-check this run
+    (a failing drive that is asleep). ``recent`` is the tail of the change log."""
+    active: list[dict[str, Any]] = _snapshot_alarms("state", state)
+    held: list[dict[str, Any]] = _snapshot_alarms("state", state, held=True)
+    if sensors.get("status") == "ok":
+        active += _snapshot_alarms("sensors", sensors)
+        held += _snapshot_alarms("sensors", sensors, held=True)
+    target: dict[str, Any]
+    for target in [] if services["stale"] else services["targets"]:
+        if target["ok"] is False:
+            active.append(
+                {
+                    "source": "services",
+                    "key": f"service/{target['name']}",
+                    "text": f"{target['name']}: down ({target['error']})",
+                    "value": None,
+                    "since": target["down_since"],
+                    "initial": None,
+                }
+            )
+    return {
+        "now": now,
+        "sources": {
+            "state": {"status": state.get("status"), "age_sec": state.get("age_sec")},
+            "sensors": {
+                "status": sensors.get("status"),
+                "age_sec": sensors.get("age_sec"),
+            },
+            "services": {
+                "status": "stale" if services["stale"] else "ok",
+                "targets": len(services["targets"]),
+            },
+        },
+        "active": active,
+        "held": held,
+        "recent": events,
+    }
+
+
+@APP.get("/api/alarms")
+async def alarms() -> Response:
+    """Every active alarm in one list (both collector snapshots and the service
+    checks) with since when, plus the newest lines of the alarm log. Always 200;
+    ``sources`` says which of the three could be read."""
+    state: dict[str, Any]
+    sensors: dict[str, Any]
+    events: list[dict[str, Any]]
+    state, sensors, events = await asyncio.gather(
+        asyncio.to_thread(_get_storage_health),
+        asyncio.to_thread(_get_storage_health, SENSORS_PATH, SENSORS_STALE_SEC),
+        asyncio.to_thread(_read_alarm_events),
+    )
+    now: float = time.time()
+    return Response(
+        content=json.dumps(
+            alarms_snapshot(now, state, sensors, services_snapshot(now), events)
+        ),
+        media_type="application/json",
+    )
+
+
 # The Glances plugins the UI reads, the only ones the /api proxy forwards. An
 # allowlist, not a deny-list: Glances decodes and normalizes the path again, so
 # any blocked view (/4/processlist, /4/all: full command lines) has encoded
@@ -4714,6 +4892,7 @@ async def list_endpoints() -> Response:
         "/mail",
         "/storage-health",
         "/sensors",
+        "/alarms",
         "/services",
         "/services/history",
         "/version",
@@ -5961,6 +6140,8 @@ JSON API (machine-readable; prefer these for exact values)
                                  uptime {up, checks} over the last 1 / 24 / 168 h
   GET /api/services/history?hours=24   [passed, failed] checks per target per time bucket
   GET /api/sensors               fans/temps/power snapshot (root collector, when installed)
+  GET /api/alarms                everything wrong now in one list, since when, and the
+                                 newest alarm changes: {sources, active, held, recent}
   GET /api/storage-health        drive SMART/RAID/ECC snapshot (root collector)
   GET /api/4/<plugin>            live Glances metrics, raw (rates not capped): cpu,
                                  mem, memswap, load, network, diskio, fs, sensors, gpu

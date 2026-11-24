@@ -5,6 +5,11 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- New `GET /api/alarms`: everything wrong right now in one list (both collector
+  snapshots and any service that is down), each with since when, plus the newest lines
+  of the collectors' alarm log. Until now the two snapshots each had their own `alarms`
+  list and a reader of one missed the other. `GET /api/services` gains `down_since` per
+  target: when its current outage began.
 - Hardware collector: every alarm now has a stable identity. Both snapshots carry
   `alarm_items` (a `key` for each alarm string, plus a `value` for fault counters such as
   reallocated sectors and ECC counts) and `checked` (what this run really evaluated, so a
