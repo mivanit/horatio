@@ -806,6 +806,12 @@ a.svc-label:hover { text-decoration: underline; }
   margin-top: 3px;
   font-size: 11px;
   color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+  .drive-tile-main { grid-template-columns: 4.5em minmax(0, 1fr) max-content; }
+  .drive-tile-model { grid-column: 2 / -1; }
 }
 
 .text-bad { color: var(--text-bad); }
