@@ -191,7 +191,10 @@ def test_a_missing_tree_and_unreadable_files_cost_nothing(tmp_path: Path) -> Non
         "hwmon/hwmon0/fan1_input": "not a number",
         "hwmon/hwmon0/fan2_input": "1200",
     }
-    rows: list[dict[str, Any]] = hwmon.read_sensors(tree(tmp_path, files) / "hwmon")
+    # The fixture has no temperatures, so the thermal-zone fallback applies: point
+    # it into the fixture too, or it reads the host's own /sys/class/thermal.
+    root: Path = tree(tmp_path, files)
+    rows: list[dict[str, Any]] = hwmon.read_sensors(root / "hwmon", root / "thermal")
     assert [r["label"] for r in rows] == ["it87 fan2"]
 
 
