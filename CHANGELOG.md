@@ -5,6 +5,27 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- **Upgrade requirement:** run `./install.sh` after pulling this release and
+  before restarting the Python service. The service now launches
+  `python/server.py`; there is no root-level compatibility launcher.
+- Held alarms can be manually retired with the dashboard password. Retirement
+  is recorded in the event history, survives restarts and does not suppress a
+  newly observed fault. Active alarms cannot be retired.
+- GPU alarms use PCI addresses rather than display indices. USB/HID and I2C fan
+  identities preserve physical topology across bus renumbering; legacy alarm
+  keys remain held until explicitly retired. Existing fan display aliases keep
+  working, and fans lacking durable identity still report current low readings.
+- ZFS spare inventory no longer prevents error recovery. Older power records
+  exclude PSU inputs from stacked components; Lua temperature history keeps
+  distinct physical channels instead of overwriting equal labels.
+- History setting changes are serialized; missing GPU process mappings stay
+  unknown. Host-check responses use one cached result. Optional unconfigured
+  collectors are shown neutrally, while missing expected collectors still warn.
+- Lua history controls reflect supported features. `/api/list-endpoints` now
+  identifies the backend as `"lua"` instead of `"openwrt"`.
+- Mail cache invalidation includes permissions and ownership. Installer test
+  timeouts allow for slower hosts without changing production timeouts.
+
 - The Lua backend has a separate Linux/systemd installer, alongside its OpenWrt
   installer. Native dependencies are built in the checkout, the service runs as
   the installing user, and a systemd timer records history while the dashboard is closed.

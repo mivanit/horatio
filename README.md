@@ -178,7 +178,7 @@ are different things: one is a bulky sample on a schedule, the other a rare, sma
 |---|---|---|
 | `history.jsonl` | sample of the machine: CPU, memory, temperatures, fans, power, drives, GPUs, ping, processes | every `history.record_interval` |
 | `services.jsonl` | round of `http_targets` checks | every `services.check_interval` |
-| `events.jsonl` | thing that happened: an alarm `raised`, `changed` in value, `cleared` or `expired`, a `boot`, a `gap` | when it happens; nothing while an alarm just stays |
+| `events.jsonl` | thing that happened: an alarm `raised`, `changed` in value, `cleared`, `retired` or `expired`, a `boot`, a `gap` | when it happens; nothing while an alarm just stays |
 | `alarms-state.json` | (not a log) what the alarm history currently holds, so a restart continues it | in place, about once a minute |
 | `server.log`, `glances.log` | the server's own messages | rotated at 5 MiB |
 
@@ -195,6 +195,7 @@ each gives in `alarm_items`) and the server's own fan rules. Each line has `time
 | `changed` | its `value` differs from the last snapshot (reallocated sectors `8 -> 9`) | the same, plus `was` |
 | `cleared` | it is gone, and the snapshot says it `checked` for it | the same, plus `active_for_s`; `after_boot: true` when the box rebooted in between (counters that reset at boot) |
 | `expired` | it could not be re-checked for 30 days and at least 3 snapshots (a drive that is gone) | the same, plus `unchecked_since` |
+| `retired` | an authenticated user explicitly retires a held alarm | the same, plus `unchecked_since`; this records retirement, not proof of recovery |
 | `boot` | the 15-min snapshot shows a new boot | `id`, `kernel`, `previous: {clean, ended, kernel}` |
 | `gap` | a source was not seen for more than three of its intervals (box off, timer stopped), or the server itself was not running | `from`, `to` |
 
@@ -207,6 +208,15 @@ both came and went in that time is missed, and the next line is a `gap` with
 `source: "dashboard"`. A `gap` on `state` or `sensors` means that collector's snapshots
 stopped while the server was running. Service outages are not repeated here;
 `services.jsonl` has every check.
+
+After deliberately removing or replacing hardware, use **Retire** beside its
+held alarm on the Hardware card. It requires the dashboard password set with
+`uv run python python/server.py --set-password`. Retirement removes that occurrence
+from current concerns and preserves its event history; a new observation of the
+fault raises a new alarm. Active alarms cannot be retired. If the alarm changes
+while the dialog is open, refresh and review it again. This also handles obsolete
+label/index alarm keys from upgrades without guessing which current device they
+belonged to.
 
 Each line's `timestamp` is when the thing was observed: for a collector's alarm, the time of
 the snapshot that showed it, which can be up to 30 s before the line was written. So lines
@@ -272,6 +282,7 @@ again, don't put this on anything besides a trusted LAN!
 | `GET /api/history/raw`       | `history.jsonl` as recorded (password): rates as capped when each record was taken, not re-capped |
 | `GET /api/history/settings`  | Current recording settings                  |
 | `POST /api/history/settings` | Update recording settings (password)        |
+| `POST /api/alarms/retire` | Retire a held occurrence using `{source, key, since, unchecked_since, password}` from `GET /api/alarms`. Returns 409 if the occurrence changed or is no longer held; 503 when no password is configured. The `retirement` metadata in the GET response advertises availability. |
 | `GET /config.json`           | The config, as written (including `http_targets` URLs) |
 | `GET /themes/index.json`     | Theme names for the picker (`themes/*.css`) |
 | `GET /text`                  | Console report: `curl "http://<host>:8080/text?width=$COLUMNS"` (query: `view` latest/history/both, `style` unicode/ascii/simple, `color` auto/on/256/16/off, `hours` default 1-3 by width and record interval, `width` default 80, `height`, `live`, `table`, `rows`) |
