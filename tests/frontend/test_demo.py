@@ -39,7 +39,7 @@ def frontend_urls() -> set[tuple[str, str]]:
         src: str = path.read_text()
         match: re.Match[str]
         for match in re.finditer(
-            r"(API_BASE\s*\+\s*)?(['`])(/api/[^'`]*|/config\.json|/[\w-]+)\2(?=(.{0,40}))",
+            r"(API_BASE\s*\+\s*)?(['`])(/api/[^'`]*|/config\.json|/[\w-]+)\2(?=([\s\S]{0,80}))",
             src,
         ):
             url: str = match.group(3)
@@ -47,15 +47,17 @@ def frontend_urls() -> set[tuple[str, str]]:
                 url = "/api/4" + url
             elif url == "/api/4" or not url.startswith(("/api/", "/config.json")):
                 continue  # API_BASE itself, or a plain path that isn't a URL
-            method: str = "POST" if "method: 'POST'" in match.group(4) else "GET"
+            method: str = (
+                "POST"
+                if re.match(r"\s*,\s*\{\s*method:\s*['\"]POST['\"]", match.group(4))
+                else "GET"
+            )
             if url.startswith("/api/history/field/"):
                 urls.update(
                     (method, f"/api/history/field/{f}?hours=24") for f in side_fields
                 )
                 continue
             urls.add((method, re.sub(r"\$\{[^}]*\}", "3", url)))
-    # The settings save is a multi-line fetch call the pattern above can't see.
-    urls.add(("POST", "/api/history/settings"))
     return urls
 
 
@@ -76,6 +78,8 @@ def test_frontend_urls_found() -> None:
     assert ("GET", "/api/4/cpu") in urls
     assert ("GET", "/config.json") in urls
     assert ("POST", "/api/history/record") in urls
+    assert ("POST", "/api/alarms/retire") in urls
+    assert ("GET", "/api/alarms/retire") not in urls
     assert ("GET", "/api/history?hours=3") in urls
     assert len(urls) >= 25, sorted(urls)
 
@@ -93,8 +97,8 @@ vm.runInContext(fs.readFileSync(apiPath, 'utf8'), context);
     const answer = route(method, url.pathname, url.searchParams);
     assert(answer, `${method} ${href}: not routed`);
     const [status, body] = answer;
-    if (method === 'POST' && url.pathname === '/api/history/settings') {
-      assert.equal(status, 403, 'the demo refuses to save settings');
+    if (method === 'POST' && ['/api/history/settings', '/api/alarms/retire'].includes(url.pathname)) {
+      assert.equal(status, 403, 'the demo refuses settings and alarm changes');
       assert.match(body.error, /demo/);
       continue;
     }
