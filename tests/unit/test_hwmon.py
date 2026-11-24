@@ -27,28 +27,33 @@ def by_type(rows: list[dict[str, Any]], kind: str) -> dict[str, dict[str, Any]]:
     return {r["label"]: r for r in rows if r["type"] == kind}
 
 
-# bodel (MSI 970A, FX-6300): f71882fg keeps everything, even `name`, under device/;
-# fam15h_power; k10temp; nouveau with a fan in its own hwmon directory.
+# bodel (MSI 970A, FX-6300) as it is now, on the proprietary NVIDIA driver (no
+# hwmon of its own): f71882fg keeps everything, even `name`, under device/;
+# k10temp; fam15h_power.
 BODEL: dict[str, str] = {
-    "hwmon/hwmon0/name": "fam15h_power",
-    "hwmon/hwmon0/power1_input": "53362689",
-    "hwmon/hwmon0/power1_crit": "94992187",
+    "hwmon/hwmon0/device/name": "f71889ed",
+    "hwmon/hwmon0/device/temp1_input": "31000",
+    "hwmon/hwmon0/device/temp1_max": "85000",
+    "hwmon/hwmon0/device/temp1_crit": "80000",
+    "hwmon/hwmon0/device/temp2_input": "38000",
+    "hwmon/hwmon0/device/temp3_input": "35000",
+    "hwmon/hwmon0/device/fan1_input": "1642",
+    "hwmon/hwmon0/device/fan2_input": "883",
+    "hwmon/hwmon0/device/fan3_input": "0",
     "hwmon/hwmon1/name": "k10temp",
     "hwmon/hwmon1/temp1_input": "19800",
     "hwmon/hwmon1/temp1_max": "70000",
     "hwmon/hwmon1/temp1_crit": "80000",
-    "hwmon/hwmon2/name": "nouveau",
-    "hwmon/hwmon2/temp1_input": "36000",
-    "hwmon/hwmon2/fan1_input": "1519",
-    "hwmon/hwmon3/device/name": "f71889ed",
-    "hwmon/hwmon3/device/temp1_input": "31000",
-    "hwmon/hwmon3/device/temp1_max": "85000",
-    "hwmon/hwmon3/device/temp1_crit": "80000",
-    "hwmon/hwmon3/device/temp2_input": "38000",
-    "hwmon/hwmon3/device/temp3_input": "35000",
-    "hwmon/hwmon3/device/fan1_input": "1642",
-    "hwmon/hwmon3/device/fan2_input": "883",
-    "hwmon/hwmon3/device/fan3_input": "0",
+    "hwmon/hwmon2/name": "fam15h_power",
+    "hwmon/hwmon2/power1_input": "53362689",
+    "hwmon/hwmon2/power1_crit": "94992187",
+}
+# Earlier, on nouveau: a GPU chip with a fan in its own hwmon directory, which made
+# psutil drop the three device/ fans.
+NOUVEAU: dict[str, str] = {
+    "hwmon/hwmon3/name": "nouveau",
+    "hwmon/hwmon3/temp1_input": "36000",
+    "hwmon/hwmon3/fan1_input": "1519",
 }
 
 
@@ -57,7 +62,9 @@ def test_bodel_keeps_glances_temperature_names_and_finds_every_fan(
 ) -> None:
     import hwmon
 
-    rows: list[dict[str, Any]] = hwmon.read_sensors(tree(tmp_path, BODEL) / "hwmon")
+    rows: list[dict[str, Any]] = hwmon.read_sensors(
+        tree(tmp_path, {**BODEL, **NOUVEAU}) / "hwmon"
+    )
     temps: dict[str, dict[str, Any]] = by_type(rows, hwmon.TEMP)
     # Exactly what Glances called them, checked against the live box: history and
     # temp_labels keep working.
@@ -103,12 +110,14 @@ def test_glances_naming_for_labels_duplicates_and_sort_order(tmp_path: Path) -> 
         "hwmon/hwmon10/temp10_label": "Core 9",
     }
     rows: list[dict[str, Any]] = hwmon.read_sensors(tree(tmp_path, files) / "hwmon")
+    # Names from psutil's walk (hwmon10 first, so its Core 0 is the plain one),
+    # then Glances' natural sort by label.
     assert [(r["label"], r["value"]) for r in rows] == [
-        ("Package id 1", 42.0),
-        ("Core 9", 44.0),  # temp10 sorts before temp2
         ("Core 0", 43.0),
-        ("Package id 0", 40.0),
         ("Core 0 1", 41.0),
+        ("Core 9", 44.0),
+        ("Package id 0", 40.0),
+        ("Package id 1", 42.0),
     ]
 
 
@@ -222,11 +231,13 @@ def test_fan_rules_hide_empty_headers_and_alarm_below_a_minimum() -> None:
     shown, alarms, notes = hwmon.apply_fan_rules(rows, config)
     # The stopped CPU fan stays visible; the empty case header (no minimum) is hidden.
     assert [r["label"] for r in shown] == ["cpu", "rear", "t"]
-    assert alarms == ["fan cpu: 0 RPM, below its 300 RPM minimum"]
-    assert notes == [
-        "fan rear: 900 RPM, below its 1000 RPM minimum",
-        "fans config names 'gone', which this box does not have",
+    # A rule with a minimum for a fan that is not there is an alarm: a fan that
+    # cannot be read is not a fan that is fine.
+    assert alarms == [
+        "fan cpu: 0 RPM, below its 300 RPM minimum",
+        "fans config names 'gone', which this box does not have (min_rpm 100)",
     ]
+    assert notes == ["fan rear: 900 RPM, below its 1000 RPM minimum"]
 
 
 def test_fan_rules_default_applies_to_every_unnamed_fan() -> None:

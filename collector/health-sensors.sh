@@ -247,11 +247,15 @@ state["power"] = sensors(read("power.txt"), "power")
 # BMC's whole-machine reading (Dell "Pwr Consumption"; other vendors' "System Power"
 # / "Total Power"). Other Watts rows, e.g. per-PSU input power, are parts.
 UNITS = {"Watts": "W", "Amps": "A", "Volts": "V"}
-BMC_TOTAL = re.compile(r"consumption|system power|total power", re.IGNORECASE)
+BMC_TOTAL = re.compile(r"consumption|sys(tem)?[ _]?power|total[ _]?power|power[ _]?meter", re.IGNORECASE)
+# Each PSU's wall input ("PS1 Input Power"): together they are the whole box, so
+# never a part next to the CPU; the dashboard sums them when there is no total.
+PSU_INPUT = re.compile(r"^(ps|psu|pws)[ _]?\d+.*\binput\b", re.IGNORECASE)
 for r in state["power"]:
     words = r["reading"].split()
     r["unit"] = UNITS.get(words[-1]) if r["value"] is not None and words else None
     r["total"] = r["unit"] == "W" and bool(BMC_TOTAL.search(r["name"]))
+    r["psu_input"] = r["unit"] == "W" and not r["total"] and bool(PSU_INPUT.search(r["name"]))
 sensor_alarms(state["fans"], "fan")
 sensor_alarms(state["temps"], "temp")
 sensor_alarms(state["power"], "power")

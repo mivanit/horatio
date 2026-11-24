@@ -1706,8 +1706,27 @@ function testServicesCard() {
   assert(context.servicesGridHTML({ targets: {} }).includes('No services configured'));
 }
 
+// The error branch (state.json unreadable) still shows the server's own findings.
+function testHardwareErrorKeepsServerFindings() {
+  const context = liveContext(['hardware-content', 'hardware-value', 'snapshot-age']);
+  context.Date = { now: () => 100000000 };
+  context.escapeHtml = String;
+  context.hwHint = () => '';
+  const critical = [];
+  context.updateCardCritical = (id, on) => critical.push(on);
+  context.document.querySelector = () => context.elements.get('snapshot-age');
+  evaluate(context, between(app, 'function renderHardware', '// Power bar segment colours'));
+  const fanAlarm = 'fan f71889ed fan1: 0 RPM, below its 300 RPM minimum';
+  context.renderHardware({ status: 'error', detail: 'ts missing', sensor_alarms: [fanAlarm], sensor_notes: ['a hint'] });
+  const html = context.elements.get('hardware-content').innerHTML;
+  assert(html.includes(fanAlarm), 'a stopped fan disappears when state.json is unreadable');
+  assert(html.includes('a hint'));
+  assert.equal(context.elements.get('hardware-value').textContent, '1 issue');
+  assert.equal(critical.at(-1), true);
+}
+
 (async () => {
-  for (const test of [testHardwareMemoryRows, testPowerFromHwmonAndTotals, testHardwareShowsServerSensorAlarms, testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
+  for (const test of [testHardwareMemoryRows, testHardwareErrorKeepsServerFindings, testPowerFromHwmonAndTotals, testHardwareShowsServerSensorAlarms, testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testHardwareSince, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testCapturePendingAndHiddenTab, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
     testVersionFooter]) {

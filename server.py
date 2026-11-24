@@ -2124,6 +2124,8 @@ async def collect_history_sample(
     # reading that is the whole machine, so the stacked chart never guesses.
     power: dict[str, float | None] = {}
     power_total: str | None = None
+    # Every whole-machine reading, so the stacked chart never stacks one as a part.
+    power_totals: list[str] = []
     hw_fans: dict[str, float] = {}
     for sensor in temps_data:
         value_hw: float | None = _round(sensor.get("value"), 1)
@@ -2131,8 +2133,10 @@ async def collect_history_sample(
             hw_fans[sensor["label"]] = value_hw
         elif sensor.get("type") == hwmon.POWER and value_hw is not None:
             power[sensor["label"]] = value_hw
-            if sensor.get("total") and power_total is None:
-                power_total = sensor["label"]
+            if sensor.get("total"):
+                power_totals.append(sensor["label"])
+                if power_total is None:
+                    power_total = sensor["label"]
     sensor: dict[str, Any]
     for sensor in temps_data:
         # Only include temperature sensors (exclude battery, fan speed, etc.)
@@ -2155,30 +2159,34 @@ async def collect_history_sample(
         temps.update(
             {
                 r["label"]: r["value"]
-                for r in sensors.get("temps", [])
+                for r in sensors.get("temps") or []
                 if r.get("value") is not None
             }
         )
         hw_fans.update(
             {
                 r["label"]: r["value"]
-                for r in sensors.get("fans", [])
+                for r in sensors.get("fans") or []
                 if r.get("value") is not None
             }
         )
         row: dict[str, Any]
+        bmc_total: bool = False
         for row in collector_power_rows(sensors):
             power[row["label"]] = row["value"]
-            # The BMC measures the whole box: it wins over an hwmon meter.
+            # The BMC measures the whole box: it wins over an hwmon meter. The
+            # first BMC total, as the live power card (app.js) picks it.
             if row["total"]:
-                power_total = row["label"]
+                power_totals.append(row["label"])
+                if not bmc_total:
+                    power_total, bmc_total = row["label"], True
     # Drive temperatures from the 15-min snapshot (SMART), fresh only, keyed by device.
     health: dict[str, Any] = await asyncio.to_thread(_get_storage_health)
     if health["status"] == "ok":
         temps.update(
             {
                 d["device"]: d["temperature_c"]
-                for d in health.get("drives", [])
+                for d in health.get("drives") or []
                 if isinstance(d, dict)
                 and d.get("device")
                 and d.get("temperature_c") is not None
@@ -2196,6 +2204,8 @@ async def collect_history_sample(
         record["power"] = power
         if power_total is not None:
             record["power_total"] = power_total
+            if len(power_totals) > 1:
+                record["power_totals"] = power_totals
 
     # Load (point-in-time)
     if load_data:
@@ -4735,6 +4745,9 @@ async def sensors_snapshot() -> Response:
 HWMON_CACHE_SEC: Final[float] = 5.0  # several cards and the recorder read per poll
 _hwmon_lock: _thread.LockType = threading.Lock()
 _hwmon_cache: dict[str, Any] = {"at": -math.inf, "data": None}
+# Fans seen above 0 RPM since the server started: one of these at 0 has stopped,
+# it is not an empty header, so hide_if_zero no longer hides it.
+_fans_spun: set[str] = set()
 
 
 def get_hw_sensors() -> dict[str, Any]:
@@ -4747,7 +4760,12 @@ def get_hw_sensors() -> dict[str, Any]:
         if now - _hwmon_cache["at"] < HWMON_CACHE_SEC and _hwmon_cache["data"]:
             return _hwmon_cache["data"]
         raw: list[dict[str, Any]] = hwmon.read_sensors()
-        rows, items, notes = hwmon.fan_findings(raw, _CONFIG.get("fans"))
+        _fans_spun.update(
+            r["label"] for r in raw if r.get("type") == hwmon.FAN and r["value"] > 0
+        )
+        fan_rules: Any = _CONFIG.get("fans")
+        rows, items, notes = hwmon.fan_findings(raw, fan_rules, _fans_spun, TEMP_LABELS)
+        raw_of: dict[str, str] = {shown: raw for raw, shown in TEMP_LABELS.items()}
         notes = [*notes, *hwmon.setup_notes(raw)]
         data: dict[str, Any] = {
             "rows": rows,
@@ -4756,7 +4774,13 @@ def get_hw_sensors() -> dict[str, Any]:
             # fans were really read: a fan that has stopped answering is not a fan
             # that is fine again.
             "alarm_items": items,
-            "checked": [f"fan/{r['label']}" for r in raw if r.get("type") == hwmon.FAN],
+            # Plus every fan a rule names, read or not: a ruled fan that stops
+            # answering raises its own alarm under the same key (hwmon.fan_findings).
+            "checked": [f"fan/{r['label']}" for r in raw if r.get("type") == hwmon.FAN]
+            + [
+                f"fan/{raw_of.get(n, n)}"
+                for n in (fan_rules if isinstance(fan_rules, dict) else {})
+            ],
             "notes": notes,
         }
         _hwmon_cache.update(at=now, data=data)
@@ -4775,7 +4799,7 @@ async def hw_sensors() -> Response:
 @APP.get("/api/sensor-alarms")
 async def sensor_alarms() -> Response:
     """The alarms and notes the server itself decides (fan minimums, setup hints).
-    The collectors' alarms stay in their own files; a login script reads both."""
+    /api/alarms has every source's alarms, these included, with since."""
     data: dict[str, Any] = await asyncio.to_thread(get_hw_sensors)
     body: dict[str, Any] = {"alarms": data["alarms"], "notes": data["notes"]}
     return Response(content=json.dumps(body), media_type="application/json")
@@ -4788,8 +4812,9 @@ def collector_power_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     ``reading`` ("238 Watts") and ``entity`` ("rapl" for the CPU/DRAM parts), so for
     one release both are read. The same capture also carries PSU amps."""
     rows: list[dict[str, Any]] = []
+    psu: list[dict[str, Any]] = []
     r: Any
-    for r in snapshot.get("power", []):
+    for r in snapshot.get("power") or []:
         if not isinstance(r, dict) or r.get("value") is None:
             continue
         watts: bool = (
@@ -4800,7 +4825,15 @@ def collector_power_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
         if not watts:
             continue
         total: bool = bool(r["total"]) if "total" in r else r.get("entity") != "rapl"
+        if r.get("psu_input"):
+            psu.append(r)
+            continue
         rows.append({"label": r.get("label", ""), "value": r["value"], "total": total})
+    # Per-PSU wall inputs: their sum is the whole box, used only without a total.
+    if psu and not any(row["total"] for row in rows):
+        rows.append(
+            {"label": "PSU input", "value": sum(r["value"] for r in psu), "total": True}
+        )
     return rows
 
 
@@ -5828,9 +5861,9 @@ def _str_map(key: str, value_types: tuple[type, ...]) -> dict[str, Any]:
     }
 
 
-# Display names for temperature sensors ({"loc1": "I350 NIC"}); the dashboard
-# applies them, records keep the sensor's own name. Here they only let a
-# temp_thresholds entry be written under either name.
+# Display names for sensors ({"loc1": "I350 NIC"}); the dashboard applies them,
+# records keep the sensor's own name. Here they let a temp_thresholds entry or a
+# fans rule be written under either name.
 # config.json sensor_labels names any sensor (temperature, fan, power); temp_labels is
 # its older name, still read. sensor_labels wins where both name the same sensor.
 TEMP_LABELS: Final[dict[str, str]] = {
@@ -5842,8 +5875,8 @@ TEMP_THRESHOLDS: Final[dict[str, float]] = _str_map("temp_thresholds", (int, flo
 
 
 def _temp_limit(label: str, default: float) -> float:
-    """The sensor's own limit (temp_thresholds, by its name or its temp_labels
-    name), else ``default``."""
+    """The sensor's own limit (temp_thresholds, by its own name or its
+    sensor_labels / temp_labels name), else ``default``."""
     name: str | None
     for name in (label, TEMP_LABELS.get(label)):
         if name is not None and name in TEMP_THRESHOLDS:
@@ -6699,8 +6732,10 @@ JSON API (machine-readable; prefer these for exact values)
   GET /api/alarms                everything wrong now in one list, since when, and the
                                  newest alarm changes: {sources, active, held, recent}
   GET /api/storage-health        drive SMART/RAID/ECC snapshot (root collector)
+  GET /api/4/sensors             temperatures, fans, power from hwmon (the server's own)
+  GET /api/sensor-alarms         the server's own fan alarms and setup notes
   GET /api/4/<plugin>            live Glances metrics, raw (rates not capped): cpu,
-                                 mem, memswap, load, network, diskio, fs, sensors, gpu
+                                 mem, memswap, load, network, diskio, fs, gpu
   GET /config.json               the config file as written: title, ping targets,
                                  http targets, thresholds, limits if set
   GET /themes/index.json         names of the themes in themes/ (see themes/README.md)

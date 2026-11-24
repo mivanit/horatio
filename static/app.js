@@ -612,9 +612,17 @@ function renderHardware(data) {
   }
   if (data?.status === 'error') {
     const detail = data.detail ? `: ${escapeHtml(data.detail)}` : '';
-    content.innerHTML = `<div class="info-item text-error">Cannot read the ${collector} snapshot${detail}</div>`;
+    content.innerHTML = serverAlarms.map(a => hwRow('text-error', a)).join('') +
+      serverNotes.map(n => hwRow('hw-note', n)).join('') +
+      `<div class="info-item text-error">Cannot read the ${collector} snapshot${detail}</div>`;
     updateCardNoData('hardware', false);
     reset();
+    if (serverAlarms.length) {
+      updateCardCritical('hardware', true);
+      const valueEl = document.getElementById('hardware-value');
+      valueEl.textContent = `${serverAlarms.length} issue${serverAlarms.length === 1 ? '' : 's'}`;
+      valueEl.className = 'value text-error';
+    }
     return;
   }
 
@@ -2272,12 +2280,16 @@ async function fetchDataOnce() {
       // Watts rows only (the same capture carries PSU amps). The collector writes
       // `unit` and `total`; one from before this release only `reading` and `entity`
       // ('rapl' = a CPU/DRAM part), so both are read for one release.
+      const psuInputs = [];
       (sen.power ?? []).forEach(p => {
         const watts = p.unit !== undefined ? p.unit === 'W' : String(p.reading).endsWith('Watts');
         if (p.value == null || !watts) return;
+        if (p.psu_input === true) { psuInputs.push(p.value); return; }  // the whole box, summed below
         power.push({ label: p.label, value: p.value, fromCollector: true,
                      total: p.total !== undefined ? p.total === true : p.entity !== 'rapl' });
       });
+      if (psuInputs.length && !power.some(p => p.total && p.fromCollector))
+        power.push({ label: 'PSU input', value: psuInputs.reduce((a, b) => a + b, 0), fromCollector: true, total: true });
     }
     // Drive temperatures from the 15-min SMART snapshot, keyed by device. SAS
     // drives report a trip point; the others get spinning-rust defaults (50 / 60).
@@ -3666,7 +3678,10 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
       const stack = metric === 'power' && mode === 'stack';
       // Per record, since the whole-machine reading can change name (a BMC added).
       const totalKeys = stack ? records.map(powerTotalKey) : [];
-      const everTotal = new Set(totalKeys.filter(Boolean));
+      // Every whole-machine reading a record names (power_totals), not only the one
+      // it stacks against: an ACPI meter next to the BMC is not a part.
+      const everTotal = new Set(totalKeys.filter(Boolean)
+        .concat(records.flatMap(r => Array.isArray(r?.power_totals) ? r.power_totals : [])));
       let sensors = Array.from(sensorNames);
       if (stack) {
         const rank = l => l.startsWith('GPU') ? 0 : l.startsWith('CPU') ? 1 : l.startsWith('DRAM') ? 2 : 3;
