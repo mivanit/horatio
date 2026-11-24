@@ -7733,7 +7733,9 @@ def main(port: int, glances_port: int, host: str = DEFAULT_HOST) -> None:
     APP.state.glances_url = f"http://127.0.0.1:{glances_port}"
     APP.state.glances_port = glances_port
 
-    logger.info("Starting dashboard server on port %d", port)
+    logger.info(
+        "Starting Horatio v%s (build %s) on port %d", VERSION, BUILD or "unknown", port
+    )
     logger.info("  Local:   http://localhost:%d", port)
     local_ip: str | None = get_local_ip()
     if local_ip:

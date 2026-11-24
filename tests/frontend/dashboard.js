@@ -481,7 +481,7 @@ function testTempLabelsAndLimits() {
   const otherFan = fan.replace('01:00.0', '02:00.0');
   const matchingFans = plain(context.sensorDisplayLabels([fan, otherFan], ['Processor Fan', 'Processor Fan']));
   assert.notEqual(matchingFans[0], matchingFans[1], 'same-label fans remain distinguishable');
-  assert(matchingFans.every(label => label.startsWith('Processor Fan [')));
+  assert.deepEqual(matchingFans, ['Processor Fan [0000:01:00.0/amdgpu/fan1]', 'Processor Fan [0000:02:00.0/amdgpu/fan1]']);
   assert.equal(context.tempDisplayLabel('legacy fan'), 'legacy fan');
   const composite = 'Composite [pci0000:00/0000:01:00.0/temp1]';
   assert.equal(context.tempDisplayLabel(composite), 'Composite', 'an unambiguous history label hides its physical path');
@@ -492,9 +492,10 @@ function testTempLabelsAndLimits() {
   context.dashboardConfig.temp_thresholds[composite] = 75;
   assert.equal(context.tempLimitFor(composite), 75, 'an identity-specific threshold takes precedence');
   const otherComposite = composite.replace('01:00.0', '02:00.0');
-  assert.deepEqual(plain(context.sensorDisplayLabels([composite, otherComposite])), [composite, otherComposite],
-    'duplicate display names retain distinguishing physical identities');
-  assert.deepEqual(plain(context.sensorDisplayLabels(['Composite', composite])), ['Composite', composite],
+  assert.deepEqual(plain(context.sensorDisplayLabels([composite, otherComposite])),
+    ['Composite [0000:01:00.0/temp1]', 'Composite [0000:02:00.0/temp1]'],
+    'duplicate display names retain only the distinguishing path suffix');
+  assert.deepEqual(plain(context.sensorDisplayLabels(['Composite', composite])), ['Composite', 'Composite [temp1]'],
     'legacy and new series remain separate');
   context.dashboardConfig.sensor_labels.Composite = 'Drive temperature';
   assert.equal(context.tempDisplayLabel(composite), 'Drive temperature', 'Lua physical keys preserve old display aliases');
@@ -1923,13 +1924,19 @@ function testHardwareIndependentSources() {
     .includes('retired by operator: Removed drive'));
 }
 
-function testPowerHistoryPerRecord() {
+async function testPowerHistoryPerRecord() {
   const context = liveContext([]);
   Object.assign(context, {
     HISTORY_METRICS: { power: { perDevice: true, unit: ' W' }, fans: { perDevice: true, unit: ' RPM' }, temps: { perDevice: true, unit: '°C' } },
     CHART_TICK: {}, CHART_GRID: {}, CHART_FONT_SIZE: 16, HISTORY_AXIS_WIDTH: 84, HISTORY_PLOT_INSET: 8,
     axisNumber: v => v,
-    Chart: class { constructor(canvas, chart) { return chart; } },
+    Chart: class {
+      constructor(canvas, chart) { Object.assign(this, chart); }
+      isDatasetVisible(i) { return !this.data.datasets[i].hidden; }
+      setDatasetVisibility(i, visible) { this.data.datasets[i].hidden = !visible; }
+      destroy() {}
+      update() {}
+    },
   });
   evaluate(context, between(config, 'const CORE_TEMP_LABEL', 'function formatTimeAgo') +
     between(app, 'function extractHistoryValue', '// Create a history card for a metric'));
@@ -1977,8 +1984,29 @@ function testPowerHistoryPerRecord() {
   const current = { timestamp: old.timestamp, temps: { [physical]: 43 } };
   assert.equal(temperatures([current]).data.datasets[0].label, 'Composite', 'a lone physical series has a short legend');
   const mixedTemps = temperatures([{ timestamp: old.timestamp, temps: { Composite: 40 } }, current]);
-  assert.deepEqual(plain(mixedTemps.data.datasets.map(d => d.label)), ['Composite', 'Max', physical]);
+  assert.deepEqual(plain(mixedTemps.data.datasets.map(d => d.label)), ['Composite', 'Max', 'Composite [temp1]']);
   assert.deepEqual(plain(mixedTemps.data.datasets.map(d => d.data)), [[40, null], [40, 43], [null, 43]], 'display polish never joins old and new identities');
+
+  // A range change removes the naming collision and an alias changes the name
+  // again. Neither may transfer the user's hidden selection to the other key.
+  mixedTemps.setDatasetVisibility(2, false);
+  const box = { innerHTML: '' };
+  const entry = { chart: mixedTemps, loadSeq: 0,
+    card: { dataset: { historyId: 'temps' }, querySelector: () => box } };
+  context.historyCards = new Map([['temps', entry]]);
+  evaluate(context, between(app, 'async function loadHistoryData', '// Remove a history card'));
+  await context.loadHistoryData('temps', 1, { ok: true, records: [current] });
+  let index = entry.chart.data.datasets.findIndex(d => d.sensorKey === physical);
+  assert.equal(entry.chart.data.datasets[index].label, 'Composite');
+  assert(!entry.chart.isDatasetVisible(index), 'hidden state survives a changed display name');
+  context.dashboardConfig.sensor_labels = { [physical]: 'Drive temperature' };
+  await context.loadHistoryData('temps', 24, { ok: true, records: [current,
+    { timestamp: old.timestamp, temps: { Composite: 40 } }] });
+  index = entry.chart.data.datasets.findIndex(d => d.sensorKey === physical);
+  assert.equal(entry.chart.data.datasets[index].label, 'Drive temperature');
+  assert(!entry.chart.isDatasetVisible(index), 'an alias does not reset hidden state');
+  assert(entry.chart.isDatasetVisible(entry.chart.data.datasets.findIndex(d => d.sensorKey === 'Composite')),
+    'the separate legacy series stays visible');
 }
 
 async function testHistoryCapabilities() {

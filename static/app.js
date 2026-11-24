@@ -3849,6 +3849,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
         const color = band && sensor.startsWith(band + ' ') ? colors[0] : colors[i % colors.length];
         return {
           label: displayLabels[i],
+          sensorKey: sensor,
           data: data,
           borderColor: color,
           backgroundColor: stack ? withAlpha(color, '60') : sensor === `${band} max` ? withAlpha(color, '15') : 'transparent',
@@ -4524,10 +4525,10 @@ async function loadHistoryData(metric, hours, data) {
 
   // Destroy and recreate chart to ensure all datasets, axes, and scales
   // are correct for the new time range. The user's trace selection (legend
-  // clicks, "none") is kept across the rebuild, matched by dataset label.
-  const hiddenByLabel = new Map();
+  // clicks, "none") is kept by sensor identity; fixed traces use their labels.
+  const hiddenByKey = new Map();
   if (entry.chart) {
-    entry.chart.data.datasets.forEach((ds, i) => hiddenByLabel.set(ds.label, !entry.chart.isDatasetVisible(i)));
+    entry.chart.data.datasets.forEach((ds, i) => hiddenByKey.set(ds.sensorKey ?? ds.label, !entry.chart.isDatasetVisible(i)));
     entry.chart.destroy();
   }
   const canvasId = `chart-${entry.card.dataset.historyId}`;
@@ -4535,9 +4536,10 @@ async function loadHistoryData(metric, hours, data) {
   const range = typeof data.cutoff === 'number' && typeof data.now === 'number'
     ? { min: data.cutoff * 1000, max: data.now * 1000 } : null;
   entry.chart = createHistoryChart(canvasId, metric, data.records, entry.unitType || 'percent', hours, entry.mode, range);
-  if (hiddenByLabel.size) {
+  if (hiddenByKey.size) {
     entry.chart.data.datasets.forEach((ds, i) => {
-      if (hiddenByLabel.has(ds.label)) entry.chart.setDatasetVisibility(i, !hiddenByLabel.get(ds.label));
+      const key = ds.sensorKey ?? ds.label;
+      if (hiddenByKey.has(key)) entry.chart.setDatasetVisibility(i, !hiddenByKey.get(key));
     });
     entry.chart.update();
   }

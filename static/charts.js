@@ -498,9 +498,15 @@ function sensorDisplayLabels(keys, originals = []) {
   const labels = keys.map((key, i) => tempDisplayLabel(key, originals[i]));
   const counts = new Map();
   labels.forEach(label => counts.set(label, (counts.get(label) ?? 0) + 1));
+  const paths = keys.map(key =>
+    (/ \[([^\]]+)\]$/.exec(key)?.[1] ?? key.replace(/^@/, '')).split('/'));
   return labels.map((label, i) => {
     if (counts.get(label) === 1 || keys[i] === label) return label;
-    const identity = / \[([^\]]+)\]$/.exec(keys[i])?.[1] ?? keys[i].replace(/^@/, '');
+    // Keep only enough trailing path components to distinguish this label.
+    let depth = 1;
+    while (depth < paths[i].length && paths.some((path, j) => j !== i && labels[j] === label &&
+      path.slice(-depth).join('/') === paths[i].slice(-depth).join('/'))) depth++;
+    const identity = paths[i].slice(-depth).join('/');
     return `${label} [${identity}]`;
   });
 }

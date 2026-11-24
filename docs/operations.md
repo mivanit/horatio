@@ -176,6 +176,11 @@ The Python backend does not rotate these JSON-lines files. The Lua backend
 [rotates history into gzip archives](../lua/README.md#openwrt). `/var/lib/horatio/` holds only the collectors'
 two current snapshots, not history.
 
+Every Python server start logs the Horatio version and installed Git build in
+`logs/server.log` and, under systemd, the service journal. This records when an
+upgraded build starts without adding an alarm event. The build comes from the
+installer's `.build` stamp; it is `unknown` when no Git build stamp is available.
+
 ## Alarms
 
 `events.jsonl` covers hardware and host alarms: the two root collectors' (by the `key`
