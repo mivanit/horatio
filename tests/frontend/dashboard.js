@@ -1920,6 +1920,14 @@ function testHardwareIndependentSources() {
   assert(!html().includes('data-retire-alarm='), 'older backends do not offer an unsupported operation');
   assert(context.hwEventText({ event: 'retired', text: 'Removed drive', timestamp: new Date(now).toISOString() })
     .includes('retired by operator: Removed drive'));
+  snapshot.alarms = []; snapshot.alarm_items = []; snapshot.alarm_held = [];
+  const reviewed = { source: 'state', key: 'sel/memory', text: 'Investigated memory event', since: ts,
+    reviewed: { timestamp: ts, note: 'Replaced DIMM' } };
+  context.renderHardware({ status: 'ok', age_sec: 0, alarms: [], alarm_reviewed: [reviewed] });
+  assert.equal(header(), '1 reviewed');
+  assert(!context.elements.get('hardware-value').className.includes('text-success'));
+  assert(!html().includes('no alarms') && html().includes('No unreviewed issues'));
+  assert(!context.statuses.critical && !context.statuses.warning, 'reviewed evidence is neutral, not recovered or critical');
 }
 
 async function testPowerHistoryPerRecord() {

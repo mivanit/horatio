@@ -631,16 +631,20 @@ function renderHardware(data) {
     .filter(h => typeof h?.text === 'string' && h.unchecked_since != null &&
       (!hostMismatch || h.key !== 'gpu/driver-mismatch'));
   const info = [...snapshots.flatMap(snap => Array.isArray(snap.info) ? snap.info : []), ...serverNotes];
+  const cachedAlarms = getCache('alarms');
+  const reviewed = Array.isArray(data.alarm_reviewed) ? data.alarm_reviewed :
+    Array.isArray(cachedAlarms?.reviewed) ? cachedAlarms.reviewed : [];
 
   // Header: the verdict, and the snapshot's OWN age (not when it was fetched).
   const valueEl = document.getElementById('hardware-value');
   valueEl.textContent = alarms.length ? `${alarms.length} issue${alarms.length === 1 ? '' : 's'}` :
     unchecked.length ? `${unchecked.length} unchecked` : stateUnknown ? 'snapshot unavailable' :
     stale ? 'stale' : serverUnknown ? `checks ${data.sensor_status}` : sensorsUnknown ? 'sensors stale' :
+    reviewed.length ? `${reviewed.length} reviewed` :
     stateAbsent || sensorsAbsent ? 'no detected issues' : 'all clear';
   valueEl.className = 'value ' + (alarms.length ? 'text-error' :
     stateUnknown || stale || serverUnknown || sensorsUnknown || unchecked.length ? 'text-warning' :
-    stateAbsent || sensorsAbsent ? '' : 'text-success');
+    stateAbsent || sensorsAbsent || reviewed.length ? '' : 'text-success');
   document.querySelector('#hardware-card .cache-time').textContent = ageText;
 
   // Issues: alarms in red, then the collector's info notes in grey. A stale
@@ -684,7 +688,9 @@ function renderHardware(data) {
         title="${enabled ? 'Close an unchecked alarm while keeping its history' : 'Configure the settings password to close alarms'}">Close unchecked</button>`);
     }
   });
-  if (stateKnown && !stale && !serverUnknown && !sensorsUnknown && !sensorsAbsent && alarms.length === 0 && unchecked.length === 0) issues.push(hwRow('text-success', 'no alarms'));
+  if (stateKnown && !stale && !serverUnknown && !sensorsUnknown && !sensorsAbsent && alarms.length === 0 && unchecked.length === 0) {
+    issues.push(reviewed.length ? hwRow('hw-note', 'No unreviewed issues; reviewed evidence remains below.') : hwRow('text-success', 'no alarms'));
+  }
   info.filter(i => !/^(sd[a-z]+|nvme\d+n\d+):/.test(i)).forEach(i => issues.push(hwRow('hw-note', i)));
 
   // Collector details are usable only with a valid snapshot timestamp.
@@ -709,7 +715,6 @@ function renderHardware(data) {
 
   // A short teaser keeps recovered incidents visible; the history card has the
   // timeline and full details. Recorded facts remain valid after a refresh fails.
-  const cachedAlarms = getCache('alarms');
   const log = cachedAlarms?.recent;
   const recent = (Array.isArray(log) ? log : [])
     .filter(e => ['raised', 'cleared', 'retired', 'expired', 'reviewed', 'reopened'].includes(e?.event) || e?.reason === 'new_evidence')
@@ -718,7 +723,6 @@ function renderHardware(data) {
   if (typeof historyMetricAvailable === 'function' && historyMetricAvailable('alarms')) {
     recent.push('<button class="history-btn" data-history-metric="alarms">Alarm history</button>');
   }
-  const reviewed = Array.isArray(cachedAlarms?.reviewed) ? cachedAlarms.reviewed : [];
   const reviewOpen = content.querySelector?.('[data-reviewed]')?.open;
   const reviewedHTML = reviewed.length ? `<details data-reviewed ${reviewOpen ? 'open' : ''}><summary>Reviewed evidence (${reviewed.length})</summary>${reviewed.map(row => hwRow('hw-note', row.text) +
     (row.reviewed?.note ? hwRow('hw-note', row.reviewed.note) : '')).join('')}</details>` : '';
