@@ -5,6 +5,26 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- The server raises its own host alarms, in `/api/alarms` and on the Hardware card:
+  `/run/reboot-required` (a note, an alarm after a week), an NVIDIA kernel module that
+  no longer matches the installed library (at once; the text says whether a reboot fixes
+  it), and ZFS pools (`zfs.py`: not ONLINE, device or data errors, never scrubbed, last
+  scrub older than `zfs_scrub_max_days` (38), an expected pool missing, or state
+  unreadable while pools are expected). New config keys `zfs_pools`,
+  `zfs_scrub_max_days`, `sensor_hide`.
+- `GET /api/alarms` gains `notes`; **`GET /api/sensor-alarms` is removed** (its alarms
+  were already in `/api/alarms`). Update login scripts that read it.
+- GPU fans (percent of maximum) on the Fans card against a second axis, and in history
+  as `gpu_fans`; `/api/gpu-info` gains `fan_percent`.
+- Fans: a fan that stops after turning stays on the card at 0 RPM; a ruled fan that
+  cannot be read is an alarm; rules and alarm text use `sensor_labels` names; a
+  non-number `min_rpm` is a note. Fan names follow the device, not probe order.
+- Power: the history picks the first BMC total like the live card and never stacks a
+  second total; more BMC total names; per-PSU inputs are not parts; APU package power
+  is not counted twice. Temperatures are sorted like Glances did.
+- Alarm history: keys with a `#2` suffix clear; a held alarm needs 3 unchecked snapshots
+  as well as 30 days to expire; the server's own alarms it cannot re-check are shown as
+  held; a failing sensor read no longer stops the collectors' tracking.
 - New `GET /api/alarms`: everything wrong right now in one list (both collector
   snapshots, the server's own fan rules and any service that is down), each with since
   when, plus the newest lines of the event log. Until now the two snapshots each had their own `alarms`
