@@ -74,6 +74,7 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+import hostcheck
 import hwmon
 
 STATIC_DIR: Final[Path] = Path(__file__).parent / "static"
@@ -672,6 +673,24 @@ def _parse_gpu_stats(stdout: str) -> list[dict[str, Any]]:
     return gpus
 
 
+_nvidia_logged: set[str] = set()
+
+
+def _log_nvidia_failure(result: subprocess.CompletedProcess[str]) -> None:
+    """Log a failed nvidia-smi once per distinct message, not on every poll.
+    nvidia-smi prints its errors on stdout (a driver/library mismatch: exit 18),
+    so both streams are read."""
+    message: str = (
+        result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+    ).splitlines()[0]
+    if message in _nvidia_logged:
+        return
+    _nvidia_logged.add(message)
+    if hostcheck.MISMATCH_TEXT in message:
+        message += " (the driver was updated under the running module: reboot)"
+    logger.warning("nvidia-smi failed (exit %d): %s", result.returncode, message)
+
+
 def get_gpu_stats() -> list[dict[str, Any]]:
     """GPU utilization, memory, and temperature from nvidia-smi (driver-native).
 
@@ -712,7 +731,7 @@ def get_gpu_stats() -> list[dict[str, Any]]:
             ]
             result = subprocess.run(command, capture_output=True, text=True, timeout=5)
         if result.returncode != 0:
-            logger.warning("nvidia-smi failed: %s", result.stderr.strip())
+            _log_nvidia_failure(result)
             return []
         return _parse_gpu_stats(result.stdout)
     except FileNotFoundError:
@@ -3717,10 +3736,7 @@ def _get_gpu_info() -> list[dict[str, int | float | str | None]]:
         logger.warning("nvidia-smi error: %s", e)
         return []
     if result.returncode != 0:
-        logger.warning(
-            "nvidia-smi failed: %s",
-            result.stderr.strip() or f"exit {result.returncode}",
-        )
+        _log_nvidia_failure(result)
         return []
 
     # Get CUDA version from nvidia-smi header. It changes only with the driver,
@@ -4715,7 +4731,7 @@ async def storage_health() -> Response:
     result: dict[str, Any] = with_alarm_history(
         "state", await asyncio.to_thread(_get_storage_health), _alarm_memory
     )
-    hw: dict[str, Any] = await asyncio.to_thread(get_hw_sensors)
+    hw: dict[str, Any] = await asyncio.to_thread(server_findings)
     result["sensor_alarms"] = hw["alarms"]
     # The same alarms with since when (the server's alarm history).
     result["sensor_alarm_items"] = [
@@ -4804,11 +4820,43 @@ async def hw_sensors() -> Response:
 
 @APP.get("/api/sensor-alarms")
 async def sensor_alarms() -> Response:
-    """The alarms and notes the server itself decides (fan minimums, setup hints).
-    /api/alarms has every source's alarms, these included, with since."""
-    data: dict[str, Any] = await asyncio.to_thread(get_hw_sensors)
+    """The alarms and notes the server itself decides (fan minimums, setup hints,
+    host checks). /api/alarms has every source's alarms, these included, with since."""
+    data: dict[str, Any] = await asyncio.to_thread(server_findings)
     body: dict[str, Any] = {"alarms": data["alarms"], "notes": data["notes"]}
     return Response(content=json.dumps(body), media_type="application/json")
+
+
+HOST_CHECK_CACHE_SEC: Final[float] = 30.0  # the tracker's pass; modinfo on a mismatch
+_host_lock: _thread.LockType = threading.Lock()
+_host_cache: dict[str, Any] = {"at": -math.inf, "data": None}
+
+
+def _host_findings() -> hostcheck.Findings:
+    """hostcheck.host_findings, cached (sync)."""
+    with _host_lock:
+        now: float = time.monotonic()
+        if now - _host_cache["at"] < HOST_CHECK_CACHE_SEC and _host_cache["data"]:
+            return _host_cache["data"]
+        data: hostcheck.Findings = hostcheck.host_findings()
+        _host_cache.update(at=now, data=data)
+        return data
+
+
+def server_findings() -> dict[str, Any]:
+    """Everything the server decides itself, as one alarm source ("dashboard"):
+    the hwmon fan rules and setup hints (get_hw_sensors) plus the host checks
+    (hostcheck: a pending reboot, an NVIDIA driver/library mismatch). The same
+    shape as get_hw_sensors without ``rows`` (sync)."""
+    hw: dict[str, Any] = get_hw_sensors()
+    host: hostcheck.Findings = _host_findings()
+    items: list[dict[str, Any]] = [*hw["alarm_items"], *host.alarms]
+    return {
+        "alarms": [item["text"] for item in items],
+        "alarm_items": items,
+        "checked": [*hw["checked"], *host.checked],
+        "notes": [*hw.get("notes", []), *host.notes],
+    }
 
 
 def collector_power_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -5174,9 +5222,9 @@ def _append_events(events: list[dict[str, Any]], path: Path = EVENTS_FILE) -> No
 
 
 def _server_findings_or_none() -> dict[str, Any] | None:
-    """get_hw_sensors for the tracker (sync): None, logged, when it fails."""
+    """server_findings for the tracker (sync): None, logged, when it fails."""
     try:
-        return get_hw_sensors()
+        return server_findings()
     except Exception:
         logger.exception("alarm history: cannot read the server's own findings")
         return None
@@ -5437,7 +5485,7 @@ def alarms_snapshot(
 @APP.get("/api/alarms")
 async def alarms() -> Response:
     """Every active alarm in one list (both collector snapshots, the server's own
-    fan rules and the service checks) with since when, plus the newest lines of
+    fan rules and host checks, and the service checks) with since when, plus the newest lines of
     the event log. Always 200; ``sources`` says which could be read."""
     state: dict[str, Any]
     sensors: dict[str, Any]
@@ -5446,7 +5494,7 @@ async def alarms() -> Response:
     state, sensors, hw, events = await asyncio.gather(
         asyncio.to_thread(_get_storage_health),
         asyncio.to_thread(_get_storage_health, SENSORS_PATH, SENSORS_STALE_SEC),
-        asyncio.to_thread(get_hw_sensors),
+        asyncio.to_thread(server_findings),
         asyncio.to_thread(_read_events),
     )
     now: float = time.time()

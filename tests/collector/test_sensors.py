@@ -451,6 +451,24 @@ class TestGPUSensors:
         state, _ = self.collect(files={"no-bmc": ""})
         assert not covered(state, "bmc/temp/Temp@3.1")
 
+    def test_a_driver_library_mismatch_is_left_to_the_dashboard(
+        self: TestGPUSensors,
+    ) -> None:
+        # nvidia-smi after a driver update under the running module: exit 18 and
+        # the message on stdout, for the query and for -q alike.
+        mismatch: dict[str, str | int] = {
+            "stdout": "Failed to initialize NVML: Driver/library version mismatch\n"
+            "NVML library version: 580.190\n",
+            "status": 18,
+        }
+        state, _ = self.collect(
+            extended=mismatch, basic=mismatch, temperature=str(mismatch["stdout"])
+        )
+        # Not three vague collector alarms: the server raises the one that says why.
+        assert state["alarms"] == []
+        assert state["gpus"] == []
+        assert any("version mismatch" in line for line in state["info"])
+
 
 def test_power_rows_say_their_unit_and_which_is_the_total(tmp_path: Path) -> None:
     """The BMC's whole-machine reading is marked `total`, PSU amps are not Watts,

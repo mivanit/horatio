@@ -123,6 +123,14 @@ if command -v nvidia-smi > /dev/null; then
         fi
     }
     timeout "$GPU_TIMEOUT" nvidia-smi -q -d TEMPERATURE > "$tmp/gpu-temp.txt" 2> "$tmp/gpu-temp.err" || echo "exit $?" >> "$tmp/gpu-temp.err"
+    # A driver updated under the running kernel module: NVML refuses (exit 18,
+    # "Driver/library version mismatch" on stdout) until a reboot. The dashboard
+    # raises that one alarm itself (hostcheck.py), so it is not three vague
+    # `collector:` alarms here; the GPU rows are simply absent (and held).
+    if grep -qs 'Driver/library version mismatch' "$tmp/gpu.txt" "$tmp/gpu-temp.txt"; then
+        for f in gpu gpu-temp; do : > "$tmp/$f.txt"; : > "$tmp/$f.err"; done
+        : > "$tmp/gpu-mismatch"
+    fi
 else
     for f in gpu gpu-temp; do : > "$tmp/$f.txt"; : > "$tmp/$f.err"; done
 fi
@@ -192,6 +200,8 @@ except FileNotFoundError:
 state = {"schema": 1, "ts": int(time.time()), "boot_id": boot_id(), "info": []}
 if os.path.exists(os.path.join(tmp, "no-bmc")):
     state["info"].append("no BMC (ipmitool or /dev/ipmi0 missing): no BMC sensors")
+if os.path.exists(os.path.join(tmp, "gpu-mismatch")):
+    state["info"].append("nvidia: driver/library version mismatch, no GPU readings (the dashboard raises the alarm)")
 
 # ---- IPMI sensors ------------------------------------------------------------
 def sensors(text, what):

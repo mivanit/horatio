@@ -15,7 +15,7 @@ import pytest
 def isolated_app(app_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     name: str
     # hwmon first: server imports it, and must get the copy, not the checkout's.
-    for name in ("hwmon", "server", "tui"):
+    for name in ("hwmon", "hostcheck", "server", "tui"):
         spec: importlib.machinery.ModuleSpec | None = (
             importlib.util.spec_from_file_location(name, app_dir / f"{name}.py")
         )
@@ -23,3 +23,7 @@ def isolated_app(app_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         module: ModuleType = importlib.util.module_from_spec(spec)
         monkeypatch.setitem(sys.modules, name, module)
         spec.loader.exec_module(module)
+    # The host checks read this machine's /run and NVIDIA driver; tests that want
+    # them call hostcheck's functions with a fake tree instead.
+    hostcheck: ModuleType = sys.modules["hostcheck"]
+    monkeypatch.setattr(hostcheck, "host_findings", hostcheck.Findings)
