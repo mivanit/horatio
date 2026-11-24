@@ -445,6 +445,7 @@
       active: services.filter(s => s.ok === false).map(s => ({
         source: 'services', key: 'service/' + s.name, text: `${s.name}: down (${s.error})`, value: null, since: s.down_since, initial: null })),
       held: [],
+      retirement: { supported: false, password_configured: false },
       recent: [
         { timestamp: iso(hot.since), event: 'raised', ...hot },
         { timestamp: iso(hot.since + 1200), event: 'cleared', ...hot, active_for_s: 1200 },
@@ -488,7 +489,7 @@
     '/4/load', '/4/uptime', '/4/system', '/4/fs',
     '/cpu-info', '/gpu-info', '/ip-info', '/ping', '/gpu-processes', '/disk-processes', '/network-processes',
     '/processlist', '/history', '/history/settings', '/history/record', '/history/field/temps',
-    '/history/field/processes', '/mail', '/storage-health', '/sensors', '/alarms', '/services',
+    '/history/field/processes', '/mail', '/storage-health', '/sensors', '/alarms', '/alarms/retire', '/services',
     '/services/history', '/version', '/list-endpoints',
   ];
 
@@ -565,6 +566,7 @@
   const POST = {
     '/history/record': () => [200, { status: 'skipped', reason: 'demo' }],
     '/history/settings': () => [403, { error: 'This is a read-only demo: settings cannot be saved.' }],
+    '/alarms/retire': () => [403, { error: 'This is a read-only demo: alarms cannot be retired.' }],
   };
 
   // Capture endpoints take as long as the capture would on a real box.

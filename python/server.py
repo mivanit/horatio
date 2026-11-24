@@ -3560,12 +3560,17 @@ async def update_history_settings(request: Request) -> Response:
             APP.state.manual_record_min_interval = min_record_interval
             changed = True
 
-        if process_count is not None and process_count != APP.state.history_process_count:
+        if (
+            process_count is not None
+            and process_count != APP.state.history_process_count
+        ):
             APP.state.history_process_count = process_count
             changed = True
 
         ping_enabled: Any = body.get("ping_enabled")
-        if ping_enabled is not None and APP.state.ping_enabled != (ping_enabled is True):
+        if ping_enabled is not None and APP.state.ping_enabled != (
+            ping_enabled is True
+        ):
             APP.state.ping_enabled = ping_enabled is True
             changed = True
 
@@ -4130,7 +4135,9 @@ def _get_gpu_processes() -> list[dict[str, Any]]:
         timeout=5,
     )
     if uuid_result.returncode != 0:
-        logger.warning("Cannot map GPU processes to devices: nvidia-smi UUID query failed")
+        logger.warning(
+            "Cannot map GPU processes to devices: nvidia-smi UUID query failed"
+        )
         return []
     uuid_to_index: dict[str, int] = {}
     line: str
@@ -4702,8 +4709,14 @@ def _get_mail_cached() -> dict[str, Any]:
     # Access metadata matters even on filesystems whose timestamps are coarse:
     # fixing an unreadable spool must invalidate a cached permission error.
     key: tuple[int, ...] = (
-        st.st_mtime_ns, st.st_ctime_ns, st.st_dev, st.st_ino, st.st_size,
-        st.st_mode, st.st_uid, st.st_gid,
+        st.st_mtime_ns,
+        st.st_ctime_ns,
+        st.st_dev,
+        st.st_ino,
+        st.st_size,
+        st.st_mode,
+        st.st_uid,
+        st.st_gid,
     )
     if _mail_cache["key"] != key:
         _mail_cache["result"] = _get_mail()
@@ -5799,13 +5812,19 @@ async def _retire_held_alarm(
     """Forget one held occurrence, never suppress future observations of its key."""
     global _alarm_memory, _alarm_memory_saved
     async with _alarm_update_lock:
-        entry: dict[str, Any] = _alarm_memory.get(source, {}).get("alarms", {}).get(key, {})
+        entry: dict[str, Any] = (
+            _alarm_memory.get(source, {}).get("alarms", {}).get(key, {})
+        )
         if (
             entry.get("since") != since
             or entry.get("unchecked_since") != unchecked_since
         ):
             return Response(
-                content=json.dumps({"error": "Alarm changed or is no longer held; refresh and try again"}),
+                content=json.dumps(
+                    {
+                        "error": "Alarm changed or is no longer held; refresh and try again"
+                    }
+                ),
                 status_code=409,
                 media_type="application/json",
             )
@@ -5825,7 +5844,9 @@ async def _retire_held_alarm(
         except Exception:
             logger.exception("Cannot check current findings before retirement")
             return Response(
-                content=json.dumps({"error": "Could not check current alarms; refresh and try again"}),
+                content=json.dumps(
+                    {"error": "Could not check current alarms; refresh and try again"}
+                ),
                 status_code=503,
                 media_type="application/json",
             )
@@ -5834,7 +5855,11 @@ async def _retire_held_alarm(
             for item in (current.get("alarm_items") or [])
         ):
             return Response(
-                content=json.dumps({"error": "The source currently reports this alarm as active; refresh and review it"}),
+                content=json.dumps(
+                    {
+                        "error": "The source currently reports this alarm as active; refresh and review it"
+                    }
+                ),
                 status_code=409,
                 media_type="application/json",
             )
@@ -5853,6 +5878,8 @@ async def _retire_held_alarm(
             # Like the tracker, log before replacing memory: a retry can duplicate
             # an event after a failed save, but cannot silently lose its history.
             _append_events([event])
+            with EVENTS_FILE.open("rb") as log:
+                os.fsync(log.fileno())
             _save_alarm_memory(memory)
 
         try:
@@ -5860,7 +5887,11 @@ async def _retire_held_alarm(
         except OSError:
             logger.exception("Alarm retirement could not be saved")
             return Response(
-                content=json.dumps({"error": "Could not save retirement; the alarm is still held. Retry after checking storage."}),
+                content=json.dumps(
+                    {
+                        "error": "Could not save retirement; the alarm is still held. Retry after checking storage."
+                    }
+                ),
                 status_code=500,
                 media_type="application/json",
             )
@@ -5887,11 +5918,15 @@ async def retire_alarm(request: Request) -> Response:
         body = None
     if not isinstance(body, dict) or not isinstance(body.get("password"), str):
         return Response(
-            content=json.dumps({"error": "Expected a JSON object with a password string"}),
+            content=json.dumps(
+                {"error": "Expected a JSON object with a password string"}
+            ),
             status_code=400,
             media_type="application/json",
         )
-    denied: Response | None = await _verify_password_throttled(request, body["password"])
+    denied: Response | None = await _verify_password_throttled(
+        request, body["password"]
+    )
     if denied is not None:
         return denied
     source: Any = body.get("source")
@@ -5907,7 +5942,11 @@ async def retire_alarm(request: Request) -> Response:
         or not _epoch(unchecked_since)
     ):
         return Response(
-            content=json.dumps({"error": "source, key, since and unchecked_since must identify a held alarm"}),
+            content=json.dumps(
+                {
+                    "error": "source, key, since and unchecked_since must identify a held alarm"
+                }
+            ),
             status_code=400,
             media_type="application/json",
         )
