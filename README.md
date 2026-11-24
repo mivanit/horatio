@@ -165,6 +165,8 @@ alarms, event logs, or moving history to another box, see
 The [API reference](docs/api.md) covers metrics, alarms, services, history,
 authentication, terminal output, and Lua differences. Start with `/api/version`,
 `/api/alarms`, or `/api/history`; `/help` is also available as plain text.
+The [alarm agent guide](docs/alarm-actions.md) covers inspection, closure, review,
+notes, and submitting actions through the API or local files.
 
 ## Development
 

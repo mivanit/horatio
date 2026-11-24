@@ -270,8 +270,11 @@ alarm without proving that hardware was repaired.
 
 The card reports incomplete reads and keeps previously loaded history when a
 refresh fails. It does not promise a complete archive for a selected time range.
-Agents can read the JSON logs and submit actions through the
-[file interface](alarm-actions.md), using the same occurrence/evidence checks.
+Agents can inspect alarms, submit closure/review with optional notes, and verify
+results through the [API or local request files](alarm-actions.md), using the
+same occurrence/evidence checks. The guide includes examples and conflict/retry
+handling. Submit request files rather than editing the server-owned state or
+history; a closure's note survives in the event log after its state entry is gone.
 
 Each line's `timestamp` is when the thing was observed: for a collector's alarm, the time of
 the snapshot that showed it, which can be up to 30 s before the line was written. So lines

@@ -59,6 +59,9 @@ The [collector reference](../collector/README.md) describes the snapshots, raw
 `alarm_items`/`checked` contract, and collection rules. These endpoints add the
 dashboard's status and alarm-history information.
 
+For copyable API and file examples, occurrence selection, and error handling,
+see [alarm actions for agents](alarm-actions.md).
+
 ### `GET /api/storage-health`
 
 The 15-minute collector snapshot: `alarms`, `info`, drives, md, ECC, SEL, backup,
@@ -93,6 +96,13 @@ Current concerns and when they began:
 | `recent` | The newest 50 lines of `logs/events.jsonl`. |
 | `retirement` | Metadata advertising whether retirement is supported and a password is configured. |
 | `review` | Metadata advertising whether evidence review is supported and a password is configured. |
+
+Held rows include `unchecked_since` (epoch seconds). Reviewable rows include
+`evidence`, an array of opaque underlying-entry tokens. Reviewed rows also carry
+`reviewed: {timestamp, note, evidence}`; `timestamp` is the review's epoch time.
+Use the current row's `evidence` when submitting a review, not an older review's
+tokens. Both capability objects contain `supported` and `password_configured`
+booleans. Availability does not guarantee an individual row is actionable.
 
 The sources are `state` (the 15-minute snapshot), `sensors` (the 60-second
 snapshot, counted only while fresh), `dashboard` (fan rules and host checks), and
@@ -130,8 +140,16 @@ stopped fan cannot be reviewed away. Reviewed evidence stays in history and is
 listed separately from current concerns. A new underlying log entry makes it
 unreviewed again; older entries aging out do not.
 
-Local agents can submit these actions through files without HTTP or a dashboard
-password; see [file-based alarm actions](alarm-actions.md).
+Both actions return HTTP 200 with `{status: "retired" | "reviewed", source, key}`
+on success, or a JSON `{error}` on rejection. They are occurrence-specific:
+repeating a successful action can return 409. After a timeout, inspect current
+state and history before retrying. See the
+[agent guide's error table](alarm-actions.md#verify-file-results-and-handle-failures)
+for validation, authentication, conflict, and storage errors.
+
+Local agents can submit the same actions through request files without HTTP or a
+dashboard password; see [alarm actions for agents](alarm-actions.md). Directly
+editing the server-owned state or event log is not a supported action interface.
 
 ### `GET /api/alarms/history`
 

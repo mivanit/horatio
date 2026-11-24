@@ -1,58 +1,173 @@
-# Alarm actions through files
+# Alarm actions for agents
 
-Local agents can read alarm state and submit actions without HTTP. The running
-Python server applies the same checks as the dashboard, writes the event history,
-and saves the resulting state. Filesystem access as the dashboard user is the
-authorization for this interface. Web actions still require the dashboard
-password. Never put that password in a request file.
+The **Python backend** supports the same alarm actions through HTTP and local
+request files. Lua does not implement these actions. Use HTTP to inspect fresh
+source status; use files when working locally as the dashboard's service user.
+Both paths re-check the occurrence before changing it and preserve event history.
 
-## Read the current state and history
+## Choose the action
 
-- `logs/alarms-state.json` contains each source's remembered alarms, keyed by
-  alarm key. `since` identifies an occurrence; `unchecked_since` identifies an
-  unchecked observation. Reviewable journal/BMC alarms include `evidence`.
-- `logs/events.jsonl` records observations and operator actions, including notes.
-  Closing an alarm does not delete these records.
-- Do not edit either file while the server runs: it owns their updates. Use the
-  request interface below to avoid overwriting another action or tracker update.
+| Situation | Action | Result |
+|---|---|---|
+| A device's old alarm is in `held`, and you have investigated its repair, replacement or removal | `retire` (the UI calls this **Close unchecked alarm**) | Removes that held occurrence and appends a `retired` event. Future faults can raise again. |
+| A journal or BMC/SEL alarm is in `active`, and you have investigated its recorded evidence | `review` (**Mark reviewed**) | Moves that evidence out of current concerns into `reviewed`; appends a `reviewed` event. |
+| A live fan, disk, temperature or other condition is still reported | Investigate the condition | Neither action is a general mute or an assertion that the machine is healthy. |
 
-The state file is remembered evidence, not a guarantee of current health. The
-server re-checks action eligibility when it processes a request. A changed alarm
-can therefore reject a request prepared from an older state file.
+Review accepts only source `state`, with a `journal/*`, `sel/memory`, or
+`sel/hardware` key and a complete `evidence` array. New underlying entries bring
+reviewed evidence back to attention. Older entries aging out do not require a
+new review. If evidence becomes unavailable, the review no longer hides the
+alarm. An older collector or an incomplete/oversized capture may supply no
+reviewable evidence; update the collector if needed, and never invent tokens.
 
-## Submit an action
+Both actions accept an optional `note` string of at most 2,000 characters;
+leading/trailing whitespace is trimmed. Record what you checked or changed.
+Notes are readable by anyone who can read dashboard history. There is no
+standalone add/edit-note, manual reopen, snooze, or permanent suppression action.
+A successful close/review leaves its note in history even after the occurrence
+leaves the current list. Do not resubmit an action just to change its note.
 
-Write one JSON object to `logs/alarm-actions/<id>.json`, using a unique identifier
-of at most 80 letters, digits, hyphens or underscores. Write to a temporary file in the
-same directory, then rename it to the final `.json` name so the server never sees
-a partially written request. The server must be running; processing follows the
-alarm tracker's roughly 30-second cycle. Requests must be regular files no larger
-than 64 KiB. Up to 32 pending requests are processed per cycle.
+## Identify the exact occurrence
 
-A closure request contains:
+Start with these read-only requests (substitute the dashboard address):
 
-```json
-{
-  "action": "retire",
-  "source": "dashboard",
-  "key": "fan/example",
-  "since": 1790000000,
-  "unchecked_since": 1790000060,
-  "note": "Replaced the failed fan and verified its replacement."
-}
+```bash
+curl --fail --silent --show-error http://localhost:8080/api/alarms | python3 -m json.tool
+curl --fail --silent --show-error 'http://localhost:8080/api/alarms/history?hours=24' | python3 -m json.tool
 ```
 
-Those identifiers are illustrative. Copy the exact source, key and timestamps
-from the current state; the server rejects stale or active occurrences. The
-optional note is limited to 2,000 characters.
+Check `sources[source].status`: anything other than `ok` means its current state
+is unknown, not clear. `active`, `held`, and `reviewed` are separate lists.
+`retirement` and `review` advertise `{supported, password_configured}`; these
+capabilities do not mean every row is eligible. Service outages use the separate
+[services API](api.md#service-checks), not these actions.
 
-For review, use `"action": "review"`, and copy the alarm's full `evidence` array
-instead of `unchecked_since`. Only supported journal/BMC evidence can be
-reviewed. New evidence restores the alarm to current concerns; review never
-suppresses a live fan, disk or temperature condition.
+Copy fields exactly from the selected row:
 
-For example, after choosing the correct source and key, this submits a closure
-from the checkout root:
+| Field | How to use it |
+|---|---|
+| `source`, `key` | Identify the alarm, independently of its changing display text. |
+| `since` | Epoch seconds identifying this occurrence. Preserve the number without rounding or converting it to a date string. A recurrence can have the same key and a different `since`. |
+| `unchecked_since` | Required for closure; copy it from the selected `held` row. |
+| `evidence` | Required for review; copy the full current array of opaque tokens. Do not use the display text, count, or an older review's tokens. |
+| `initial` | If true, the fault was already present when tracking began; `since` is not its known physical onset. Not an action parameter. |
+
+A null `key` or `since` cannot identify an actionable occurrence. Fresh source
+data can also arrive before the tracker has recorded it; a conflict may require
+waiting for the next tracker pass and fetching again. Always re-evaluate the
+finding rather than automatically applying an old decision to a new occurrence.
+
+History is a record of observations, not a continuous health trace. `cleared`
+means the source stopped reporting the alarm under its rules; it does not prove
+a repair. `retired` is an operator closure, `reviewed` records investigated
+evidence, and `expired` means a held alarm aged out without a re-check. The
+[history API reference](api.md#get-apialarmshistory) explains gaps, incomplete
+reads, and event fields. An empty history range is not an all-clear signal.
+
+## Act through the API
+
+Send JSON to the selected endpoint. Passwords belong in the JSON body, not a
+query parameter or authentication header for these two endpoints.
+
+| Endpoint | JSON fields | Success response (HTTP 200) |
+|---|---|---|
+| `POST /api/alarms/retire` | `source`, `key`, `since`, `unchecked_since`, `password`, optional `note` | `{"status":"retired","source":"…","key":"…"}` |
+| `POST /api/alarms/review` | `source`, `key`, `since`, `evidence`, `password`, optional `note` | `{"status":"reviewed","source":"…","key":"…"}` |
+
+The following standard-library Python example fetches the selected occurrence
+and submits one action. Replace `action`, `source`, `key`, and `note` after
+investigating. For review, set `action = "review"` and choose an eligible `state`
+key. It prompts for the settings password without writing it to a request file.
+For unattended agents, supply the password from your existing secret mechanism.
+
+```python
+import getpass
+import json
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+base = "http://localhost:8080"
+action = "retire"  # or "review"
+source, key = "dashboard", "fan/example"  # replace with the actual alarm
+note = "Replaced the failed fan and verified its replacement."
+
+with urlopen(base + "/api/alarms", timeout=15) as response:
+    alarms = json.load(response)
+capability = alarms["retirement" if action == "retire" else "review"]
+if not capability["supported"] or not capability["password_configured"]:
+    raise SystemExit("This server is not configured for the requested web action")
+rows = alarms["held" if action == "retire" else "active"]
+row = next((r for r in rows if r["source"] == source and r["key"] == key), None)
+if row is None:
+    raise SystemExit("Alarm is not in the expected list; inspect current state")
+fields = ("source", "key", "since", "unchecked_since" if action == "retire" else "evidence")
+body = {field: row[field] for field in fields}
+body.update(note=note, password=getpass.getpass("Settings password: "))
+request = Request(
+    base + "/api/alarms/" + action,
+    data=json.dumps(body).encode(),
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    with urlopen(request, timeout=30) as response:
+        print(response.status, response.read().decode())
+except HTTPError as error:
+    print(error.code, error.read().decode())
+    raise SystemExit("Action rejected; inspect the response before retrying")
+```
+
+After success, fetch `/api/alarms` and `/api/alarms/history` again to verify the
+current list and event/note. Web actions do not return a file `action_id` or
+accept an idempotency key. If a request times out, its outcome is unknown: inspect
+state and history before retrying. A second submission can return 409 because
+the first already succeeded.
+
+## Read files locally
+
+All `logs/` paths below are relative to the **running installation's root**, the
+directory containing `python/`, `config.json`, and `.password`. They are not
+relative to an arbitrary checkout or `/etc/horatio/`. Run as the service user, or
+with equivalent access to that installation's logs. No dashboard password is
+required for file actions; filesystem write access is the authorization.
+
+| File | Ownership and meaning |
+|---|---|
+| `logs/alarms-state.json` | Server-owned remembered state, shaped as `memory[source]["alarms"][key]`. Entries carry `since`, optional `unchecked_since`, and evidence when available. A reviewed entry has `reviewed: {timestamp, note, evidence}`. |
+| `logs/events.jsonl` | Server-owned JSON object per line: observations and operator actions, including notes. Closure removes the state entry, not the history. |
+| `logs/alarm-actions/<id>.json` | Agent-created action request; the supported way to change closure/review state through files. |
+| `logs/alarm-actions/<id>.result.json` | Server-created receipt; inspect this to determine the action's outcome. |
+
+Do not directly edit the state, event log, or collector snapshots to mark an
+alarm closed or reviewed. The running server owns state updates; direct edits
+can be overwritten and bypass validation and history. Offline edits are not a
+supported action workflow either. Create a request while stopped if necessary,
+then start the server and wait for its receipt.
+
+State files can lag fresh observations and include retained evidence omitted
+from a collector's displayed rows. They are not a guarantee of current health.
+For example, inspect the state without changing it:
+
+```python
+import json
+from pathlib import Path
+
+memory = json.loads(Path("logs/alarms-state.json").read_text())
+for source in ("state", "sensors", "dashboard"):
+    for key, entry in memory.get(source, {}).get("alarms", {}).items():
+        print(source, key, json.dumps(entry))
+```
+
+## Submit an action file
+
+Use a unique ID of 1–80 ASCII letters, digits, hyphens or underscores. Write one
+JSON object to a temporary file **in the same directory**, then rename it to
+`<id>.json`. Requests must be regular files, not symlinks or pipes, and no larger
+than 64 KiB. The server processes up to 32 pending requests per tracker pass,
+roughly every 30 seconds; this is not a completion deadline.
+
+The body matches the API fields, except it has `"action": "retire"` or
+`"action": "review"` and **no password**. This example supports either action:
 
 ```python
 import json
@@ -60,29 +175,42 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
+action = "retire"  # or "review"
 source, key = "dashboard", "fan/example"  # replace with the actual alarm
 memory = json.loads(Path("logs/alarms-state.json").read_text())
 entry = memory[source]["alarms"][key]
 request = {
-    "action": "retire",
+    "action": action,
     "source": source,
     "key": key,
     "since": entry["since"],
-    "unchecked_since": entry["unchecked_since"],
     "note": "Replaced the failed fan and verified its replacement.",
 }
+field = "unchecked_since" if action == "retire" else "evidence"
+request[field] = entry[field]
 directory = Path("logs/alarm-actions")
 directory.mkdir(exist_ok=True)
 request_id = uuid4().hex
 temporary = directory / (request_id + ".tmp")
-temporary.write_text(json.dumps(request) + "\n")
+with temporary.open("x") as output:
+    json.dump(request, output)
+    output.write("\n")
+    output.flush()
+    os.fsync(output.fileno())
 os.replace(temporary, directory / (request_id + ".json"))
 print(directory / (request_id + ".result.json"))
 ```
 
-## Read the result
+The server re-checks fresh source data as well as its remembered occurrence.
+A request made from an older state file can therefore be rejected. Missing
+`unchecked_since` or `evidence` in the example means you must inspect eligibility,
+not fill in an arbitrary value. After renaming a request, treat it as immutable:
+it may already be in progress. There is no cancellation protocol.
 
-The server writes a corresponding `<id>.result.json` receipt, for example:
+## Verify file results and handle failures
+
+Wait for the matching `<id>.result.json` before assuming an action succeeded.
+A successful receipt looks like:
 
 ```json
 {
@@ -94,18 +222,44 @@ The server writes a corresponding `<id>.result.json` receipt, for example:
 }
 ```
 
-Errors contain `error` instead of a success status. Wait for the receipt before
-assuming an action succeeded. A conflict means the occurrence or evidence
-changed: inspect the current state and submit a new request with a new ID only
-if the action still makes sense. A failed request is not automatically retried.
+Review returns `"status": "reviewed"`. Rejections have `error` instead of
+`status`, for example:
 
-Keep requests and receipts together. Do not reuse an ID or delete a receipt while
-leaving its request in place; the receipt prevents routine repeat processing.
-The event for a file action includes its `action_id`, allowing the receipt to be
-checked against the history. After an interruption, inspect both before retrying:
-the event log, saved alarm state and result receipt are not a single atomic
-transaction. The interface does not promise exactly-once delivery after a crash.
+```json
+{
+  "action_id": "example-request-id",
+  "status_code": 409,
+  "error": "Alarm changed or is no longer held; refresh and try again"
+}
+```
 
-Finished request/receipt pairs can be archived together once inspected. Notes and
-closure/review history remain in `logs/events.jsonl`. File commands do not erase
-history, alter collector thresholds or permanently suppress alarms.
+The following meanings apply to HTTP status codes and file receipts; password
+errors occur only over HTTP:
+
+| Code | What an agent should do |
+|---|---|
+| 200 | Verify the result in current state and event history. |
+| 400 | Correct malformed JSON, fields, note length, or an ineligible action. Do not retry unchanged. |
+| 403 | Wrong web password (or a read-only demo). Correct the credentials/target. |
+| 409 | Re-read the alarm and evidence. It may have changed, become stale, returned to active, or already been acted on. Reconsider the action before resubmitting. |
+| 429 | Web password attempts are throttled; respect the response's `retry_after` seconds. |
+| 500 / 503 | Read the error and check storage/server/source availability or password configuration. Inspect state/history before retrying; a failed write may have appended an event. |
+
+No receipt means pending or an unknown outcome, not success. Check that the
+server is running, that you used the correct installation and filename, and that
+the service user can read the request and write the directory. Check
+`logs/server.log` for tracker or storage failures. An invalid filename is ignored
+rather than given an error receipt. Do not create a replacement request merely
+because processing took more than 30 seconds.
+
+A receipted request, including a rejection, is not automatically retried. If a
+new action is appropriate, submit a **new ID**. Keep requests and receipts
+together: deleting a receipt while leaving its request permits repeat
+processing. Finished pairs can be archived together once inspected.
+
+File-action events include `action_id`, allowing receipts to be matched to
+`logs/events.jsonl`. After an interruption, inspect both state and events before
+retrying: the event log, saved state, and receipt are not a single atomic
+transaction, and exactly-once delivery after a crash is not guaranteed. Event
+lines across sources need not be chronological, so use their timestamps when
+reading a timeline. File commands never erase history or change alarm thresholds.
