@@ -226,7 +226,11 @@ def test_python_upgrade_from_published_release(installed_host: Path) -> None:
     )
     assert request("/api/history/raw", password=True)
     collector_config = json.loads(Path("/etc/horatio/config.json").read_text())
-    collector_config["journal_ignore"] = ["deployment-preserved-marker"]
+    # Keep runner noise from pushing our later fault past the displayed limit.
+    collector_config["journal_ignore"] = [
+        "deployment-preserved-marker",
+        "^(?!.*horatio-deployment-alarm)",
+    ]
     run(
         "sudo",
         "tee",
@@ -268,6 +272,72 @@ def test_python_upgrade_from_published_release(installed_host: Path) -> None:
     eventually(lambda: len(records(app)) > len(after_restart))
     assert records(app)[: len(before)] == before
     assert request("/api/history/raw", password=True)
+
+    # A real journal fault gives the tracker something to preserve through
+    # removal, rather than letting an empty alarm map satisfy this test.
+    message = "horatio-deployment-alarm"
+    run("systemd-cat", "--priority=err", input=message + "\n")
+    run("sudo", "journalctl", "--sync")
+    run("sudo", "systemctl", "start", "horatio-collect.service")
+    memory_path = app / "logs/alarms-state.json"
+
+    def remembered_fault() -> dict[str, Any]:
+        memory = json.loads(memory_path.read_text())
+        return next(
+            (
+                entry
+                for entry in memory.get("state", {}).get("alarms", {}).values()
+                if message in entry["text"]
+            ),
+            {},
+        )
+
+    fault = eventually(remembered_fault)
+    before = records(app)
+    events_path = app / "logs/events.jsonl"
+    events_before = events_path.read_bytes()
+    pid = run("systemctl", "show", "horatio.service", "-p", "MainPID", "--value")
+    run("sudo", "bash", "collector/install.sh", "--uninstall", cwd=app)
+
+    def collectors_removed() -> bool:
+        for endpoint in ("/api/storage-health", "/api/sensors"):
+            snapshot = api(endpoint)
+            assert snapshot["status"] == "missing"
+            assert snapshot["expected"] is False
+        return True
+
+    eventually(collectors_removed)
+    assert run("systemctl", "show", "horatio.service", "-p", "MainPID", "--value") == pid
+    assert remembered_fault() == fault
+    run("sudo", "systemctl", "restart", "horatio.service")
+    after_restart = records(app)
+    python_ready(app)
+    eventually(collectors_removed)
+    eventually(lambda: len(records(app)) > len(after_restart))
+    assert remembered_fault() == fault
+    assert records(app)[: len(before)] == before
+    assert events_path.read_bytes().startswith(events_before)
+
+    # Reinstall the collector while the restarted dashboard stays running.
+    pid = run("systemctl", "show", "horatio.service", "-p", "MainPID", "--value")
+    run("sudo", "bash", "collector/install.sh", cwd=app)
+    assert not Path("/etc/horatio/collectors-disabled").exists()
+    for endpoint in ("/api/storage-health", "/api/sensors"):
+        eventually(lambda: api(endpoint)["status"] == "ok")
+        assert api(endpoint)["expected"] is True
+    eventually(
+        lambda: any(
+            row["source"] == "state"
+            and row["key"] == fault["key"]
+            and row["since"] == fault["since"]
+            for row in api("/api/alarms")["active"]
+        )
+    )
+    assert run("systemctl", "show", "horatio.service", "-p", "MainPID", "--value") == pid
+    for path, content in saved.items():
+        assert path.read_bytes() == content, path
+    assert records(app)[: len(before)] == before
+    assert events_path.read_bytes().startswith(events_before)
 
 
 def test_lua_installed_service_and_unattended_timer(installed_host: Path) -> None:

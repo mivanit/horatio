@@ -58,7 +58,7 @@ Python functions, variables, and fields have explicit type annotations; use
 `ty` checks type compatibility. Comprehension and lambda bindings are inferred
 from their inputs because Python has no syntax for annotating them inline.
 
-CI uses Ubuntu 24.04, Python 3.13, Node.js 22, `uv.lock`, and pinned action
+CI uses Ubuntu 24.04, Python 3.10 and 3.13, Node.js 22, `uv.lock`, and pinned action
 revisions. The native Lua job uses OpenWrt's double/int32 number model, checks
 large byte totals in API responses, and runs the history
 tests under UTC and America/New_York. It does not boot OpenWrt or exercise real
@@ -121,7 +121,9 @@ CI runs `tests/deployment/test_systemd.py` on separate disposable Ubuntu VMs for
 Python and Lua. These invoke the real installers from a checkout under the user's
 home, with the shipped systemd restrictions. Python covers fresh installation and
 v0.2.1 migration, including credentials, configuration, history and existing root
-collectors. Lua checks service restart and unattended recording by the actual
+collectors. It also uninstalls and reinstalls the collectors while the dashboard
+runs, checking neutral missing snapshots and preservation of a real journal alarm
+and history across a dashboard restart. Lua checks service restart and unattended recording by the actual
 five-minute timer; that test intentionally takes several minutes.
 
 These tests install system services and require a disposable systemd host,
