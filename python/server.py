@@ -3161,6 +3161,9 @@ def _parse_since(since: str | None) -> float | None | Response:
     # back on the offset only (a space between date and time is valid ISO).
     text: str = re.sub(r"(:\d\d(?:\.\d+)?) (\d\d:\d\d)$", r"\1+\2", since.strip())
     text = text.replace("Z", "+00:00")
+    # Python 3.10 accepts only three or six fractional digits. Normalize to
+    # microseconds, matching newer fromisoformat's truncation of finer precision.
+    text = re.sub(r"\.(\d+)", lambda match: "." + match[1][:6].ljust(6, "0"), text)
     try:
         dt: datetime = datetime.fromisoformat(text)
     except ValueError:

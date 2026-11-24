@@ -86,8 +86,19 @@ def test_rate_clamp_unit() -> None:
         "2026-10-23T12:00:00.5Z",
         "2026-10-23T12:00:00.5",
         "2026-10-23 12:00:00.5",
+        "2026-10-23T12:00:00.50+00:00",
+        "2026-10-23T12:00:00.500+00:00",
+        "2026-10-23T12:00:00.5000+00:00",
+        "2026-10-23T12:00:00.50000+00:00",
+        "2026-10-23T12:00:00.500000+00:00",
+        "2026-10-23T12:00:00.5000009+00:00",
+        "2026-10-23T17:30:00.5+05:30",
     ):
         assert server._parse_since(text) == ref, f"_parse_since({text!r})"
+    assert (
+        server._parse_since("2026-10-23T12:00:00.1234567Z")
+        == datetime(2026, 10, 23, 12, 0, 0, 123456, tzinfo=timezone.utc).timestamp()
+    )
     assert server._parse_since(None) is None and server._parse_since("") is None, (
         "_parse_since absent -> None"
     )

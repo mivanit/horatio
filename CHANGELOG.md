@@ -8,6 +8,8 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 - CI tests the minimum supported Python 3.10 as well as 3.13. Installed-service
   tests cover collector removal and reinstallation across a dashboard restart;
   the Lua timer test waits for its first history record before reading it.
+- History timestamp filters accept fractional seconds consistently on Python
+  3.10 and newer.
 - Alarm writes remain protected through repeated cancellation. A failed write
   during shutdown no longer swallows cancellation, and an older writer cannot
   overwrite a subsequent retirement after its caller is cancelled.
