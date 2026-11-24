@@ -10,7 +10,7 @@ series (a training job on GPU 0 in multi-hour stretches, a nightly backup at 02:
 The settings dialog loads but refuses to save.
 
 - `demo/fake-api.js`: the fake backend. Its responses follow the shapes in
-  `server.py`; a new endpoint in the frontend needs a route here, or
+  `python/server.py`; a new endpoint in the frontend needs a route here, or
   `tests/frontend/test_demo.py` fails.
 - `build-demo.sh [outdir]`: copies `index.html`, `static/` and `demo/` into
   `outdir` (default `_site`), fetches Chart.js at the version `install.sh` pins,

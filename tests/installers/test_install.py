@@ -147,7 +147,7 @@ def test_uv_python_is_bound_through_its_minor_version_link(box: Box) -> None:
     result: subprocess.CompletedProcess[str] = box.run(py_home=f"{link}/bin")
     assert result.returncode == 0, result.stderr + result.stdout
     assert box.directive("BindReadOnlyPaths") == f"{box.co} {link}"
-    assert box.directive("ExecStart") == f"{box.co}/.venv/bin/python server.py"
+    assert box.directive("ExecStart") == f"{box.co}/.venv/bin/python python/server.py"
     assert box.directive("User") == pwd.getpwuid(os.geteuid()).pw_name
     assert "/opt/horatio" not in box.unit.read_text()
     assert (box.co / "logs").is_dir() and (box.co / "config.json").exists()

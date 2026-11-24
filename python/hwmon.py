@@ -10,7 +10,7 @@ This replaces Glances' sensors plugin. Glances is psutil underneath, and psutil:
 - has no fault or enable checks, so a disconnected input shows as -128 °C.
 
 Rows keep Glances' JSON shape (``type``, ``label``, ``value``, ``unit``, ``warning``,
-``critical``), so the frontend's existing ``/api/4/sensors`` path, the OpenWrt Lua
+``critical``), so the frontend's existing ``/api/4/sensors`` path, the Lua
 backend (which emits the same shape) and the history recorder all read one format.
 
 Temperature labels reproduce Glances' naming exactly (``f71889ed 0``, ``Core 0``,

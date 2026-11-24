@@ -608,7 +608,7 @@ function hideUnavailableCards() {
 }
 
 // The Services card and its history exist only with http_targets in config.json
-// and a backend that checks them (the OpenWrt one does not).
+// and a backend that checks them (the Lua one does not).
 function servicesConfigured() {
   return Array.isArray(dashboardConfig.http_targets) && dashboardConfig.http_targets.length > 0 &&
     (availableEndpoints === null || availableEndpoints.has('/services'));

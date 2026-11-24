@@ -18,7 +18,7 @@ FAKE_API: Path = ROOT / "docs" / "demo" / "fake-api.js"
 def server_block(pattern: str) -> str:
     """Group 1 of `pattern` in server.py; a renamed definition fails by name."""
     match: re.Match[str] | None = re.search(
-        pattern, (ROOT / "server.py").read_text(), re.S
+        pattern, (ROOT / "python" / "server.py").read_text(), re.S
     )
     assert match is not None, f"not found in server.py: {pattern}"
     return match.group(1)
@@ -107,6 +107,15 @@ vm.runInContext(fs.readFileSync(apiPath, 'utf8'), context);
   assert(hist.count >= 140 && hist.count <= 145, `24 h at 600 s is ~144 records, got ${hist.count}`);
   assert.equal(hist.records[0].temps, undefined, 'side fields stay out of /api/history');
   assert(hist.records.at(-1).gpus.length === 2 && hist.records.at(-1).ping['1.1.1.1']);
+  // The demo exercises both fan axes, in live readings and historical records.
+  const info = route('GET', '/api/gpu-info', new URLSearchParams())[1];
+  assert.equal(info.length, 2);
+  assert(info.every(g => Number.isFinite(g.fan_percent) && g.fan_percent >= 0 && g.fan_percent <= 100));
+  const sensors = route('GET', '/api/sensors', new URLSearchParams())[1];
+  assert(sensors.fans.length && sensors.fans.every(f => f.value > 100));
+  assert(hist.records.every(r => Object.keys(r.gpu_fans).length === 2 &&
+    Object.values(r.gpu_fans).every(v => v >= 0 && v <= 100) &&
+    Object.values(r.fans).every(v => v > 100)));
   const since = new Date((hist.now - 1800) * 1000).toISOString();
   const delta = route('GET', '/api/history', new URLSearchParams({ hours: '24', since }))[1];
   assert(delta.count >= 2 && delta.count <= 3, `since= returns only newer records, got ${delta.count}`);

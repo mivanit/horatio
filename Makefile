@@ -1,11 +1,11 @@
 # Python tools/dependencies come from uv.lock. Linux tests also need Node.js.
-# The explicit OpenWrt target needs Lua 5.1, Nixio, gzip, and timezone data.
+# The Lua target needs Lua 5.1, Nixio, gzip, and timezone data.
 UV ?= uv
 LUA ?= lua5.1
 PYTEST_ARGS ?=
 
 .DEFAULT_GOAL := check
-.PHONY: format check-format typing test test-linux test-openwrt test-openwrt-container test-all check check-all demo demo-docs release clean
+.PHONY: format check-format typing test test-python test-linux test-lua test-openwrt test-openwrt-container test-all check check-all demo demo-docs release clean dep
 
 format:
 	$(UV) run --locked ruff check --fix .
@@ -18,23 +18,28 @@ check-format:
 typing:
 	$(UV) run --locked ty check
 
-test: test-linux
+test: test-python
 
 # Pytest fixtures isolate app imports and live servers from local config/history.
-test-linux:
+test-python:
 	$(UV) run --locked pytest $(PYTEST_ARGS)
+
+# Compatibility for existing development commands.
+test-linux: test-python
 
 # These use real kernel locks/processes; a missing Nixio is an error, not a skip.
 # Override LUA and/or export LUA_CPATH when using a local Lua/Nixio build.
-test-openwrt:
-	LUA="$(LUA)" $(UV) run --locked pytest tests/openwrt $(PYTEST_ARGS)
+test-lua:
+	LUA="$(LUA)" $(UV) run --locked pytest tests/lua $(PYTEST_ARGS)
+
+test-openwrt: test-lua
 
 # Real OpenWrt in a container (docker; CONTAINER=podman to switch): install this
 # checkout, then --update to the newest release. Needs network.
 test-openwrt-container:
 	scripts/openwrt-container-test.sh
 
-test-all: test-linux test-openwrt
+test-all: test-python test-lua
 
 check: check-format typing test
 
@@ -69,7 +74,7 @@ release:
 dep:
 	uv sync
 
-clean: 
-	rm -rf __pycache__ .pytest_cache .ruff_cache
+clean:
+	rm -rf __pycache__ python/__pycache__ .pytest_cache .ruff_cache
 
 

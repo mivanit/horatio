@@ -1,4 +1,4 @@
-"""`openwrt/install.sh --update`: wget is mocked to serve main's VERSION and a
+"""`lua/install.sh --update`: wget is mocked to serve main's VERSION and a
 local release tarball.
 
 The release's own installer is a stub that leaves a marker, standing in for
@@ -38,9 +38,9 @@ class Router:
     def __init__(self: Router, tmp_path: Path) -> None:
         self.tmp: Path = tmp_path
         self.box: Path = tmp_path / "horatio"
-        (self.box / "openwrt").mkdir(parents=True)
-        (self.box / "openwrt/install.sh").write_text(
-            (ROOT / "openwrt/install.sh").read_text()
+        (self.box / "lua").mkdir(parents=True)
+        (self.box / "lua/install.sh").write_text(
+            (ROOT / "lua/install.sh").read_text()
         )
         (self.box / "VERSION").write_text("0.1.0\n")
         (self.box / "www").mkdir()
@@ -50,12 +50,12 @@ class Router:
         (self.bin / "wget").write_text(MOCK)
         (self.bin / "wget").chmod(0o755)
 
-    def release(self: Router, version: str) -> None:
+    def release(self: Router, version: str, installer: str = "lua/install.sh") -> None:
         """The GitHub archive of v<version>: one horatio-<version>/ directory."""
         with tarfile.open(self.tmp / "release.tar.gz", "w:gz") as tar:
             for path, text in (
                 ("VERSION", version + "\n"),
-                ("openwrt/install.sh", STUB),
+                (installer, STUB),
             ):
                 data: bytes = text.encode()
                 info: tarfile.TarInfo = tarfile.TarInfo(f"horatio-{version}/{path}")
@@ -71,7 +71,7 @@ class Router:
         with tarfile.open(fileobj=raw, mode="w") as tar:
             for path, text in (
                 ("VERSION", version + "\n"),
-                ("openwrt/install.sh", STUB),
+                ("lua/install.sh", STUB),
                 ("static/app.js", "// the part that never arrived\n"),
             ):
                 data: bytes = text.encode()
@@ -90,7 +90,7 @@ class Router:
         self: Router, *args: str, main: str = "0.2.0", **env: str
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["sh", str(self.box / "openwrt/install.sh"), "--update", *args],
+            ["sh", str(self.box / "lua/install.sh"), "--update", *args],
             env=dict(
                 os.environ,
                 PATH=f"{self.bin}:{os.environ['PATH']}",

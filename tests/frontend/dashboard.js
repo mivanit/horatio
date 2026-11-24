@@ -1253,7 +1253,7 @@ async function testCaptureCacheAge() {
     assert.equal(evaluate(context, `${name}Capture.error`), true);
     assert.equal(evaluate(context, `${name}Capture.capturing`), false);
   }
-  // A backend with no process card (OpenWrt) starts no capture and logs no error.
+  // A backend with no process card (Lua) starts no capture and logs no error.
   evaluate(context, 'delete cardStatus.processes; networkCapture.clearError(); diskCapture.clearError();');
   now = 300000;
   await context.fetchSlowData();

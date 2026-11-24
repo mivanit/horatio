@@ -74,7 +74,7 @@
     { pid: 1554, name: 'syncthing', path: '/usr/bin/syncthing serve --no-browser', user: 'alice', cpu: 0.7, rss: 0.25, thr: 21 },
     { pid: 988, name: 'dockerd', path: '/usr/bin/dockerd -H fd://', user: 'root', cpu: 0.3, rss: 0.12, thr: 30 },
     { pid: 1201, name: 'glances', path: '/opt/horatio/.venv/bin/python -m glances -w --disable-webui', user: 'horatio', cpu: 0.8, rss: 0.09, thr: 6 },
-    { pid: 1199, name: 'uvicorn', path: '/opt/horatio/.venv/bin/python server.py', user: 'horatio', cpu: 0.4, rss: 0.07, thr: 5 },
+    { pid: 1199, name: 'uvicorn', path: '/opt/horatio/.venv/bin/python python/server.py', user: 'horatio', cpu: 0.4, rss: 0.07, thr: 5 },
     { pid: 1460, name: 'smbd', path: '/usr/sbin/smbd --foreground --no-process-group', user: 'root', cpu: 0.1, rss: 0.03, thr: 1 },
     { pid: 905, name: 'tailscaled', path: '/usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state', user: 'root', cpu: 0.2, rss: 0.05, thr: 14 },
     { pid: 1302, name: 'nginx', path: 'nginx: worker process', user: 'www-data', cpu: 0.05, rss: 0.01, thr: 1 },
@@ -113,7 +113,8 @@
       const memMiB = i === 0 ? (training ? 19200 : 420) : 6100 + (busy ? 900 : 0);
       const temp = 34 + (busy ? 36 : 4) * (0.8 + 0.2 * wander('gput' + i, t, 600, 30));
       const power = g.idleW + (busy ? (g.limitW - g.idleW) * (0.75 + 0.2 * wander('gpup' + i, t, 120, 4)) : 3 * noise('gpupi' + i, t, 20));
-      return { util: r1(util), memMiB: Math.round(memMiB), memPct: r1(memMiB / g.memMiB * 100), temp: Math.round(temp), power: r1(power) };
+      const fanPercent = Math.round(clamp(20 + 0.65 * util + 4 * noise('gpufan' + i, t, 60), 0, 100));
+      return { util: r1(util), memMiB: Math.round(memMiB), memPct: r1(memMiB / g.memMiB * 100), temp: Math.round(temp), power: r1(power), fanPercent };
     });
 
     // MB/s, bursty: a cube of noise is mostly low with occasional peaks.
@@ -333,6 +334,7 @@
       drives: fs.map(f => ({ mount: f.mnt_point, used_gb: r2(f.used / GiB), total_gb: r2(f.size / GiB), percent: f.percent, inodes_percent: f.inodes_percent, inodes_used: f.inodes_used })),
       gpus: s.gpus.map((g, i) => ({ index: i, util_percent: g.util, mem_used_gb: r2(g.memMiB / 1024), mem_total_gb: r2(GPUS[i].memMiB / 1024), mem_percent: g.memPct, throttle_sw_thermal_s: 0, throttle_hw_thermal_s: 0 })),
       fans: s.fans,
+      gpu_fans: Object.fromEntries(s.gpus.map((g, i) => [`GPU ${i} fan`, g.fanPercent])),
       temps,
       power: { 'Pwr Consumption': Math.round(s.totalW), 'CPU 0': r1(s.cpuW), 'DRAM 0': r1(s.dramW), ...Object.fromEntries(s.gpus.map((g, i) => ['GPU ' + i, g.power])) },
       load: s.load,
@@ -523,7 +525,7 @@
     '/cpu-info': () => ({ model: 'AMD Ryzen 7 5800X 8-Core Processor', physical_cores: 8, logical_cores: THREADS, l3_cache: '32 MiB' }),
     '/gpu-info': (q, t) => state(t).gpus.map((g, i) => ({
       index: i, name: GPUS[i].name, utilization: g.util, temperature: g.temp, memory_used: g.memMiB, memory_total: GPUS[i].memMiB,
-      power_draw: g.power, power_limit: GPUS[i].limitW, driver_version: '550.120', cuda_version: '12.4',
+      power_draw: g.power, power_limit: GPUS[i].limitW, fan_percent: g.fanPercent, driver_version: '550.120', cuda_version: '12.4',
     })),
     '/ip-info': () => ({
       lan: [{ interface: 'enp5s0', ipv4: '192.168.1.20', ipv6: 'fd12:3456:789a::20' }],

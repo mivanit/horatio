@@ -4915,7 +4915,7 @@ def get_hw_sensors() -> dict[str, Any]:
 @APP.get("/api/4/sensors")
 async def hw_sensors() -> Response:
     """Temperatures, fans and power from hwmon, in Glances' sensors shape (it used to
-    be Glances' plugin; the OpenWrt backend serves the same shape). Power rows carry
+    be Glances' plugin; the Lua backend serves the same shape). Power rows carry
     ``total``: true only for a reading of the whole machine."""
     data: dict[str, Any] = await asyncio.to_thread(get_hw_sensors)
     return Response(content=json.dumps(data["rows"]), media_type="application/json")

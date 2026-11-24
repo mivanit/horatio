@@ -8,7 +8,7 @@ After=network.target
 # venv's own python is run, not `uv run`: uv writes to ~/.cache/uv on every
 # start, which this sandbox forbids (EROFS, exit 2, restart loop).
 WorkingDirectory=/opt/horatio
-ExecStart=/opt/horatio/.venv/bin/python server.py
+ExecStart=/opt/horatio/.venv/bin/python python/server.py
 Restart=always
 RestartSec=5
 User=horatio
@@ -17,7 +17,7 @@ User=horatio
 # checkout is read-only because root runs code from it (collector/install.sh
 # copies collector/*.sh to /usr/local/bin; install.sh; .git/hooks), so a
 # writable checkout would let a compromised web process become root. .password
-# is written by `server.py --set-password` outside this unit.
+# is written by `python/server.py --set-password` outside this unit.
 ProtectSystem=strict
 # /home, /root and /run/user become empty (~/.ssh, other checkouts, keyrings);
 # only the checkout and the venv's interpreter are bound back in. install.sh

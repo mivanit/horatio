@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [check-format, typing, test-linux]
+        target: [check-format, typing, test-python]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -36,7 +36,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: matrix.target == 'test-linux'
+        if: matrix.target == 'test-python'
         with:
           node-version: "22"
           package-manager-cache: false
@@ -65,7 +65,7 @@ jobs:
       - name: Test native Lua behavior on Linux
         run: |
           LUA_CPATH="$RUNNER_TEMP/horatio-native-lua/luci/libs/luci-lib-nixio/src/?.so;;" \
-            make test-openwrt LUA="$RUNNER_TEMP/horatio-native-lua/lua-5.1.5/src/lua"
+            make test-lua LUA="$RUNNER_TEMP/horatio-native-lua/lua-5.1.5/src/lua"
 
   openwrt-container:
     # Real OpenWrt (the official rootfs, booted with procd): a fresh install of

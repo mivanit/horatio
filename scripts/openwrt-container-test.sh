@@ -62,7 +62,7 @@ on_router "mkdir -p $DIR"
 # Tracked files as they are on disk; one deleted but not yet committed is skipped.
 (cd "$ROOT" && git ls-files -z | while IFS= read -r -d '' f; do [ ! -e "$f" ] || printf '%s\0' "$f"; done \
     | tar --null -T - -cf -) | "$ENGINE" exec -i "$NAME" tar -xf - -C "$DIR"
-on_router "cd $DIR && LAN_IP=$IP sh openwrt/install.sh"
+on_router "cd $DIR && LAN_IP=$IP sh lua/install.sh"
 version="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 expect /api/version "\"version\":\"$version\""
 expect /api/4/load '"min1"'
@@ -87,7 +87,7 @@ fi
 echo "   newest release: v$latest"
 # Pose as an older box with its own config; the update must keep the config.
 on_router "cd $DIR && echo 0.0.0 > VERSION && sed -i 's/\"title\": *\"[^\"]*\"/\"title\": \"kept-by-update\"/' www/config.json"
-on_router "cd $DIR && LAN_IP=$IP sh openwrt/install.sh --update"
+on_router "cd $DIR && LAN_IP=$IP sh lua/install.sh --update"
 expect /api/version "\"version\":\"$latest\""
 expect /config.json '"title": "kept-by-update"'
 echo "== OpenWrt install and update passed"

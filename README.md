@@ -37,7 +37,7 @@ and `sudo systemctl restart horatio`; with the collector, also the collector's c
 Open `http://<host>:8080`, or from a terminal `curl http://<host>:8080/text` (`/help` lists the options and API). For a live terminal view, see [Terminal](#terminal). The checkout can live anywhere writable by the user who runs it (no
 whitespace or `: % \ | &` in the path); the service file is rendered from `horatio.service` with that path and user.
 
-After install, `uv run python server.py --set-password` sets the password for the raw history
+After install, `uv run python python/server.py --set-password` sets the password for the raw history
 download and the settings endpoint (stored hashed in `.password`).
 
 ### Process permissions
@@ -113,14 +113,14 @@ curl "http://<host>:8080/text?width=$COLUMNS"     # colour, unicode
 curl http://<host>:8080/text?style=simple         # plain ASCII, for scripts and agents
 ```
 
-**Live view (`tui.py`).** Fills the terminal and redraws every 2 s. Keys are listed at the bottom (q quits, v switches view, t table, +/- history window). It detects terminal size, colour depth and UTF-8; `--color` and `--style` override. Standard library only, Python 3.8+, Linux or macOS.
+**Live view (`python/tui.py`).** Fills the terminal and redraws every 2 s. Keys are listed at the bottom (q quits, v switches view, t table, +/- history window). It detects terminal size, colour depth and UTF-8; `--color` and `--style` override. Standard library only, Python 3.8+, Linux or macOS.
 
 - **From anywhere, nothing installed.** The box serves the script, and the served copy already knows the box's address:
   ```bash
   curl -fsS http://<host>:8080/tui.py | python3 -
   ```
   This runs whatever the server sends, which is fine on your own network. Otherwise save it, read it, then run it: `curl -fsS -o tui.py http://<host>:8080/tui.py && python3 tui.py`.
-- **From a horatio checkout.** `python3 tui.py` on the box itself connects to `http://localhost:8080`. Elsewhere, `python3 tui.py http://<host>:8080`, or set `HORATIO_URL`.
+- **From a horatio checkout.** `python3 python/tui.py` on the box itself connects to `http://localhost:8080`. Elsewhere, `python3 python/tui.py http://<host>:8080`, or set `HORATIO_URL`.
 
 `http://<host>:8080/help` has the full list of options, with the box's real address filled in.
 
@@ -282,8 +282,7 @@ again, don't put this on anything besides a trusted LAN!
 
 ```
 horatio/
-├── server.py                    # FastAPI server + Glances subprocess + history recorder
-├── hwmon.py, hostcheck.py, zfs.py  # the server's own sensor reads and host checks (reboot, NVIDIA, ZFS)
+├── python/                      # FastAPI + Glances server, sensor/host checks, terminal client
 ├── tests/                       # pytest suites, browser fixtures, and native Lua checks
 ├── scripts/                     # development helpers (native Lua/Nixio build, OpenWrt container test)
 ├── index.html, static/          # Frontend: app.js (polling, cards, history), config.js, charts.js, util.js, style.css
@@ -294,7 +293,8 @@ horatio/
 ├── VERSION, CHANGELOG.md        # the release number and what each release changed
 ├── collector/                   # root collectors, their units, config example, alarm table
 ├── nginx/                       # optional reverse proxy with subdomains per service
-├── openwrt/                     # Lua backend serving the same frontend on OpenWrt routers
+├── lua/                         # Lua backend; uhttpd deployment on OpenWrt
+├── openwrt/install.sh            # compatibility entrypoint for older installations
 ├── logs/                        # runtime: history.jsonl, server.log, glances.log
 └── pyproject.toml, uv.lock
 ```
@@ -306,12 +306,13 @@ the live integration tests start the real dashboard and Glances on localhost.
 
 ```bash
 uv sync --locked
+uv run --locked pytest --durations=25  # the 25 slowest tests
 make format         # Ruff fixes and formatting (changes Python files)
 make check-format   # Ruff lint and formatting checks
 make typing         # ty type checking
-make test           # Linux pytest suite (same as make test-linux)
+make test           # Linux pytest suite (same as make test-python)
 make check          # formatting, typing, and Linux tests; the default target
-make test-openwrt   # native Lua tests; requires Lua 5.1 and Nixio
+make test-lua       # native Lua tests; requires Lua 5.1 and Nixio
 make test-openwrt-container   # install + --update on real OpenWrt in docker (CONTAINER=podman)
 make test-all       # Linux and native Lua suites
 make check-all      # formatting, typing, and both suites
@@ -323,7 +324,7 @@ Tests are grouped by responsibility:
 - `tests/integration/`: HTTP contracts against a real dashboard and Glances.
 - `tests/installers/` and `tests/collector/`: isolated service and hardware fixtures.
 - `tests/frontend/`: Node.js fixtures for browser behavior and history caching.
-- `tests/openwrt/`: native Lua checks, including history under UTC and America/New_York.
+- `tests/lua/`: native Lua checks, including history under UTC and America/New_York.
 
 Pytest fixtures copy application code and `config.example.json` into temporary
 directories before importing the server or starting it. Config, passwords, and
@@ -336,9 +337,9 @@ uv run --locked pytest -m 'not integration'   # omit the live HTTP server
 make test PYTEST_ARGS='-k history -v'          # select tests by name
 ```
 
-The default suite does not require Lua. `make test-openwrt` and `make check-all`
+The default suite does not require Lua. `make test-lua` and `make check-all`
 fail explicitly if native dependencies are unavailable; they never silently
-skip the OpenWrt checks. CI runs both suites in separate jobs.
+skip the Lua checks. CI runs both suites in separate jobs.
 
 [GitHub Actions](.github/workflows/check.yml) runs these Make targets on pushes,
 pull requests, and manual dispatches. Formatting, typing, Linux tests, and native
@@ -361,17 +362,24 @@ branch protection is configured separately in the repository settings.
 The collectors are tested against hand-written fixture directories; recipe in
 [`collector/README.md`](collector/README.md).
 
-### OpenWrt
+### Lua backend
 
 A small Lua backend serves the same frontend on OpenWrt routers without Python or Glances,
-reading `/proc` and `/sys` directly:
+reading `/proc` and `/sys` directly. The backend is named Lua; its current installer
+and HTTP hosting still depend on OpenWrt's UCI, procd and uhttpd. It provides the
+core metrics and history subset, not the Python backend's GPU, host-alarm or
+root-collector features:
 
 ```bash
-cd openwrt
+cd lua
 sh install.sh             # install and start on port 8080 (LAN only)
 sh install.sh --update    # to the newest release (or --update vX.Y.Z), then reinstall
 sh install.sh --uninstall
 ```
+
+The old `openwrt/install.sh` path forwards to `lua/install.sh` so existing
+installations can upgrade. Updates select the installer shipped by the target
+release, including older releases that used the old directory.
 
 `--update` needs no git: it reads the newest version from `main`'s `VERSION` on GitHub,
 downloads that release's tarball over HTTPS (needs `libustream-mbedtls` and `ca-bundle`, on
@@ -407,12 +415,12 @@ waits for it rather than a request timing out; one that fails is logged to syslo
 and retried after the next record, and history is never deleted. It does not implement `since=` (Refresh reloads the whole window there)
 or the rate caps on history.
 
-Run the OpenWrt Lua tests from the checkout root:
+Run the Lua tests from the checkout root:
 
 ```sh
-make test-openwrt               # history runs under UTC and America/New_York
+make test-lua                   # history runs under UTC and America/New_York
 # A native Lua/Nixio build outside the system installation also works:
-LUA_CPATH='/path/to/nixio/?.so;;' make test-openwrt LUA=/path/to/lua5.1
+LUA_CPATH='/path/to/nixio/?.so;;' make test-lua LUA=/path/to/lua5.1
 ```
 
 To build the same pinned Lua/Nixio dependencies used in CI without installing
@@ -422,7 +430,7 @@ system-wide modules (requires a C toolchain, Make, libcrypt development headers,
 ```sh
 sh scripts/setup-lua-tests.sh /tmp/horatio-native-lua
 LUA_CPATH='/tmp/horatio-native-lua/luci/libs/luci-lib-nixio/src/?.so;;' \
-  make test-openwrt LUA=/tmp/horatio-native-lua/lua-5.1.5/src/lua
+  make test-lua LUA=/tmp/horatio-native-lua/lua-5.1.5/src/lua
 ```
 
 Use a fresh build directory when running the setup script again.
@@ -430,15 +438,15 @@ Use a fresh build directory when running the setup script again.
 The tests use temporary files, forked contenders, and injected I/O failures;
 they do not touch recorded history or the host's service configuration.
 They require Lua 5.1, native Nixio, gzip, and timezone data. On an OpenWrt box
-without GNU Make, run `lua tests/openwrt/test_handler.lua`,
-`lua tests/openwrt/test_metrics.lua`, and `lua tests/openwrt/test_history.lua` directly.
+without GNU Make, run `lua tests/lua/test_handler.lua`,
+`lua tests/lua/test_metrics.lua`, and `lua tests/lua/test_history.lua` directly.
 
 The appropriate environment depends on the claim being tested:
 
 | What is being checked | Environment | What it does not cover |
 |---|---|---|
 | Linux APIs and history, frontend logic, mocked installers/collectors | `make test-linux` on Linux with the locked Python environment and Node.js | Actual router services or GPU hardware |
-| Lua recording locks, interrupted writes, and rotation | `make test-openwrt` on Linux with real Lua 5.1/Nixio and gzip | OpenWrt's service lifecycle or flash storage |
+| Lua recording locks, interrupted writes, and rotation | `make test-lua` on Linux with real Lua 5.1/Nixio and gzip | OpenWrt's service lifecycle or flash storage |
 | Router install, `--update` and the dashboard answering | `make test-openwrt-container`: the official OpenWrt rootfs booted with procd in docker or podman, with its own UCI, uhttpd, apk feeds and BusyBox; CI runs it on every push | The nginx/LuCI port handoff, real network interfaces, flash storage |
 | Router installation and service readiness | A disposable, booted OpenWrt VM with its own UCI, procd, uhttpd, nginx, and BusyBox | Every custom router configuration or physical flash behavior |
 
@@ -461,7 +469,7 @@ set -eu
 native_dir=$(mktemp -d /tmp/horatio-native-lua-XXXXXX)
 sh scripts/setup-lua-tests.sh "$native_dir"
 LUA_CPATH="$native_dir/luci/libs/luci-lib-nixio/src/?.so;;" \
-  make test-openwrt LUA="$native_dir/lua-5.1.5/src/lua"
+  make test-lua LUA="$native_dir/lua-5.1.5/src/lua"
 )
 ```
 
@@ -485,7 +493,7 @@ apk add lua luci-lib-nixio luci-lib-jsonc uhttpd uhttpd-mod-lua \
 ```
 
 Copy the source checkout without local config/history, then run
-`make test-openwrt LUA=lua`. Separately exercise real dashboard install, update,
+`make test-lua LUA=lua`. Separately exercise real dashboard install, update,
 and uninstall, plus the nginx/LuCI port handoff and a deliberately occupied port.
 The Python installer fixtures remain mocks even inside a VM. Save the guest disk
 and installed-package list if an exact environment must be repeated; package

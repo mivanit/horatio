@@ -1690,7 +1690,7 @@ async function fetchSlowData() {
   if (useDiskCache) {
     guard('processes', () => diskCapture.handleResponse(getCache('diskProcesses'), dataCache.diskProcesses.lastUpdate));
   } else if (cardStatus.processes && !diskCapture.requestPending) {
-    // No process card (OpenWrt): no capture, no error. A capture still out
+    // No process card (Lua): no capture, no error. A capture still out
     // (longer than the poll, or a refresh click) is waited for, not asked again:
     // the server would only answer that one is running.
     diskCapture.requestPending = true;
@@ -2212,7 +2212,7 @@ async function fetchDataOnce() {
         warning: s.warning ?? thresholds.temp_celsius, critical: s.critical ?? 90
       }));
       sensors.data.filter(s => s.type === 'fan_speed' && s.value != null).forEach(s => fans.push(s));
-      // hwmon power (the server's reader; Glances and the OpenWrt backend have none).
+      // hwmon power (the server's reader; Glances and the Lua backend have none).
       // `total` is true only for a reading of the whole machine (an ACPI power meter).
       sensors.data.filter(s => s.type === 'power' && s.value != null).forEach(s =>
         power.push({ label: s.label, value: s.value, total: s.total === true }));
@@ -3229,7 +3229,7 @@ function fetchHistoryData(hours = defaultHistoryHours, { force = false, field = 
     return forCaller(historyFetchInflight.get(key));
   }
   const base = historyCache.get(key);
-  // A backend that reports no clock (OpenWrt) can't be topped up: serve the
+  // A backend that reports no clock (Lua) can't be topped up: serve the
   // cached window; Refresh still refetches it in full.
   if (!force && base && typeof base.now !== 'number') return Promise.resolve(base);
   // Top up a cached window. Fetch in full when there is none, when the backend

@@ -27,6 +27,9 @@ dev = [
     "ty",
 ]
 
+[tool.ruff]
+src = [".", "python"]
+
 [tool.ruff.lint]
 extend-select = ["ANN", "I"]
 # JSON payloads and mock forwarding still need dynamic types.

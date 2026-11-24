@@ -96,7 +96,7 @@ class TestOpenWrtInstaller:
     @pytest.fixture(autouse=True)
     def setup(self: TestOpenWrtInstaller, tmp_path: Path) -> None:
         self.root: Path = tmp_path
-        (self.root / "openwrt").mkdir()
+        (self.root / "lua").mkdir()
         (self.root / "static").mkdir()
         (self.root / "static/app.js").write_text("// app\n")
         (self.root / "index.html").write_text("<!doctype html>\n")
@@ -119,7 +119,7 @@ class TestOpenWrtInstaller:
             "ping_targets": [{"address": "8.8.8.8"}],
         }
         (self.root / "config.example.json").write_text(json.dumps(self.example))
-        script: str = (ROOT / "openwrt/install.sh").read_text()
+        script: str = (ROOT / "lua/install.sh").read_text()
         # Redirect system paths to fixtures. The actual installer control flow,
         # checksum utility, temporary file and mv run.
         script = script.replace("/etc/init.d/uhttpd", "test-uhttpd-service")
@@ -128,7 +128,7 @@ class TestOpenWrtInstaller:
         script = re.sub(
             r'CHARTJS_SHA256="[a-f0-9]+"', f'CHARTJS_SHA256="{ASSET_HASH}"', script
         )
-        self.script: Path = self.root / "openwrt/install.sh"
+        self.script: Path = self.root / "lua/install.sh"
         self.script.write_text(script)
         mock: Path = self.bin / "mock"
         mock.write_text(MOCK)
@@ -308,7 +308,7 @@ class TestOpenWrtInstaller:
         for key in ("CHARTJS_VERSION", "CHARTJS_SHA256"):
             pattern: str = rf'^{key}="([^"]+)"$'
             router: re.Match[str] | None = re.search(
-                pattern, (ROOT / "openwrt/install.sh").read_text(), re.MULTILINE
+                pattern, (ROOT / "lua/install.sh").read_text(), re.MULTILINE
             )
             linux: re.Match[str] | None = re.search(
                 pattern, (ROOT / "install.sh").read_text(), re.MULTILINE
