@@ -5,7 +5,7 @@ LUA ?= lua5.1
 PYTEST_ARGS ?=
 
 .DEFAULT_GOAL := check
-.PHONY: format check-format typing test test-linux test-openwrt test-openwrt-container test-all check check-all demo demo-docs release
+.PHONY: format check-format typing test test-linux test-openwrt test-openwrt-container test-all check check-all demo demo-docs release clean
 
 format:
 	$(UV) run --locked ruff check --fix .
@@ -65,3 +65,11 @@ release:
 	git commit -m "Release v$(V)" VERSION CHANGELOG.md
 	git tag -a "v$(V)" -m "v$(V)"
 	@echo "now: git push origin main v$(V)"
+
+dep:
+	uv sync
+
+clean: 
+	rm -rf __pycache__ .pytest_cache .ruff_cache
+
+
