@@ -773,6 +773,36 @@ def test_journal_shows_at_most_eight_messages_and_then_a_count(tmp_path: Path) -
     assert not covered(failed, keys(state)[0]) and not covered(failed, "journal-more")
 
 
+def test_journal_aging_can_hide_then_restore_existing_evidence(tmp_path: Path) -> None:
+    oldest = journal_line("23T00:00:00.000001", "app[1]", "error a")
+    others = [
+        journal_line(f"23T00:{n:02d}:00.000001", "app[1]", f"error {letter}")
+        for n, letter in enumerate("bcdefghi", 1)
+    ]
+    newest = journal_line("23T00:09:00.000001", "app[1]", "error a")
+    # Captures span successive 24-hour windows: first A's oldest line ages
+    # out, moving A behind eight other groups; then B ages out, revealing A.
+    captures = [
+        oldest + "".join(others) + newest,
+        "".join(others) + newest,
+        "".join(others[1:]) + newest,
+    ]
+    first, hidden, returned = [
+        collect(tmp_path / str(n), {"tmp/journal-err.txt": capture})[0]
+        for n, capture in enumerate(captures)
+    ]
+    original = next(
+        item for item in first["alarm_items"] if "error a (" in item["text"]
+    )
+    key = original["key"]
+    assert len(original["evidence"]) == 2
+    assert key in hidden["alarm_hidden"] and key not in keys(hidden)
+    current = next(item for item in returned["alarm_items"] if item["key"] == key)
+    assert key not in returned["alarm_hidden"]
+    assert len(current["evidence"]) == 1
+    assert set(current["evidence"]) < set(original["evidence"])
+
+
 def ata(reallocated: int, pending: int = 0) -> dict[str, Any]:
     return {
         "serial_number": "S1",

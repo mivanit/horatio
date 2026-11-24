@@ -887,8 +887,6 @@ function hwEventText(e) {
   }
 }
 
-// The non-snapshot branches and a failed fetch reset what the last good snapshot
-// may have set: the red border, the "N issues" header and the snapshot age.
 function hardwareAlarmHistoryHTML() {
   // Recorded facts remain useful when current health cannot be fetched.
   const log = getCache('alarms')?.recent;
@@ -910,6 +908,8 @@ function renderHardwareError() {
   updateCardNoData('hardware', false);
 }
 
+// The non-snapshot branches and a failed fetch reset what the last good snapshot
+// may have set: the red border, the "N issues" header and the snapshot age.
 function resetHardwareHeader() {
   updateCardCritical('hardware', false);
   const valueEl = document.getElementById('hardware-value');

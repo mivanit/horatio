@@ -99,6 +99,69 @@ def test_aging_out_old_evidence_keeps_review_but_new_evidence_reopens(
     assert known[KEY]["since"] == STAMP
 
 
+@pytest.mark.parametrize("evidence", [["a", "b"], ["b"], ["b", "c"]])
+def test_hidden_review_survives_restart_and_checks_returning_evidence(
+    evidence_alarm: tuple[dict[str, Any], dict[str, Any]], evidence: list[str]
+) -> None:
+    import server
+
+    body, snapshot = evidence_alarm
+    assert asyncio.run(server.review_alarm(request(body))).status_code == 200
+    memory = server._load_alarm_memory()
+    reviewed = memory["state"]["alarms"][KEY].copy()
+    # Positive hidden presence also resets earlier missing/unchecked readings.
+    known = {KEY: reviewed | {"absent": 1, "unchecked_since": STAMP, "unchecked": 1}}
+    known, events = server.track_alarms(
+        known, [], ["journal"], STAMP + 60, 3, hidden=[KEY]
+    )
+    assert known[KEY] == reviewed
+    assert events == []
+    memory["state"]["alarms"] = known
+    server._save_alarm_memory(memory)
+    memory = server._load_alarm_memory()
+    assert memory["state"]["alarms"][KEY] == reviewed
+
+    item = snapshot["alarm_items"][0] | {"evidence": evidence}
+    new_evidence = "c" in evidence
+    # New evidence must be visible before the next tracker pass, too.
+    row = server.alarm_rows("state", [item], memory)[0]
+    assert ("reviewed" in row) is not new_evidence
+    known, events = server.track_alarms(
+        memory["state"]["alarms"], [item], ["journal"], STAMP + 120, 3
+    )
+    assert known[KEY]["since"] == STAMP
+    if new_evidence:
+        assert "reviewed" not in known[KEY]
+        assert [(event["event"], event["reason"]) for event in events] == [
+            ("reopened", "new_evidence")
+        ]
+    else:
+        assert known[KEY]["reviewed"] == reviewed["reviewed"]
+        assert events == []
+
+
+def test_hidden_unreviewed_evidence_does_not_generate_a_change_on_return(
+    evidence_alarm: tuple[dict[str, Any], dict[str, Any]],
+) -> None:
+    import server
+
+    _, snapshot = evidence_alarm
+    known, events = server.track_alarms(
+        server._alarm_memory["state"]["alarms"],
+        [],
+        ["journal"],
+        STAMP + 60,
+        3,
+        hidden=[KEY],
+    )
+    assert events == []
+    known, events = server.track_alarms(
+        known, snapshot["alarm_items"], ["journal"], STAMP + 120, 3
+    )
+    assert events == []
+    assert "reviewed" not in known[KEY]
+
+
 def test_unavailable_evidence_does_not_suppress_alarm(
     evidence_alarm: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:

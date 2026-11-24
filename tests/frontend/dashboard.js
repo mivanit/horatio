@@ -667,7 +667,7 @@ function testHardwareSince() {
   context.renderHardware({ status: 'ok', age_sec: 30, alarms: ['a'], alarm_items: [item('k', 'another text', t)] });
   assert(!html().includes('since '));
 
-  // The latest alarm transition is visible without opening the full history card.
+  // The latest three alarm transitions are visible without opening the full history card.
   const at = seconds => new Date((t - seconds) * 1000).toISOString();
   // Text from the box is escaped wherever it is shown.
   const markup = 'journal: app: <b>&"x"';
@@ -686,9 +686,11 @@ function testHardwareSince() {
     { timestamp: at(2800), event: 'cleared', text: 'GPU 1: thermal slowdown active (sw)', active_for_s: 1200 },
   ] } };
   context.renderHardware({ status: 'ok', age_sec: 30, alarms: [] });
-  const recent = html().slice(html().indexOf('Alarm history'), html().indexOf('alarm rules'));
+  const recent = context.hardwareAlarmHistoryHTML();
   assert(recent.includes('cleared after 20 min: GPU 1'));
-  assert(!recent.includes('raised: GPU 1') && !recent.includes('too old') && !recent.includes('unreadable') && !recent.includes('gap'));
+  assert(recent.includes('raised: GPU 1') && recent.includes('sde: reallocated=8'));
+  assert(recent.indexOf('cleared after') < recent.indexOf('raised: GPU 1'));
+  assert(!recent.includes('too old') && !recent.includes('unreadable') && !recent.includes('gap') && !recent.includes('reallocated=9'));
   // Lines that lack what they should have are shown without the missing part, or not at all.
   context.dataCache.alarms.data.recent = [
     { timestamp: at(500), event: 'changed', text: '<s>sde', value: 9 },
@@ -698,14 +700,20 @@ function testHardwareSince() {
     { timestamp: 4e22, event: 'raised', text: 'no such date' },
   ];
   context.renderHardware({ status: 'ok', age_sec: 30, alarms: [] });
-  const odd = html().slice(html().indexOf('Alarm history'), html().indexOf('alarm rules'));
+  const odd = context.hardwareAlarmHistoryHTML();
   assert(odd.includes(' cleared: x') && !odd.includes('booted') && !odd.includes('sde'));
   assert(!odd.includes('undefined') && !odd.includes('NaN') && !odd.includes('after -') && !odd.includes('no such date'), odd);
-  assert.equal(odd.split('hw-row hw-note').length - 1, 1, 'only the last readable lifecycle event is previewed');
+  assert.equal((odd.match(/class="hw-row /g) || []).length, 1, 'only readable lifecycle events are previewed');
   // Historical facts remain visible when a refresh has not succeeded recently.
   context.dataCache.alarms.lastUpdate = now - 6 * 60 * 1000;
   context.renderHardware({ status: 'ok', age_sec: 30, alarms: [] });
   assert(html().includes('Alarm history') && html().includes('previously fetched'));
+  context.historyMetricAvailable = metric => metric === 'alarms';
+  context.renderHardwareError();
+  assert(html().includes('Error loading hardware health') && html().includes(' cleared: x'));
+  assert(html().includes('class="history-settings-btn" data-history-metric="alarms"'));
+  assert.equal(header(), '--', 'cached history does not imply current health');
+  assert.equal(context.elements.get('hardware-content').onclick, null);
   assert.deepEqual(context.errors, []);
 }
 
@@ -730,10 +738,13 @@ function testHardwareMemoryRows() {
   const ecc = html({ edac: { uptime_seconds: 7200, ce_total: 0, ue_total: 0 }, sel_memory: null, sel_hardware: null });
   assert(ecc.includes('ECC since boot (2 h): 0 corrected, 0 uncorrectable'));
   assert(ecc.includes('check: sudo ras-mc-ctl --errors') && !ecc.includes('ipmitool'));
+  assert(ecc.includes('<details data-hardware-details >'), 'secondary diagnostics start collapsed');
+  context.elements.get('hardware-content').querySelector = selector => selector === '[data-hardware-details]' ? { open: true } : null;
   const server = html({ edac: { uptime_seconds: 7200, ce_total: 0, ue_total: 0 },
     sel_memory: { count: 0, recent: [] }, sel_hardware: { count: 0, recent: [] } });
   assert(server.includes('BMC log, memory events: 0 lifetime'));
   assert(server.includes('check: sudo ipmitool sel elist; sudo ras-mc-ctl --errors'));
+  assert(server.includes('<details data-hardware-details open>'), 'refresh keeps diagnostics expanded');
 }
 
 // hwmon power (/api/4/sensors rows of type 'power') joins the bar as a part; a
@@ -2089,7 +2100,7 @@ async function testAlarmHistory() {
   assert.equal(group('sensors', 'fan/cpu').events.length, 1, 'identical keys from separate sources do not merge');
   entry.alarmSelection = group('dashboard', 'fan/cpu').id;
   html = context.alarmHistoryHTML(entry, 800);
-  assert.equal((html.match(/<strong>Recovery confirmed<\/strong>/g) || []).length, 2);
+  assert.equal((html.match(/<strong>Cleared<\/strong>/g) || []).length, 2);
   assert(html.includes('Observed interval: 6 min 40 s'));
   assert(html.includes('History only; current state unconfirmed.'));
   assert.equal(context.alarmInterval(0), '0 s');
@@ -2162,10 +2173,13 @@ function testAlarmHistoryFocus() {
   const context = liveContext([]);
   evaluate(context, between(app, 'function renderAlarmHistory', '// Shared by the Hardware health'));
   let focusedIndex, currentRow = false;
+  let identity = { open: true };
   const groups = [{ id: 'first' }, { id: 'second' }];
   const box = {
     clientWidth: 600,
+    set innerHTML(value) { identity = { open: false }; },
     querySelector(selector) {
+      if (selector === '[data-alarm-identity]') return identity;
       if (selector === '[data-alarm-lane]:focus') return {
         dataset: { alarmLane: '0' }, classList: { contains: () => !currentRow },
       };
@@ -2178,10 +2192,13 @@ function testAlarmHistoryFocus() {
   const entry = { card: { querySelector: () => box }, alarmGroups: groups };
   context.renderAlarmHistory(entry);
   assert.deepEqual(focusedIndex, ['alarm-lane', 1], 'refresh follows focused identity when groups reorder');
+  assert.equal(identity.open, true, 'refresh keeps source and identity expanded');
+  identity.open = false;
   currentRow = true;
   entry.alarmGroups = groups;
   context.renderAlarmHistory(entry);
   assert.deepEqual(focusedIndex, ['alarm-current-row', 1], 'current concern buttons retain keyboard focus too');
+  assert.equal(identity.open, false, 'refresh also preserves a collapsed disclosure');
 }
 
 async function testAlarmRetirement() {
