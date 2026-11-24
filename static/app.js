@@ -897,13 +897,13 @@ function setHtml(el, html) {
 }
 
 // The Fans card's header: the fastest RPM fan, then the GPU fans' percent
-// ("1657 RPM max · GPU 28%"); percent and RPM are never compared.
+// ("1657 RPM max · GPU 28% max"); percent and RPM are never compared.
 function fansHeader(fans) {
   const rpm = fans.filter(f => f.unit !== '%').map(f => f.value || 0);
   const pct = fans.filter(f => f.unit === '%').map(f => f.value);
   const parts = [];
   if (rpm.length) parts.push(Math.max(...rpm).toFixed(0) + ' RPM max');
-  if (pct.length) parts.push('GPU ' + Math.max(...pct).toFixed(0) + '%');
+  if (pct.length) parts.push('GPU ' + Math.max(...pct).toFixed(0) + '% max');
   return parts.join(' · ');
 }
 
@@ -1973,14 +1973,14 @@ async function fetchDataOnce() {
         if (validGpus.length !== Number(gpuValueEl.dataset.gpuCount)) {
           gpuValueEl.dataset.gpuCount = validGpus.length;
           gpuMemValueEl.dataset.gpuCount = validGpus.length;
-          // Build usage spans: <span id="gpu-usage-0">--</span> / <span id="gpu-usage-1">--</span>%
+          // Each GPU is one group with its own unit. A slash is reserved for
+          // used/total memory; middle dots separate independent GPU readings.
           gpuValueEl.innerHTML = validGpus.map((_, i) =>
-            `<span id="gpu-usage-${i}">--</span>`
-          ).join(' / ') + '%';
-          // Build memory spans: <span id="gpu-mem-used-0">--</span>/<span id="gpu-mem-total-0">--</span> GB
+            `<span class="gpu-reading" data-tip="GPU ${i}"><span id="gpu-usage-${i}">--</span>%</span>`
+          ).join(' · ');
           gpuMemValueEl.innerHTML = validGpus.map((_, i) =>
-            `<span id="gpu-mem-used-${i}">--</span>/<span id="gpu-mem-total-${i}">--</span>`
-          ).join(' / ') + ' GB';
+            `<span class="gpu-reading" data-tip="GPU ${i}"><span id="gpu-mem-used-${i}">--</span> / <span id="gpu-mem-total-${i}">--</span> GB</span>`
+          ).join(' · ');
         }
 
         // Update GPU labels immediately: an older animation must not restore a

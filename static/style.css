@@ -214,6 +214,11 @@ h1 {
   font-variant-numeric: tabular-nums;
 }
 
+.gpu-reading {
+  display: inline-block;
+  white-space: nowrap;
+}
+
 .chart-container {
   position: relative;
   width: 100%;

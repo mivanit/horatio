@@ -47,7 +47,7 @@ function makeDOM(ids) {
   ids.forEach(id => elements.set(id, new Element(id)));
   return { elements, document: { getElementById: id => elements.get(id) || null, querySelector: () => null } };
 }
-const makeChart = () => ({ data: { datasets: [{ data: [] }, { data: [] }] }, options: { scales: { y: {} } }, update() {} });
+const makeChart = () => ({ data: { datasets: [{ data: [] }, { data: [] }] }, options: { scales: { y: {}, y1: {} } }, update() {} });
 
 function liveContext(ids) {
   const dom = makeDOM(ids), statuses = {}, errors = [];
@@ -65,6 +65,7 @@ function liveContext(ids) {
     between(charts, '// config.json temp_labels', 'function abbreviateGpuName') +
     between(config, 'function animateValue', '// GPU colors') +
     between(config, 'function getCache', '// The CPU core temperatures') +
+    between(app, 'function fansHeader', '// Power bar segment colours') +
     between(app, 'function guard', 'async function fetchDataOnce'));
   return context;
 }
@@ -1730,8 +1731,8 @@ function testFansHeader() {
   const context = liveContext([]);
   evaluate(context, between(app, '// The Fans card\'s header', '// Power bar segment colours'));
   assert.equal(context.fansHeader([{ value: 1657 }, { value: 883 }]), '1657 RPM max');
-  assert.equal(context.fansHeader([{ value: 1657 }, { value: 28, unit: '%' }]), '1657 RPM max · GPU 28%');
-  assert.equal(context.fansHeader([{ value: 40, unit: '%' }]), 'GPU 40%');
+  assert.equal(context.fansHeader([{ value: 1657 }, { value: 28, unit: '%' }]), '1657 RPM max · GPU 28% max');
+  assert.equal(context.fansHeader([{ value: 40, unit: '%' }]), 'GPU 40% max');
 }
 
 (async () => {
