@@ -896,6 +896,17 @@ function setHtml(el, html) {
   el.innerHTML = html;
 }
 
+// The Fans card's header: the fastest RPM fan, then the GPU fans' percent
+// ("1657 RPM max · GPU 28%"); percent and RPM are never compared.
+function fansHeader(fans) {
+  const rpm = fans.filter(f => f.unit !== '%').map(f => f.value || 0);
+  const pct = fans.filter(f => f.unit === '%').map(f => f.value);
+  const parts = [];
+  if (rpm.length) parts.push(Math.max(...rpm).toFixed(0) + ' RPM max');
+  if (pct.length) parts.push('GPU ' + Math.max(...pct).toFixed(0) + '%');
+  return parts.join(' · ');
+}
+
 // Power bar segment colours, shared by the CSS classes (style.css .power-seg-*) and the legend text.
 // A power part's colour slot, from what it is: "GPU 0" -> gpu0, "CPU 1" -> cpu1,
 // "CPU (est.)" -> cpu0, "DRAM 0" -> dram0; anything else (an amdgpu or chip reading
@@ -2305,6 +2316,10 @@ async function fetchDataOnce() {
     }
     // GPU draw from nvidia-smi via /api/gpu-info, polled every 30 s (Glances' gpu plugin has no power).
     (getFreshCache('gpuInfo', 300000) ?? []).forEach(g => g.power_draw != null && power.push({ label: 'GPU ' + g.index, value: g.power_draw }));
+    // GPU fans: percent of their maximum (nvidia-smi has no RPM), drawn against the
+    // Fans chart's second axis. A passive card reports none.
+    (getFreshCache('gpuInfo', 300000) ?? []).forEach(g => g.fan_percent != null &&
+      fans.push({ label: `GPU ${g.index} fan`, value: g.fan_percent, unit: '%' }));
     const sensorsAge = sensorsAgeText();
     ['fans-card', 'temps-card', 'power-card'].forEach(id => {
       const el = document.querySelector(`#${id} .cache-time`);
@@ -2365,13 +2380,16 @@ async function fetchDataOnce() {
     const fansCard = document.getElementById('fans-card');
     if (fans.length > 0) {
       fansCard.style.display = '';
-      const labels = fans.map(f => tempDisplayLabel(f.label));
-      const values = fans.map(f => f.value || 0);
-      charts.fans.data.labels = labels;
-      charts.fans.data.datasets[0].data = values;
+      // RPM bars on the left axis, percent bars (GPU fans) on the right one: each
+      // dataset holds its own unit's values and null elsewhere, so every bar has
+      // exactly one, measured against its own axis.
+      const pct = f => f.unit === '%';
+      charts.fans.data.labels = fans.map(f => tempDisplayLabel(f.label));
+      charts.fans.data.datasets[0].data = fans.map(f => pct(f) ? null : f.value || 0);
+      charts.fans.data.datasets[1].data = fans.map(f => pct(f) ? f.value : null);
+      charts.fans.options.scales.y1.display = fans.some(pct);
       charts.fans.update();
-      const maxFan = Math.max(...values);
-      document.getElementById('fans-value').textContent = maxFan.toFixed(0) + ' RPM max';
+      document.getElementById('fans-value').textContent = fansHeader(fans);
       updateCardNoData('fans', true);
     } else {
       // Hidden, not failed: a hidden card must not count in the header's "Partial" tooltip.
@@ -3381,6 +3399,9 @@ function extractHistoryValue(record, metric, rangeType = 'avg') {
       return out;
     }
     case 'fans':
+      // RPM fans, then GPU fans in percent (their own record field; drawn on the
+      // chart's second axis).
+      return record.fans || record.gpu_fans ? { ...record.fans, ...record.gpu_fans } : null;
     case 'power':
       return record[metric] ?? null;  // Full dict of sensor -> value
     case 'load':
@@ -3450,6 +3471,9 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
   const labels = records.map(r => new Date(r.timestamp));
 
   let datasets;
+  // Set when a series is in percent on a chart whose unit is not (GPU fans on
+  // the Fans chart): it then gets a second, 0-100 % axis.
+  let historyPercentAxis = false;
   let showLegend = isDual || isTriple || isMultiLine || isPerDevice;
 
   if (isTriple) {
@@ -3663,11 +3687,17 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
       // Extract each record once (temps sorts ~40 core readings per call) and
       // index the result per dataset, instead of sensors x records extractions.
       let values = records.map(r => extractHistoryValue(r, metric));
+      // GPU fans are percent, not RPM: never in the RPM band, always on the y1 axis.
+      const pctSensors = new Set(metric === 'fans'
+        ? records.flatMap(r => r?.gpu_fans && typeof r.gpu_fans === 'object' ? Object.keys(r.gpu_fans) : []) : []);
       const band = metric === 'temps' ? 'Cores' : metric === 'fans' && mode === 'range' ? 'Fans' : null;
       if (band === 'Fans') {
         values = values.map(v => {
-          const s = v && rangeStats(Object.values(v));
-          return s ? { 'Fans min': s.min, 'Fans max': s.max, 'Fans median': s.median, 'Fans mean': s.mean } : null;
+          if (!v) return null;
+          const rpm = Object.entries(v).filter(([k]) => !pctSensors.has(k)).map(([, x]) => x);
+          const pct = Object.fromEntries(Object.entries(v).filter(([k]) => pctSensors.has(k)));
+          const s = rangeStats(rpm);
+          return s ? { 'Fans min': s.min, 'Fans max': s.max, 'Fans median': s.median, 'Fans mean': s.mean, ...pct } : pct;
         });
       }
       const sensorNames = new Set();
@@ -3718,9 +3748,13 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
           pointHoverRadius: 6,
           borderWidth: stack ? 1 : 2,
           spanGaps: false,
-          ...(BAND_STYLE[sensor] || {})
+          ...(BAND_STYLE[sensor] || {}),
+          // A GPU fan: percent against the right-hand axis, dashed so it does not
+          // read as one more RPM line.
+          ...(pctSensors.has(sensor) ? { yAxisID: 'y1', borderDash: [6, 3], unitSuffix: '%' } : {})
         };
       });
+      if (pctSensors.size) historyPercentAxis = true;
     }
   } else if (isDual) {
     const label1 = metric === 'network' ? 'In' : 'Read';
@@ -4024,7 +4058,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
         filter: (item) => item.parsed.y != null,
         callbacks: {
           title: (ctx) => new Date(ctx[0].parsed.x).toLocaleString(),
-          label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(selectedField?.decimals ?? 1)}${displayUnit}`,
+          label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(ctx.dataset.unitSuffix ? 0 : selectedField?.decimals ?? 1)}${ctx.dataset.unitSuffix ?? displayUnit}`,
           // Stacked power: the rows are the parts, so add their sum.
           footer: (items) => metric === 'power' && mode === 'stack' && items.length > 1
             ? `total ${items.reduce((s, it) => s + it.parsed.y, 0).toFixed(0)}${displayUnit}` : ''
@@ -4062,6 +4096,17 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
     },
     animation: { duration: 0 }
   };
+  // The percent axis is drawn inside the plot (mirrored ticks, no width), so the
+  // plot keeps the same width as every other history card and a moment stays at
+  // the same place on all of them.
+  if (historyPercentAxis) {
+    options.scales.y1 = {
+      position: 'right', min: 0, max: 100,
+      ticks: { ...CHART_TICK, mirror: true, stepSize: 50, callback: v => v + '%' },
+      afterFit: scale => { scale.width = 0; },
+      grid: { drawOnChartArea: false },
+    };
+  }
   // Ping: hidden band axis + shared colored-stripe tooltip (loss/latency table).
   if (metric === 'ping') {
     options.scales.yBand = { display: false, min: 0, max: 1 };

@@ -1725,8 +1725,17 @@ function testHardwareErrorKeepsServerFindings() {
   assert.equal(critical.at(-1), true);
 }
 
+// The Fans header never compares RPM with a GPU fan's percent.
+function testFansHeader() {
+  const context = liveContext([]);
+  evaluate(context, between(app, '// The Fans card\'s header', '// Power bar segment colours'));
+  assert.equal(context.fansHeader([{ value: 1657 }, { value: 883 }]), '1657 RPM max');
+  assert.equal(context.fansHeader([{ value: 1657 }, { value: 28, unit: '%' }]), '1657 RPM max · GPU 28%');
+  assert.equal(context.fansHeader([{ value: 40, unit: '%' }]), 'GPU 40%');
+}
+
 (async () => {
-  for (const test of [testHardwareMemoryRows, testHardwareErrorKeepsServerFindings, testPowerFromHwmonAndTotals, testHardwareShowsServerSensorAlarms, testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
+  for (const test of [testHardwareMemoryRows, testHardwareErrorKeepsServerFindings, testFansHeader, testPowerFromHwmonAndTotals, testHardwareShowsServerSensorAlarms, testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testHardwareSince, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testCapturePendingAndHiddenTab, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
     testVersionFooter]) {

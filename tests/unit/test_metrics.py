@@ -379,3 +379,27 @@ def test_dedupe_fs_unit() -> None:
     assert _mounts(blank) == ["/"], (
         f"dedupe: real / wins over a blank-mount entry on the same fs: {describe(_mounts(blank))}"
     )
+
+
+def test_gpu_stats_are_parsed_by_the_fields_the_query_named() -> None:
+    import server
+
+    fields: list[str] = [
+        "index",
+        "utilization.gpu",
+        "memory.used",
+        "memory.total",
+        "temperature.gpu",
+        "power.draw",
+        "temperature.memory",
+        "fan.speed",
+    ]
+    stats: list[dict[str, Any]] = server._parse_gpu_stats(
+        "0, 3, 500, 6144, 35, 9.84, N/A, 28\n1, 0, 0, 24576, 30, 50, N/A, [N/A]",
+        fields,
+    )
+    # The fan is percent of its maximum; a passive card's [N/A] is None.
+    assert [(s["index"], s["fan_percent"]) for s in stats] == [(0, 28.0), (1, None)]
+    assert stats[0]["throttle_sw_thermal_us"] is None
+    # A query without fan.speed gives no fan_percent key at all.
+    assert "fan_percent" not in server._parse_gpu_stats("0, 1, 2, 3, 4")[0]

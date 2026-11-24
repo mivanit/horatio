@@ -435,15 +435,30 @@ function tempsChartConfig() {
   });
 }
 
+// Fans: RPM bars against the left axis and, when there are any, GPU fans (percent
+// of their maximum; nvidia-smi gives no RPM) against a 0-100 % axis on the right,
+// in their own colour so a bar's axis is plain. Each dataset is null where the
+// other has the bar; grouped: false keeps every bar centred on its label.
 function fansChartConfig() {
-  return buildChart({
+  const pctColor = getCssColor('--color-upload');
+  const config = buildChart({
     type: 'bar',
-    data: { labels: [], datasets: [{ data: [], backgroundColor: getCssColor('--color-download'), borderWidth: 0, borderRadius: CHART_RADIUS }] },
-    tooltip: { displayColors: false, callbacks: { label: (ctx) => ctx.parsed.y.toFixed(0) + ' RPM' } },
+    data: { labels: [], datasets: [
+      { data: [], yAxisID: 'y', backgroundColor: getCssColor('--color-download'), borderWidth: 0, borderRadius: CHART_RADIUS, grouped: false },
+      { data: [], yAxisID: 'y1', backgroundColor: pctColor, borderWidth: 0, borderRadius: CHART_RADIUS, grouped: false },
+    ] },
+    tooltip: { displayColors: false, filter: (item) => item.parsed.y != null, callbacks: {
+      label: (ctx) => ctx.parsed.y.toFixed(0) + (ctx.datasetIndex === 1 ? '% of max' : ' RPM') } },
     xAxis: CHART_X_AXIS_BAR,
     // Not axisNumber: fans run in the low thousands, where it writes "1,500".
     yAxis: makeYAxis({ tickFormat: (v) => v >= 1000 ? (v/1000).toFixed(1) + 'k' : v })
   });
+  config.options.scales.y1 = {
+    display: false, position: 'right', min: 0, max: 100,
+    ticks: { ...CHART_TICK, color: pctColor, stepSize: 50, callback: (v) => v + '%' },
+    grid: { drawOnChartArea: false },
+  };
+  return config;
 }
 
 function getTempColor(temp, warning = 70, critical = 90) {

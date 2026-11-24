@@ -65,7 +65,7 @@ def test_gpu_stats_compatibility_unit() -> None:
 
     import server
 
-    basic: str = "0, 0, 4096, 24576, 53, 123, 86"
+    basic: str = "0, 0, 4096, 24576, 53, 123, 86, 40"  # ..., mem temp, fan %
     modern: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
         [], 0, basic + ", 2500000, 1000000\n", ""
     )

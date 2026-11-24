@@ -623,14 +623,34 @@ def stop_glances(process: subprocess.Popen[bytes]) -> None:
 # ============================================================================
 
 
-def _parse_gpu_stats(stdout: str) -> list[dict[str, Any]]:
-    """Parse nvidia-smi --query-gpu CSV (index,util,mem.used,mem.total,temp,power,
-    mem temp, sw/hw thermal slowdown counters).
+# nvidia-smi --query-gpu field -> the key _parse_gpu_stats gives it.
+GPU_STAT_KEYS: Final[dict[str, str]] = {
+    "index": "index",
+    "utilization.gpu": "util_percent",
+    "memory.used": "memory_used_mb",
+    "memory.total": "memory_total_mb",
+    "temperature.gpu": "temperature",
+    "power.draw": "power_draw",
+    "temperature.memory": "temperature_memory",
+    "clocks_event_reasons_counters.sw_thermal_slowdown": "throttle_sw_thermal_us",
+    "clocks_event_reasons_counters.hw_thermal_slowdown": "throttle_hw_thermal_us",
+    # Percent of the fan's maximum (nvidia-smi gives no RPM); N/A on passive cards.
+    "fan.speed": "fan_percent",
+}
+# The order of the older queries, for a caller that does not say.
+GPU_STAT_FIELDS: Final[tuple[str, ...]] = tuple(GPU_STAT_KEYS)[:9]
+
+
+def _parse_gpu_stats(
+    stdout: str, fields: Sequence[str] = GPU_STAT_FIELDS
+) -> list[dict[str, Any]]:
+    """Parse nvidia-smi --query-gpu CSV whose columns are ``fields`` (in order).
 
     Each metric field degrades to None on '[N/A]'/'[Not Supported]' (nvidia-smi's
     tokens for unreadable fields) rather than dropping the whole GPU row; only an
-    unparseable index drops the row, since the index is the GPU's key. Pure (no
-    I/O) so the parsing — including the N/A handling — is unit-testable.
+    unparseable index drops the row, since the index is the GPU's key. A shorter
+    line (an older query) leaves the missing fields None. Pure (no I/O) so the
+    parsing, including the N/A handling, is unit-testable.
     """
 
     def _f(s: str) -> float | None:
@@ -653,24 +673,15 @@ def _parse_gpu_stats(stdout: str) -> list[dict[str, Any]]:
         except (ValueError, TypeError):
             logger.warning("Skipping nvidia-smi GPU line with bad index: %s", line)
             continue
-        gpus.append(
-            {
-                "index": index,
-                "util_percent": _f(parts[1]),
-                "memory_used_mb": _f(parts[2]),
-                "memory_total_mb": _f(parts[3]),
-                "temperature": _f(parts[4]),
-                # The history power record reads this; an older 5-column line is
-                # tolerated so the parser's unit tests stay valid.
-                "power_draw": _f(parts[5]) if len(parts) > 5 else None,
-                # Memory (HBM) temperature: N/A on GDDR cards (the P40). The
-                # counters are microseconds of thermal slowdown since driver load.
-                # Absent on an older 5/6-column line, like power_draw.
-                "temperature_memory": _f(parts[6]) if len(parts) > 6 else None,
-                "throttle_sw_thermal_us": _f(parts[7]) if len(parts) > 7 else None,
-                "throttle_hw_thermal_us": _f(parts[8]) if len(parts) > 8 else None,
-            }
-        )
+        gpu: dict[str, Any] = {key: None for key in GPU_STAT_KEYS.values()}
+        name: str
+        part: str
+        for name, part in zip(fields, parts):
+            gpu[GPU_STAT_KEYS[name]] = _f(part)
+        gpu["index"] = index
+        if "fan.speed" not in fields:
+            del gpu["fan_percent"]  # not asked for: absent, not unreadable
+        gpus.append(gpu)
     return gpus
 
 
@@ -700,11 +711,22 @@ def get_gpu_stats() -> list[dict[str, Any]]:
     Tesla P40) while the driver's own CLI reads them fine. Per-field
     None-preserving; empty list on failure (nvidia-smi missing/timeout/error).
     """
-    basic_fields: str = "index,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,temperature.memory"
+    basic: list[str] = [
+        "index",
+        "utilization.gpu",
+        "memory.used",
+        "memory.total",
+        "temperature.gpu",
+        "power.draw",
+        "temperature.memory",
+        "fan.speed",
+    ]
     counters: tuple[str, str] = (
         "clocks_event_reasons_counters.sw_thermal_slowdown",
         "clocks_event_reasons_counters.hw_thermal_slowdown",
     )
+    basic_fields: str = ",".join(basic)
+    fields: list[str] = [*basic, *counters]
     command: list[str] = [
         "nvidia-smi",
         "--query-gpu=" + basic_fields + "," + ",".join(counters),
@@ -731,10 +753,11 @@ def get_gpu_stats() -> list[dict[str, Any]]:
                 "--format=csv,noheader,nounits",
             ]
             result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+            fields = basic
         if result.returncode != 0:
             _log_nvidia_failure(result)
             return []
-        return _parse_gpu_stats(result.stdout)
+        return _parse_gpu_stats(result.stdout, fields)
     except FileNotFoundError:
         logger.debug("nvidia-smi not found")
         return []
@@ -2135,6 +2158,16 @@ async def collect_history_sample(
     gpus: list[dict[str, Any]] = build_gpu_records(gpu_stats, gpu_data)
     if gpus:
         record["gpus"] = gpus
+    # GPU fans in percent of their maximum (nvidia-smi has no RPM): their own field,
+    # so the RPM series in `fans` stay one unit; the Fans chart draws these on a
+    # second, 0-100 % axis. A passive card (N/A) has no entry.
+    gpu_fans: dict[str, float] = {
+        f"GPU {st['index']} fan": st["fan_percent"]
+        for st in gpu_stats
+        if st.get("fan_percent") is not None
+    }
+    if gpu_fans:
+        record["gpu_fans"] = gpu_fans
 
     # Temperatures (point-in-time): CPU/board sensors from hwmon (hwmon.py), plus GPU
     # temps from nvidia-smi (merged into the same chart as the live view).
@@ -3723,7 +3756,7 @@ def _get_gpu_info() -> list[dict[str, int | float | str | None]]:
         result: subprocess.CompletedProcess[str] = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit,driver_version",
+                "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit,driver_version,fan.speed",
                 "--format=csv,noheader,nounits",
             ],
             capture_output=True,
@@ -3790,6 +3823,8 @@ def _get_gpu_info() -> list[dict[str, int | float | str | None]]:
                         "power_limit": metric(parts[7]),  # W
                         "driver_version": parts[8],
                         "cuda_version": cuda_version,
+                        # % of the fan's maximum; None on a passive card ([N/A]).
+                        "fan_percent": metric(parts[9]) if len(parts) > 9 else None,
                     }
                 )
             except (ValueError, TypeError, IndexError):
@@ -4788,7 +4823,9 @@ def _sensor_hide_patterns() -> list[re.Pattern[str]]:
         try:
             patterns.append(re.compile(text))
         except re.error as e:
-            logger.error("config sensor_hide: %r is not a regexp (%s); ignored", text, e)
+            logger.error(
+                "config sensor_hide: %r is not a regexp (%s); ignored", text, e
+            )
     return patterns
 
 

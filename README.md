@@ -253,7 +253,7 @@ again, don't put this on anything besides a trusted LAN!
 | `GET /api/processlist`       | Process list with arguments stripped (the one the UI uses) |
 | `GET /api/list-endpoints`    | Which file-backed endpoints exist on this box (mail, storage-health, sensors) |
 | `GET /api/version`           | `{version, build}`: the running release and, on a git checkout, the commit `install.sh` installed (null otherwise) |
-| `GET /api/gpu-info`          | NVIDIA GPU details                          |
+| `GET /api/gpu-info`          | NVIDIA GPU details, including `fan_percent` (percent of the fan's maximum: nvidia-smi gives no RPM; null on a passive card). The Fans card draws GPU fans as bars against a second, 0-100 % axis, and history records them as `gpu_fans` (`{"GPU 0 fan": 28}`), drawn on the Fans history chart as dashed lines against a % axis inside the plot |
 | `GET /api/cpu-info`          | CPU details from /proc/cpuinfo              |
 | `GET /api/gpu-processes`     | GPU process list: per (GPU, pid) memory plus `gpu_util_percent` / `gpu_mem_util_percent` from `nvidia-smi pmon` (null when the driver had no sample for that pid, pmon is unavailable or slow, or the GPU is past pmon's four) |
 | `GET /api/network-processes` | Per-process network bandwidth (nethogs)     |
