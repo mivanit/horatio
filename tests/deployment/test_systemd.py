@@ -257,8 +257,10 @@ def test_python_upgrade_from_published_release(installed_host: Path) -> None:
     assert api("/api/storage-health")["status"] == "ok"
     assert api("/api/sensors")["status"] == "ok"
     run("sudo", "systemctl", "restart", "horatio.service")
+    after_restart = records(app)
     python_ready(app)
-    eventually(lambda: len(records(app)) > len(before))
+    eventually(lambda: len(records(app)) > len(after_restart))
+    assert records(app)[: len(before)] == before
     assert request("/api/history/raw", password=True)
 
 

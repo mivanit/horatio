@@ -118,8 +118,11 @@ jobs:
           HORATIO_SYSTEMD_TEST: "1"
           # Keep the interpreter under home, exercising ProtectHome and its bind.
           UV_PYTHON_INSTALL_DIR: /home/runner/.local/share/horatio-test-python
-          UV_PYTHON_PREFERENCE: only-managed
-        run: uv run --locked pytest -v tests/deployment/test_systemd.py -k '${{ matrix.backend }}'
+          UV_MANAGED_PYTHON: "1"
+        run: |
+          uv python install 3.13
+          export UV_PYTHON="$(uv python find --no-project --managed-python 3.13)"
+          uv run --locked pytest -v tests/deployment/test_systemd.py -k '${{ matrix.backend }}'
 
   openwrt-container:
     name: OpenWrt ${{ matrix.scenario }} in a container

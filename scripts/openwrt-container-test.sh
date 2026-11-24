@@ -67,9 +67,9 @@ expect() {   # <path> <fixed string>
 }
 
 copy_candidate() {
-# Tracked files as they are on disk; one deleted but not yet committed is skipped.
-(cd "$ROOT" && git ls-files -z | while IFS= read -r -d '' f; do [ ! -e "$f" ] || printf '%s\0' "$f"; done \
-    | tar --null -T - -cf -) | "$ENGINE" exec -i "$NAME" tar -xf - -C "$DIR"
+    # Tracked files as they are on disk; one deleted but not yet committed is skipped.
+    (cd "$ROOT" && git ls-files -z | while IFS= read -r -d '' f; do [ ! -e "$f" ] || printf '%s\0' "$f"; done \
+        | tar --null -T - -cf -) | "$ENGINE" exec -i "$NAME" tar -xf - -C "$DIR"
 }
 
 check_luci() {
@@ -123,20 +123,22 @@ if [ "$SCENARIO" = migrate ]; then
     on_router "gzip -t $DIR/logs/history-2026-01-01T000000.jsonl.gz"
     check_luci
     on_router '/etc/init.d/uhttpd restart'
+    restarted_at="$(on_router 'date +%s')"
     sleep 11
     expect /api/history/tick '"status":"ok"'
     fetch '/api/history?hours=1' > "$SNAPSHOT/after.json"
-    python3 - "$SNAPSHOT/api.json" "$SNAPSHOT/after.json" <<'PY'
+    python3 - "$SNAPSHOT/api.json" "$SNAPSHOT/after.json" "$restarted_at" <<'PY'
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
-before, after = (json.loads(Path(path).read_text())["records"] for path in sys.argv[1:])
+before, after = (json.loads(Path(path).read_text())["records"] for path in sys.argv[1:3])
 assert before, "baseline API returned no records"
 by_time = {record["timestamp"]: record for record in after}
 for record in before:
     assert by_time.get(record["timestamp"]) == record, "old record lost or changed in API"
-assert max(by_time) > max(record["timestamp"] for record in before), "recording did not resume"
+assert max(datetime.fromisoformat(ts).timestamp() for ts in by_time) > int(sys.argv[3]), "recording did not resume after restart"
 PY
     check_luci
     echo "== OpenWrt migration, retained history and LuCI passed"
