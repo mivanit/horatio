@@ -2090,8 +2090,11 @@ async function testAlarmHistory() {
   entry.alarmSelection = group('dashboard', 'fan/cpu').id;
   html = context.alarmHistoryHTML(entry, 800);
   assert.equal((html.match(/<strong>Recovery confirmed<\/strong>/g) || []).length, 2);
-  assert(html.includes('Observed interval: 400 seconds'));
-  assert(html.includes('Historical observations; current state is not established'));
+  assert(html.includes('Observed interval: 6 min 40 s'));
+  assert(html.includes('History only; current state unconfirmed.'));
+  assert.equal(context.alarmInterval(0), '0 s');
+  assert.equal(context.alarmInterval(3600), '1 h');
+  assert.equal(context.alarmInterval(90061), '1 d 1 h 1 min 1 s');
   const selected = entry.alarmSelection;
   context.alarmHistoryHTML(entry, 800);
   assert.equal(entry.alarmSelection, selected, 'refresh preserves selected identity');
@@ -2155,6 +2158,32 @@ async function testAlarmHistoryRefresh() {
   assert.deepEqual(rendered, [200, 200], 'closed card is not resurrected by its response');
 }
 
+function testAlarmHistoryFocus() {
+  const context = liveContext([]);
+  evaluate(context, between(app, 'function renderAlarmHistory', '// Shared by the Hardware health'));
+  let focusedIndex, currentRow = false;
+  const groups = [{ id: 'first' }, { id: 'second' }];
+  const box = {
+    clientWidth: 600,
+    querySelector(selector) {
+      if (selector === '[data-alarm-lane]:focus') return {
+        dataset: { alarmLane: '0' }, classList: { contains: () => !currentRow },
+      };
+      const match = selector.match(/^\.(alarm-lane|alarm-current-row)\[data-alarm-lane="(\d+)"\]$/);
+      return match ? { focus: () => { focusedIndex = [match[1], Number(match[2])]; } } : null;
+    },
+  };
+  Object.assign(context, { HISTORY_AXIS_WIDTH: 84, HISTORY_PLOT_INSET: 8,
+    alarmHistoryHTML: entry => { entry.alarmGroups = [...groups].reverse(); return ''; } });
+  const entry = { card: { querySelector: () => box }, alarmGroups: groups };
+  context.renderAlarmHistory(entry);
+  assert.deepEqual(focusedIndex, ['alarm-lane', 1], 'refresh follows focused identity when groups reorder');
+  currentRow = true;
+  entry.alarmGroups = groups;
+  context.renderAlarmHistory(entry);
+  assert.deepEqual(focusedIndex, ['alarm-current-row', 1], 'current concern buttons retain keyboard focus too');
+}
+
 async function testAlarmRetirement() {
   const h = historySettingsContext();
   const refreshed = [], rendered = [], cancelledTimers = [];
@@ -2167,6 +2196,8 @@ async function testAlarmRetirement() {
   const current = () => evaluate(h.context, 'alarmRetirementPopup');
   const alarm = { source: 'dashboard', key: 'fan/@platform/removed/chip/fan1', since: 1000,
     unchecked_since: 2000, text: 'Removed fan <name>' };
+  let restoredFocus = 0;
+  h.context.document.activeElement = { isConnected: true, focus: () => { restoredFocus++; } };
   h.context.openAlarmRetirement(alarm);
   let popup = current();
   const field = id => popup.querySelector('#ar-' + id);
@@ -2201,6 +2232,7 @@ async function testAlarmRetirement() {
   assert.equal(rendered.at(-1).sensor_alarms[0], 'Fan failed again');
   field('cancel').click();
   assert.equal(current(), null);
+  assert.equal(restoredFocus, 1, 'cancel restores focus to the action that opened the dialog');
 
   h.context.openAlarmRetirement(alarm);
   popup = current(); field('password').value = 'test'; field('note').value = 'Replaced the fan';
@@ -2245,7 +2277,7 @@ function testFansHeader() {
 }
 
 (async () => {
-  for (const test of [testHardwareMemoryRows, testHardwareErrorKeepsServerFindings, testHardwareIndependentSources, testPowerHistoryPerRecord, testHistoryCapabilities, testAlarmHistory, testAlarmHistoryRefresh, testAlarmRetirement, testFansHeader, testPowerFromHwmonAndTotals, testHardwareShowsServerSensorAlarms, testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
+  for (const test of [testHardwareMemoryRows, testHardwareErrorKeepsServerFindings, testHardwareIndependentSources, testPowerHistoryPerRecord, testHistoryCapabilities, testAlarmHistory, testAlarmHistoryRefresh, testAlarmHistoryFocus, testAlarmRetirement, testFansHeader, testPowerFromHwmonAndTotals, testHardwareShowsServerSensorAlarms, testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testHardwareSince, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testCapturePendingAndHiddenTab, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
     testVersionFooter]) {

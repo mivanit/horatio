@@ -555,9 +555,11 @@ h1 {
   text-align: left; padding: 5px 0; cursor: pointer; font: inherit; overflow-wrap: anywhere;
 }
 .alarm-current-row span { color: var(--color-warning); margin-right: 6px; }
+.alarm-current-active span { color: var(--color-error-light); }
 .alarm-current-row small { display: block; color: var(--text-muted); }
 .alarm-current-row:hover { text-decoration: underline; }
-.alarm-legend { color: var(--text-muted); font-size: 11px; margin: 12px 0; }
+.alarm-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--text-secondary); font-size: 11px; margin: 12px 0; }
+.alarm-legend > span { white-space: nowrap; }
 .alarm-lanes { max-height: 360px; overflow-y: auto; }
 .alarm-lane {
   display: block; width: 100%; padding: 5px 0; margin: 0; background: transparent;
@@ -565,7 +567,8 @@ h1 {
   text-align: left; cursor: pointer; font: inherit;
 }
 .alarm-lane.selected { background: color-mix(in srgb, var(--color-accent) 9%, transparent); }
-.alarm-lane:focus-visible, .alarm-current-row:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.alarm-lane:hover { background: color-mix(in srgb, var(--color-accent) 5%, transparent); }
+.alarm-lane:focus-visible, .alarm-current-row:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
 .alarm-lane-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alarm-lane-name small { color: var(--text-muted); }
 .alarm-track { position: relative; display: block; height: 28px; margin: 2px 0 0; }
@@ -586,10 +589,15 @@ h1 {
 .alarm-events time { color: var(--text-muted); margin-left: 8px; }
 .alarm-events li > span { display: block; color: var(--text-muted); margin-top: 3px; }
 .alarm-note { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; }
+.alarm-note strong { font-weight: normal; color: var(--text-muted); }
 .alarm-history details, [data-reviewed] { margin: 8px 0; }
 .alarm-history summary, [data-reviewed] summary { cursor: pointer; }
 #ar-note { width: 100%; min-width: 0; font: inherit; color: var(--text-input); background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); resize: vertical; padding: 6px; }
+.history-settings-popup.alarm-action-popup { width: 420px; min-width: 0; max-height: 70dvh; overflow-y: auto; }
+.alarm-action-popup .history-settings-row { flex-direction: column; align-items: stretch; gap: 6px; font-size: 12px; }
+.alarm-action-popup .history-settings-input { width: 100%; }
 @media (max-width: 600px) {
+  .alarm-lane-name { white-space: normal; overflow-wrap: anywhere; }
   .alarm-events time { display: block; margin-left: 0; }
 }
 

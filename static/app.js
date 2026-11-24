@@ -766,7 +766,8 @@ function openAlarmRetirement(alarm, action = 'retire') {
   const review = action === 'review';
   const title = review ? 'Mark evidence reviewed' : 'Close unchecked alarm';
   const popup = document.createElement('div');
-  popup.className = 'history-settings-popup';
+  popup.className = 'history-settings-popup alarm-action-popup';
+  popup.returnFocus = document.activeElement;
   popup.setAttribute('role', 'dialog');
   popup.setAttribute('aria-label', title);
   popup.style.left = '50%';
@@ -810,6 +811,7 @@ function closeAlarmRetirement(popup = alarmRetirementPopup) {
     popup.querySelector('#ar-password').value = '';
     popup.remove();
     alarmRetirementPopup = null;
+    if (popup.returnFocus?.isConnected) popup.returnFocus.focus({ preventScroll: true });
   }
 }
 
@@ -1045,6 +1047,16 @@ function alarmTime(epoch) {
   return Number.isFinite(epoch) && Number.isFinite(new Date(epoch * 1000).getTime())
     ? new Date(epoch * 1000).toLocaleString() : 'Time unavailable';
 }
+function alarmInterval(seconds) {
+  let remaining = Math.round(seconds);
+  const parts = [];
+  for (const [unit, size] of [['d', 86400], ['h', 3600], ['min', 60], ['s', 1]]) {
+    const amount = Math.floor(remaining / size);
+    if (amount) parts.push(`${amount} ${unit}`);
+    remaining %= size;
+  }
+  return parts.join(' ') || '0 s';
+}
 function alarmHistoryGroups(data, current) {
   const groups = new Map();
   const add = row => {
@@ -1093,9 +1105,9 @@ function alarmHistoryHTML(entry, width) {
   const unknown = Object.entries(current?.sources || {}).filter(([source, value]) => source !== 'services' && value?.status !== 'ok');
   if (unknown.length) notice.push(`Current checks unavailable or stale: ${unknown.map(([source]) => source).join(', ')}. Missing readings do not establish recovery.`);
   const currentRows = groups.map((group, i) => group.current && group.current.kind !== 'reviewed' ?
-    `<button class="alarm-current-row" data-alarm-lane="${i}"><span>${escapeHtml(group.current.status)}</span> ${escapeHtml(group.text)}${group.current.since < from ? ' <small>First observed before this range</small>' : ''}</button>` : '').join('');
+    `<button class="alarm-current-row alarm-current-${group.current.kind}" data-alarm-lane="${i}" aria-pressed="${group.id === entry.alarmSelection}"><span>${escapeHtml(group.current.status)}</span> ${escapeHtml(group.text)}${group.current.since < from ? ' <small>First observed before this range</small>' : ''}</button>` : '').join('');
   const reviewed = groups.map((group, i) => group.current?.kind === 'reviewed' ?
-    `<button class="alarm-current-row" data-alarm-lane="${i}">${escapeHtml(group.text)}</button>` : '').join('');
+    `<button class="alarm-current-row" data-alarm-lane="${i}" aria-pressed="${group.id === entry.alarmSelection}">${escapeHtml(group.text)}</button>` : '').join('');
   const hasEvents = groups.some(group => group.events.length);
   const lanes = groups.map((group, i) => {
     if (!group.events.length) return '';
@@ -1106,8 +1118,8 @@ function alarmHistoryHTML(entry, width) {
         title="${escapeHtml(`${alarmEventLabel(event)} · ${alarmTime(epoch)}`)}">${ALARM_EVENT_LABELS[event.event][0]}</span>`;
     }).join('');
     return `<button class="alarm-lane${group.id === entry.alarmSelection ? ' selected' : ''}" data-alarm-lane="${i}" aria-pressed="${group.id === entry.alarmSelection}">
-      <span class="alarm-lane-name">${escapeHtml(group.text)} <small>${escapeHtml(group.source)}</small></span>
-      <span class="alarm-track">${markers}</span></button>`;
+      <span class="alarm-lane-name" title="${escapeHtml(group.text)}">${escapeHtml(group.text)} <small>${escapeHtml(group.source)}</small></span>
+      <span class="alarm-track" style="margin-left:${HISTORY_AXIS_WIDTH}px;margin-right:${HISTORY_PLOT_INSET}px">${markers}</span></button>`;
   }).join('');
   const ticks = validRange ? historyTicks(from * 1000, to * 1000, Math.max(1, width)).map(tick =>
     `<span style="left:${position(tick.value / 1000).toFixed(4)}%">${escapeHtml(tick.label)}</span>`).join('') : '';
@@ -1121,12 +1133,12 @@ function alarmHistoryHTML(entry, width) {
       title="${enabled ? 'Requires the settings password' : 'Refresh current concerns and configure the settings password to make changes'}">${action === 'review' ? 'Mark reviewed' : 'Close unchecked alarm'}</button>` : '';
     const events = [...selected.events].reverse().map(event => {
       const observed = Number.isFinite(event.since) ? `<span>First observed: ${escapeHtml(alarmTime(event.since))}${event.since < from ? ' (before this range)' : ''}</span>` : '';
-      const interval = Number.isFinite(event.active_for_s) && event.active_for_s >= 0 ? `<span>Observed interval: ${Math.round(event.active_for_s)} seconds</span>` : '';
+      const interval = Number.isFinite(event.active_for_s) && event.active_for_s >= 0 ? `<span>Observed interval: ${alarmInterval(event.active_for_s)}</span>` : '';
       return `<li><strong>${escapeHtml(alarmEventLabel(event))}</strong> <time>${escapeHtml(alarmTime(Date.parse(event.timestamp) / 1000))}</time>
-        <div>${escapeHtml(event.text)}</div>${observed}${interval}${event.note ? `<p class="alarm-note">${escapeHtml(event.note)}</p>` : ''}</li>`;
+        <div>${escapeHtml(event.text)}</div>${observed}${interval}${event.note ? `<p class="alarm-note"><strong>Operator note:</strong> ${escapeHtml(event.note)}</p>` : ''}</li>`;
     }).join('');
     details = `<h3>${escapeHtml(selected.text)}</h3>
-      <div class="alarm-detail-status">${row ? escapeHtml(row.status) : 'Historical observations; current state is not established by this list.'} ${button}</div>
+      <div class="alarm-detail-status">${row ? escapeHtml(row.status) : 'History only; current state unconfirmed.'} ${button}</div>
       ${row?.reviewed?.note ? `<p class="alarm-note">Review note: ${escapeHtml(row.reviewed.note)}</p>` : ''}
       <details><summary>Source and identity</summary><code>${escapeHtml(selected.source)} · ${escapeHtml(selected.key)}</code></details>
       ${events ? `<ol class="alarm-events">${events}</ol>` : '<p class="hw-note">No events for this alarm were recorded in the selected range.</p>'}`;
@@ -1138,8 +1150,9 @@ function alarmHistoryHTML(entry, width) {
     <div class="alarm-history-notice" role="status">${notice.map(text => `<p>${escapeHtml(text)}</p>`).join('')}</div>
     <div class="alarm-current"><h3>Current concerns</h3>${currentRows || `<p class="hw-note">${entry.alarmCurrentStale ? 'Current concerns unavailable.' : 'No current hardware concerns reported.'}</p>`}</div>
     ${reviewed ? `<details class="alarm-reviewed" ${entry.alarmReviewedOpen ? 'open' : ''}><summary>Reviewed evidence</summary>${reviewed}</details>` : ''}
-    <div class="alarm-legend">▲ Raised · ● Recovery confirmed · ■ Closed · ◇ Expired · ✓ Reviewed · ◆ New evidence</div>
-    ${hasEvents ? `<div class="alarm-lanes" style="padding-left:${HISTORY_AXIS_WIDTH}px;padding-right:${HISTORY_PLOT_INSET}px">${lanes}</div>
+    <div class="alarm-legend">${[['raised', 'Raised'], ['cleared', 'Recovery confirmed'], ['retired', 'Closed'], ['expired', 'Expired'], ['reviewed', 'Reviewed'], ['reopened', 'Review reopened'], ['changed', 'Updated']].map(([event, label]) =>
+      `<span><span class="alarm-marker-${event}" aria-hidden="true">${ALARM_EVENT_LABELS[event][0]}</span> ${label}</span>`).join('')}</div>
+    ${hasEvents ? `<div class="alarm-lanes">${lanes}</div>
       <div class="alarm-axis" style="margin-left:${HISTORY_AXIS_WIDTH}px;margin-right:${HISTORY_PLOT_INSET}px">${ticks}</div>` : '<p class="no-history-data">No alarm events recorded in this range.</p>'}
     <div class="alarm-detail">${details}</div>${context}
     <p class="hw-note">Markers are recorded observations, not continuous health measurements. Service outages have their own history.</p>
@@ -1149,7 +1162,9 @@ function alarmHistoryHTML(entry, width) {
 function renderAlarmHistory(entry) {
   const box = entry.card.querySelector('.chart-container');
   const scroll = box.querySelector('.alarm-lanes')?.scrollTop || 0;
-  const focused = box.querySelector('.alarm-lane:focus')?.dataset.alarmLane;
+  const focused = box.querySelector('[data-alarm-lane]:focus');
+  const focusedId = focused ? entry.alarmGroups?.[Number(focused.dataset.alarmLane)]?.id : null;
+  const focusedClass = focused?.classList.contains('alarm-lane') ? 'alarm-lane' : 'alarm-current-row';
   const reviewed = box.querySelector('.alarm-reviewed');
   if (reviewed) entry.alarmReviewedOpen = reviewed.open;
   box.innerHTML = alarmHistoryHTML(entry, box.clientWidth - HISTORY_AXIS_WIDTH - HISTORY_PLOT_INSET);
@@ -1160,7 +1175,8 @@ function renderAlarmHistory(entry) {
     lanes.style.marginRight = `-${lanes.offsetWidth - lanes.clientWidth}px`;
     lanes.scrollTop = scroll;
   }
-  if (focused != null) box.querySelector(`.alarm-lane[data-alarm-lane="${focused}"]`)?.focus({ preventScroll: true });
+  const focusedIndex = entry.alarmGroups.findIndex(group => group.id === focusedId);
+  if (focusedIndex >= 0) box.querySelector(`.${focusedClass}[data-alarm-lane="${focusedIndex}"]`)?.focus({ preventScroll: true });
   box.onclick = event => {
     const lane = event.target.closest('[data-alarm-lane]');
     if (lane) {

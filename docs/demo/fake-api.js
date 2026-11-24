@@ -68,7 +68,11 @@
   // Historical events are anchored once per page load: refreshing a chart must
   // not move an old incident along the timeline or give it a new occurrence ID.
   const ALARM_ANCHOR = Math.floor(Date.now() / 1000);
-  const FAN_INCIDENTS = [{ offset: -12 * 3600, duration: 600 }, { offset: -45 * 60, duration: 90 }];
+  // Each fan stall spans a history interval, so both incidents can be found in
+  // the metric charts as well as the event timeline, regardless of grid phase.
+  const FAN_INCIDENTS = [{ offset: -12 * 3600, duration: 600 }, { offset: -45 * 60, duration: 600 }];
+  const GPU_INCIDENT = { offset: -7 * 3600, duration: 1080 };
+  const duringIncident = (t, { offset, duration }) => t >= ALARM_ANCHOR + offset && t < ALARM_ANCHOR + offset + duration;
   const BOOT = ALARM_ANCHOR - (23 * 86400 + 4 * 3600 + 17 * 60);
   const PROCS = [
     { pid: 48211, name: 'python3', path: '/home/alice/venvs/ml/bin/python3 train.py --config runs/vit-b16.yaml', user: 'alice', cpu: 6.1, rss: 9.2, thr: 38, gpu: [0, 18800], gpuWork: true },
@@ -95,7 +99,8 @@
   function computeState(t) {
     const d = diurnal(t);
     // The training job runs in multi-hour stretches; the backup nightly 02:00-02:40.
-    const training = noise('job', t, 5400) > 0.3;
+    const gpuHot = duringIncident(t, GPU_INCIDENT);
+    const training = gpuHot || noise('job', t, 5400) > 0.3;
     const hour = new Date(t * 1000).getHours() + new Date(t * 1000).getMinutes() / 60;
     const backup = hour >= 2 && hour < 2.67;
 
@@ -115,7 +120,7 @@
       const busy = i === 0 ? training : noise('gpu1busy', t, 1200) > 0.55;
       const util = busy ? 78 + 20 * wander('gpuu' + i, t, 300, 4) : 2 * wander('gpuidle' + i, t, 60, 5);
       const memMiB = i === 0 ? (training ? 19200 : 420) : 6100 + (busy ? 900 : 0);
-      const temp = 34 + (busy ? 36 : 4) * (0.8 + 0.2 * wander('gput' + i, t, 600, 30));
+      const temp = i === 0 && gpuHot ? 88 : 34 + (busy ? 36 : 4) * (0.8 + 0.2 * wander('gput' + i, t, 600, 30));
       const power = g.idleW + (busy ? (g.limitW - g.idleW) * (0.75 + 0.2 * wander('gpup' + i, t, 120, 4)) : 3 * noise('gpupi' + i, t, 20));
       const fanPercent = Math.round(clamp(20 + 0.65 * util + 4 * noise('gpufan' + i, t, 60), 0, 100));
       return { util: r1(util), memMiB: Math.round(memMiB), memPct: r1(memMiB / g.memMiB * 100), temp: Math.round(temp), power: r1(power), fanPercent };
@@ -140,9 +145,8 @@
       'FAN2': Math.round((850 + 12 * pkg + 200 * noise('fan2', t, 40)) / 75) * 75,
       'FAN3': Math.round((1100 + 10 * Math.max(...gpus.map(g => g.temp)) + 150 * noise('fan3', t, 40)) / 75) * 75,
     };
-    // Match the two recorded fan incidents and the GPU temperature incident.
-    if (FAN_INCIDENTS.some(({ offset, duration }) => t >= ALARM_ANCHOR + offset && t < ALARM_ANCHOR + offset + duration)) fans.FAN1 = 250;
-    if (t >= ALARM_ANCHOR - 7 * 3600 && t < ALARM_ANCHOR - 7 * 3600 + 1080) gpus[0].temp = 88;
+    // Match the fan event readings; GPU heat above also drives the exhaust fan.
+    if (FAN_INCIDENTS.some(incident => duringIncident(t, incident))) fans.FAN1 = 250;
     const cpuW = 28 + 1.6 * cpu * (0.9 + 0.2 * noise('cpuw', t, 10));
     const dramW = 7 + 0.04 * cpu + 2 * noise('dramw', t, 30);
     const totalW = cpuW + dramW + gpus.reduce((s, g) => s + g.power, 0) + 68 + 6 * noise('otherw', t, 60);
@@ -446,13 +450,13 @@
   const alarmTime = offset => ALARM_ANCHOR + offset;
   const alarmISO = at => new Date(at * 1000).toISOString();
   const fanAlarm = offset => ({ source: 'dashboard', key: 'fan/@platform/nct6775/fan1',
-    text: 'CPU fan: 250 RPM below minimum 500 RPM', since: alarmTime(offset) });
+    text: 'CPU fan: 250 RPM below minimum 500 RPM', value: 250, since: alarmTime(offset) });
   const gpuAlarm = { source: 'sensors', key: 'gpu/pci/0000:01:00.0/temp/core',
-    text: 'GPU 0: core 88 C >= max operating 90 C - 3', since: alarmTime(-7 * 3600) };
+    text: 'GPU 0: core 88 C >= max operating 90 C - 3', value: 88, since: alarmTime(GPU_INCIDENT.offset) };
   const replacedDisk = { source: 'state', key: 'smart/WD-OLD0001/health',
     text: 'Removed disk WD-OLD0001: SMART health FAILED', since: alarmTime(-3 * 86400), initial: true };
   const uncheckedFan = { source: 'dashboard', key: 'fan/@platform/nct6775/fan4',
-    text: 'Rear fan: 0 RPM below minimum 400 RPM', since: alarmTime(-2 * 86400),
+    text: 'Rear fan: 0 RPM below minimum 400 RPM', value: 0, since: alarmTime(-2 * 86400),
     unchecked_since: alarmTime(-26 * 3600) };
   const expiredGpu = { source: 'sensors', key: 'gpu/legacy/2/temp/core',
     text: 'Removed GPU: core temperature above limit', since: alarmTime(-40 * 86400), initial: true };
@@ -460,10 +464,10 @@
     text: 'journal: restic: repository temporarily unavailable (2 in 24h)',
     since: alarmTime(-9 * 3600), evidence: ['demo-journal-first', 'demo-journal-new'] };
   const selAlarm = { source: 'state', key: 'sel/hardware',
-    text: 'SEL: power supply input lost during planned UPS maintenance',
+    text: 'SEL: 1 hardware events in 7d (1 total), latest: Power Supply 1 | Power Supply AC lost | Asserted',
     since: alarmTime(-2 * 86400), evidence: ['demo-sel-psu'] };
   const selReview = { timestamp: alarmTime(-11 * 3600), evidence: [...selAlarm.evidence],
-    note: 'Planned UPS maintenance. Both power supplies are online again.' };
+    note: 'AC loss matched planned UPS maintenance. Both power supplies are online; the BMC entry remains in the event log.' };
   const ALARM_EVENTS = (() => {
     const events = [];
     const add = (event, alarm, at, extra = {}) => events.push({ ...alarm, ...extra, event, timestamp: alarmISO(at) });
@@ -473,10 +477,12 @@
       add('cleared', fan, fan.since + duration + 90, { active_for_s: duration + 90 });
     }
     add('raised', gpuAlarm, gpuAlarm.since);
-    add('cleared', gpuAlarm, gpuAlarm.since + 1200, { active_for_s: 1200 });
+    add('cleared', gpuAlarm, gpuAlarm.since + GPU_INCIDENT.duration + 120,
+      { active_for_s: GPU_INCIDENT.duration + 120 });
     add('raised', replacedDisk, replacedDisk.since);
     add('retired', replacedDisk, alarmTime(-10 * 3600), {
-      unchecked_since: alarmTime(-2 * 86400), note: 'Replaced the failed disk and verified the mirror rebuilt.' });
+      unchecked_since: alarmTime(-2 * 86400),
+      note: 'Replaced failed member WD-OLD0001. The md0 mirror rebuilt; both current members report in_sync. Closed the removed disk\'s alarm.' });
     const { unchecked_since, ...fan } = uncheckedFan;
     add('raised', fan, fan.since);
     add('raised', expiredGpu, expiredGpu.since);
@@ -485,7 +491,7 @@
       text: 'journal: restic: repository temporarily unavailable (1 in 24h)' };
     add('raised', originalJournal, originalJournal.since);
     add('reviewed', originalJournal, alarmTime(-8 * 3600), {
-      note: 'Repository maintenance finished; the backup retry succeeded.' });
+      note: 'Repository maintenance finished; a manual backup retry succeeded. Reviewed the original journal entry.' });
     add('reopened', journalAlarm, alarmTime(-30 * 60), { reason: 'new_evidence' });
     add('raised', selAlarm, selAlarm.since);
     add('reviewed', selAlarm, selReview.timestamp, { note: selReview.note });
@@ -547,6 +553,7 @@
     http_targets: SERVICES,
     history: { ...HISTORY_SETTINGS, sample_count: SAMPLE_COUNT, max_hours: 24 * HISTORY_DAYS },
     limits: { network_mbps: 1250, disk_io_mbps: 15000 },
+    sensor_labels: { FAN1: 'CPU fan', FAN2: 'Front intake', FAN3: 'GPU exhaust' },
     thresholds: {
       cpu_percent: 50, memory_percent: 75, gpu_util_percent: 80, gpu_memory_percent: 80, temp_celsius: 60,
       power_max_watts: 1200, power_psu_watts: 1000, power_warn_fraction: 0.8, network_mbps: 25,

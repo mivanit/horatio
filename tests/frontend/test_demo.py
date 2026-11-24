@@ -158,6 +158,26 @@ vm.runInContext(fs.readFileSync(apiPath, 'utf8'), context);
   assert.equal(fanRecoveries[0].key, fanRecoveries[1].key);
   assert.notEqual(fanRecoveries[0].since, fanRecoveries[1].since, 'a recurrence has a distinct occurrence');
   assert(fanRecoveries.every(e => at(e) - e.since === e.active_for_s));
+  const recentFan = fanRecoveries.at(-1);
+  const recentMetrics = get('/api/history', 'hours=1').records;
+  assert(recentMetrics.some(r => at(r) >= recentFan.since && at(r) < at(recentFan) &&
+    r.fans.FAN1 === recentFan.value), 'the recent fan incident is also visible in the 1h metric chart');
+  assert(recentMetrics.some(r => at(r) > at(recentFan) && r.fans.FAN1 >= 500),
+    'the metric chart shows the fan turning normally again after recovery');
+  assert.equal(get('/config.json').sensor_labels.FAN1, 'CPU fan',
+    'the fan chart and alarm timeline use the same display name');
+  const gpuEvent = alarmHistory.events.find(e => e.event === 'raised' && e.source === 'sensors');
+  const gpuRecovery = alarmHistory.events.find(e => e.event === 'cleared' && e.key === gpuEvent.key);
+  const gpuTemps = get('/api/history/field/temps', 'hours=24').records;
+  const hotSamples = gpuTemps.filter(r => r.temps['GPU 0'] === gpuEvent.value);
+  assert(hotSamples.length > 0, 'the recorded overheat appears on the temperature chart');
+  assert(hotSamples.every(r => at(r) >= gpuEvent.since && at(r) < at(gpuRecovery)));
+  assert(hotSamples.every(r => {
+    const metric = hist.records.find(m => m.timestamp === r.timestamp);
+    return metric.gpus[0].util_percent >= 78 && metric.power['GPU 0'] > 200;
+  }), 'GPU heat coincides with workload and power consumption');
+  assert(gpuTemps.some(r => at(r) > at(gpuRecovery) && r.temps['GPU 0'] < 87),
+    'GPU readings fall below the alarm limit after recovery');
   const retired = alarmHistory.events.find(e => e.event === 'retired');
   assert(retired.note.includes('Replaced') && retired.since < alarmHistory.cutoff,
     'a closed occurrence remains understandable without its out-of-range start');
