@@ -133,9 +133,9 @@ fi
 #   exit 3              `--nocheck=standby,3`: the drive was in standby and was LEFT
 #                       ASLEEP (3 is the status we ask for; it happens to be
 #                       bits 0+1, so it is checked before the bits are)
-#   bit 2 (4)           a SMART command failed; if it was an optional one the
-#                       JSON is still complete, if a mandatory one there is no
-#                       smart_status in the JSON and the drive counts as unreadable
+#   bit 2 (4)           a SMART command failed; an optional failure can leave
+#                       usable readings, while a missing smart_status makes the
+#                       drive count as unreadable
 #   bit 3 (8)           SMART health check says the drive is FAILING
 #   bits 4-6 (16..64)   attributes at/under threshold now or in the past,
 #                       entries in the error log
@@ -481,7 +481,7 @@ def smart():
         # Bits 0-1 (bad args, open/identify failed) mean nothing was read. No `smart_status`
         # in the JSON means smartctl died before printing it (`timeout`, exit 124) or SMART
         # is disabled/unsupported (bit 2 on a mandatory command). Bit 2 alone, with the
-        # JSON present, is an optional command that failed and the rest is complete.
+        # JSON present, can leave other successfully read fields usable.
         if rc & 3 or "smart_status" not in s:
             msgs = [m.get("string") for m in (s.get("smartctl") or {}).get("messages") or []]
             why = read(f"smart_{name}.err").strip() or "; ".join(m for m in msgs if m) \
@@ -532,7 +532,10 @@ def smart():
                         # a later successful extended test; SCSI alarms while any failed
                         # entry is in its 20-entry log.
             alarm(f"{did}/selftest", f"{name}: self-test log has errors")
-        check(f"{did}/selftest")      # the exit status always says
+        # A failed optional command may be the self-test log read: no error bit
+        # then means unknown, not healthy. A positive finding is still evidence.
+        if rc & 128 or not rc & 4:
+            check(f"{did}/selftest")
         # smartd's `-n standby` skips scheduled tests on a sleeping drive, so one that
         # is never awake at test time is never tested. Info, not alarm: nothing is
         # wrong with the drive, it is just unexercised. ATA keeps a count in the

@@ -11,13 +11,16 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 - Held alarms can be manually retired with the dashboard password. Retirement
   is recorded in the event history, survives restarts and does not suppress a
   newly observed fault. Active alarms cannot be retired.
+- Journal faults hidden by the display limit remain active and cannot be retired.
+  An unreadable SMART self-test log no longer clears an earlier self-test alarm.
 - GPU alarms use PCI addresses rather than display indices. USB/HID and I2C fan
   identities preserve physical topology across bus renumbering; legacy alarm
   keys remain held until explicitly retired. Existing fan display aliases keep
   working, and fans lacking durable identity still report current low readings.
 - ZFS spare inventory no longer prevents error recovery. Older power records
   exclude PSU inputs from stacked components; Lua temperature history keeps
-  distinct physical channels instead of overwriting equal labels.
+  distinct physical channels instead of overwriting equal labels, including
+  across USB/HID and I2C bus renumbering.
 - History setting changes are serialized; missing GPU process mappings stay
   unknown. Host-check responses use one cached result. Optional unconfigured
   collectors are shown neutrally, while missing expected collectors still warn.

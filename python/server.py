@@ -5235,7 +5235,7 @@ def track_alarms(
     ``clear_after`` snapshots in a row without it; until then, and for as long as
     it is not checked, it stays known. ``hidden`` are keys the source says still
     exist though it does not list them (journal messages past the ones it
-    prints): they stay as they are. Each entry remembers the boot it was last
+    prints): they remain active. Each entry remembers the boot it was last
     seen on, so a clear that follows a reboot says so: counters that reset at
     boot (ECC, failed units) take their alarms with them."""
     before: dict[str, dict[str, Any]] = dict(known or {})
@@ -5293,12 +5293,14 @@ def track_alarms(
 
     key: str
     for key, old in before.items():
-        if key in hidden:
-            after[key] = old
-            continue
         gone: dict[str, Any] = {
             k: old[k] for k in (*_ALARM_FIELDS, "boot", "requires") if k in old
         }
+        if key in hidden:
+            # Hidden means positively present, so earlier failed checks and
+            # absences no longer apply to this occurrence.
+            after[key] = gone
+            continue
         absent: int = int(old.get("absent", 0))
         if _covered(key, checked) or (
             old.get("requires") and all(_covered(k, checked) for k in old["requires"])
@@ -5850,7 +5852,8 @@ async def _retire_held_alarm(
                 status_code=503,
                 media_type="application/json",
             )
-        if any(
+        hidden: Any = current.get("alarm_hidden")
+        if (isinstance(hidden, list) and key in hidden) or any(
             isinstance(item, dict) and item.get("key") == key
             for item in (current.get("alarm_items") or [])
         ):

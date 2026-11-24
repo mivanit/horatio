@@ -179,6 +179,35 @@ def test_corrected_ecc_retains_sum_and_inventory_dependencies(
     transition(tracker, state, unknown, healthy, "ecc/correctable")
 
 
+@pytest.mark.parametrize("fault_rc", [128, 128 | 4])
+def test_unreadable_selftest_log_holds_previous_failure(
+    tracker: ModuleType, tmp_path: Path, fault_rc: int
+) -> None:
+    report = {
+        "serial_number": "S1",
+        "smart_status": {"passed": True},
+        "ata_smart_attributes": {"table": [{"id": 5, "raw": {"value": 0}}]},
+    }
+
+    def capture(name: str, rc: int, errors: int | None) -> dict[str, Any]:
+        stage = tmp_path / name
+        data = dict(report)
+        if errors is not None:
+            data["ata_smart_self_test_log"] = {
+                "standard": {"count": 1, "error_count_total": errors}
+            }
+        return collect(stage, smart(stage, "sda", rc, data))[0]
+
+    fault = capture("fault", fault_rc, 1)
+    unknown = capture("unknown", 4, None)
+    healthy = capture("healthy", 0, 0)
+    assert covered(fault, "smart/S1/selftest")
+    assert not covered(unknown, "smart/S1/selftest")
+    assert covered(unknown, "smart/S1/health")
+    assert covered(unknown, "smart/S1/reallocated")
+    transition(tracker, fault, unknown, healthy, "smart/S1/selftest")
+
+
 def test_missing_scalar_fields_are_unknown_not_zero(tmp_path: Path) -> None:
     report = {
         "serial_number": "S1",

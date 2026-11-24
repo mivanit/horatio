@@ -748,8 +748,13 @@ def test_a_drive_is_checked_only_for_what_its_report_contained(tmp_path: Path) -
     partial: dict[str, Any] = {"serial_number": "S1", "smart_status": {"passed": True}}
     state: dict[str, Any] = collect(tmp_path, {**smart(tmp_path, "sde", 4, partial)})[0]
     assert state["alarms"] == []
-    assert covered(state, "smart/S1/health") and covered(state, "smart/S1/selftest")
-    for key in ("smart/S1/reallocated", "smart/S1/pending", "smart/S1/grown_defects"):
+    assert covered(state, "smart/S1/health")
+    for key in (
+        "smart/S1/selftest",
+        "smart/S1/reallocated",
+        "smart/S1/pending",
+        "smart/S1/grown_defects",
+    ):
         assert not covered(state, key), key
     full: dict[str, Any] = collect(tmp_path, {**smart(tmp_path, "sde", 0, ata(8))})[0]
     assert covered(full, "smart/S1/reallocated") and covered(full, "smart/S1/pending")
