@@ -289,8 +289,13 @@ def test_failed_units_and_journal_errors(tmp_path: Path) -> None:
     assert state["failed_units"] == ["x.service"]
     assert state["alarms"] == [
         "unit failed: x.service",
-        "journal: 1 error-level messages (1 distinct) in 24h, latest: service exit signal",
+        "journal: serverus-fans: service exit signal (1 in 24h, at 2026-11-17 19:57)",
     ]
+    assert state["journal_errors"] == {
+        "hours": 24,
+        "count": 1,
+        "distinct": ["service exit signal"],
+    }
 
 
 def test_err_sidecars_alarm_except_empty_sel(tmp_path: Path) -> None:
@@ -709,3 +714,141 @@ def test_both_collectors_carry_the_same_memory_code() -> None:
         ]
 
     assert block("health-collect.sh") == block("health-sensors.sh")
+
+
+# ---- journal: one alarm per message; drives: one per attribute, with a baseline ----
+
+
+def journal_line(when: str, unit: str, message: str) -> str:
+    return f"2026-11-{when}+00:00 serverus {unit}: {message}\n"
+
+
+def test_journal_gives_each_distinct_message_its_own_alarm(tmp_path: Path) -> None:
+    failsafe: str = (
+        "serverus-fans: failsafe, requesting 100 %: ipmitool timed out after {} s"
+    )
+    journal: str = (
+        journal_line("23T15:28:18", "serverus-fans[1275534]", failsafe.format(10))
+        + journal_line(
+            "24T01:24:03",
+            "kernel",
+            "NVRM: loading NVIDIA UNIX x86_64 Kernel Module  580.196.07",
+        )
+        + journal_line(
+            "24T01:24:03",
+            "kernel",
+            "ACPI Error: AE_NOT_EXIST, Returned by Handler for [IPMI]",
+        )
+        # The same message from another process, with another number in it.
+        + journal_line("24T03:00:00", "serverus-fans[2190]", failsafe.format(12))
+        + "    a continuation line\n"
+    )
+    state: dict[str, Any] = collect(tmp_path, {"tmp/journal-err.txt": journal})[0]
+    assert state["alarms"] == [
+        "journal: serverus-fans: failsafe, requesting 100 %: ipmitool timed out after 12 s (2 in 24h, first 2026-11-23 15:28, last 2026-11-24 03:00)",
+        "journal: kernel: NVRM: loading NVIDIA UNIX x86_64 Kernel Module  580.196.07 (1 in 24h, at 2026-11-24 01:24)",
+    ]
+    assert all(k.startswith("journal/") and len(k) == 16 for k in keys(state))
+    assert covered(state, keys(state)[0])
+    assert state["journal_errors"]["count"] == 3
+
+    # What is noise on this box only is ignored from the config; a pattern that
+    # does not compile is skipped and said so, and the section still runs.
+    ignoring: dict[str, Any] = collect(
+        tmp_path / "ignore",
+        {
+            "tmp/journal-err.txt": journal,
+            "config.json": json.dumps(
+                {"journal_ignore": ["NVRM: loading NVIDIA", "(unclosed"]}
+            ),
+        },
+    )[0]
+    assert keys(ignoring) == keys(state)[:1]
+    assert ignoring["info"] == [
+        "journal_ignore: skipped '(unclosed': missing ), unterminated subpattern at position 0"
+    ]
+    # The key does not depend on what else is in the journal that day.
+    assert (
+        keys(
+            collect(
+                tmp_path / "one", {"tmp/journal-err.txt": journal.splitlines(True)[0]}
+            )[0]
+        )
+        == keys(state)[:1]
+    )
+
+
+def test_journal_shows_at_most_eight_messages_and_then_a_count(tmp_path: Path) -> None:
+    journal: str = "".join(
+        journal_line(f"24T01:{n:02d}:00", "app[1]", f"error {'abcdefghijk'[n]}")
+        for n in range(11)
+    )
+    state: dict[str, Any] = collect(tmp_path, {"tmp/journal-err.txt": journal})[0]
+    assert len(state["alarms"]) == 9
+    assert state["alarms"][0].startswith("journal: app: error a (1 in 24h")
+    assert state["alarms"][-1] == "journal: 3 more distinct error-level messages in 24h"
+    assert keys(state)[-1] == "journal-more"
+    # A message that is not shown is not known to be gone.
+    assert not covered(state, keys(state)[0])
+    fewer: dict[str, Any] = collect(tmp_path, {"tmp/journal-err.txt": journal[:200]})[0]
+    assert covered(fewer, keys(state)[0]) and covered(fewer, "journal-more")
+
+
+def ata(reallocated: int, pending: int = 0) -> dict[str, Any]:
+    return {
+        "serial_number": "S1",
+        "smart_status": {"passed": True},
+        "ata_smart_attributes": {
+            "table": [
+                {"id": 5, "raw": {"value": reallocated}},
+                {"id": 197, "raw": {"value": pending}},
+                {"id": 199, "raw": {"value": 4}},
+            ]
+        },
+    }
+
+
+def test_each_ata_attribute_is_its_own_alarm_with_its_own_baseline(
+    tmp_path: Path,
+) -> None:
+    state: dict[str, Any] = collect(tmp_path, {**smart(tmp_path, "sde", 0, ata(8, 2))})[
+        0
+    ]
+    assert identity(state) == [
+        {"key": "smart/S1/reallocated", "text": "sde: reallocated=8", "value": 8},
+        {"key": "smart/S1/pending", "text": "sde: pending=2", "value": 2},
+    ]
+    assert state["drives"][0]["attrs"] == {
+        "reallocated": 8,
+        "pending": 2,
+        "udma_crc": 4,
+    }
+
+    def with_baseline(report: dict[str, Any], baseline: Any) -> dict[str, Any]:
+        return collect(
+            tmp_path,
+            {
+                **smart(tmp_path, "sde", 0, report),
+                "config.json": json.dumps({"smart_baseline": baseline}),
+            },
+        )[0]
+
+    # Eight remapped sectors accepted for this drive: quiet, and the log says cleared.
+    state = with_baseline(ata(8), {"S1": {"reallocated": 8}})
+    assert state["alarms"] == []
+    assert state["drives"][0]["attrs_baseline"] == {"reallocated": 8}
+    assert [(e["event"], e["key"]) for e in events(tmp_path)][-2:] == [
+        ("cleared", "smart/S1/reallocated"),
+        ("cleared", "smart/S1/pending"),
+    ]
+    # One more, and it is back, saying what it is measured against.
+    state = with_baseline(ata(9), {"S1": {"reallocated": 8}})
+    assert state["alarms"] == ["sde: reallocated=9 (baseline 8)"]
+    # A baseline for another drive, or one that is not a number, accepts nothing.
+    assert with_baseline(ata(8), {"S2": {"reallocated": 8}})["alarms"] == [
+        "sde: reallocated=8"
+    ]
+    assert with_baseline(ata(8), {"S1": {"reallocated": "8"}})["alarms"] == [
+        "sde: reallocated=8"
+    ]
+    assert with_baseline(ata(8), {"S1": 8})["alarms"] == ["sde: reallocated=8"]

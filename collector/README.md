@@ -43,6 +43,8 @@ it survives re-installs. Keys:
 |---|---|
 | `sel_fault_patterns` | case-insensitive substrings of BMC event descriptions that count as a hardware fault (`SEL: N hardware events in 7d`). Routine chatter is excluded by not being listed |
 | `grown_defect_baseline` | `{serial: count}` for SAS drives; alarm when a drive exceeds its own number. An unlisted serial is watched from 0, so a replacement drive alarms as soon as it has defects: add it then |
+| `smart_baseline` | `{serial: {attribute: count}}` for the ATA attributes that alarm (`reallocated`, `pending`, `offline_uncorrectable`, `reported_uncorrect`, `command_timeout`): accept what a drive already has, e.g. `{"WFG16T45": {"reallocated": 8}}`. The alarm returns, as `sdX: reallocated=9 (baseline 8)`, when the count grows past the number. Record why and when in your own notes; a growing count means the drive is failing |
+| `journal_ignore` | list of regexes; an error-level journal line matching one (anywhere in the line, unit name included) is not counted. For noise particular to this box, e.g. `"NVRM: loading NVIDIA UNIX"`, which that driver logs at error level on every boot. An invalid pattern is skipped with an `info` note |
 | `smart_timeout_s` | seconds each drive's `smartctl` may take in the 15-min run (default 60). Drives are read one at a time and the run has a 20-min limit: 180 + 300 + drives × this must stay under 1200 with room to spare, i.e. 11 drives at the default |
 | `ipmi_timeout_s`, `gpu_timeout_s` | seconds each `ipmitool` / `nvidia-smi` call in the sensors run may take before it is killed and reported as an alarm (defaults 20 and 15). Three of each must fit inside `horatio-sensors.service`'s `TimeoutStartSec=2min`, or a hung BMC gets the run killed before its alarm is written |
 | `fan_rpm_alarm_above` | alarm when any fan exceeds this RPM; `null` = off |
@@ -91,7 +93,7 @@ ago`), so two snapshots cannot be compared by text. Each snapshot therefore also
 
 | key | alarm |
 |---|---|
-| `smart/<serial>/health`, `/selftest`, `/temperature`, `/grown_defects`, `/media_errors`, `/percentage_used`, `/attrs` | per drive; `smart/dev:<name>/…` for a drive that gave no serial |
+| `smart/<serial>/health`, `/selftest`, `/temperature`, `/grown_defects`, `/media_errors`, `/percentage_used`, `/reallocated`, `/pending`, `/offline_uncorrectable`, `/reported_uncorrect`, `/command_timeout` | per drive; `smart/dev:<name>/…` for a drive that gave no serial |
 | `smart/dev:<name>/unreadable` | nothing readable came back, so there is no serial to go by |
 | `smart-tools` | smartmontools not installed |
 | `sel/memory`, `sel/hardware`, `sel/dates` | BMC event log |
@@ -99,7 +101,8 @@ ago`), so two snapshots cannot be compared by text. Each snapshot therefore also
 | `md/<array>/degraded`, `/array_state`, `/mismatch`, `/member/<dev>/state/<flag>`, `/member/<dev>/errors` | md arrays |
 | `backup/never`, `backup/overdue` | the backup timer |
 | `unit/<unit>` | a failed systemd unit |
-| `journal` | error-level journal messages |
+| `journal/<8 hex>` | one error-level journal message: a hash of who said what, with digit runs (pids, counts) ignored |
+| `journal-more` | more distinct messages than the 8 shown |
 | `sensors-snapshot/missing`, `/stale` | the 60 s file, judged by the 15-min run |
 | `bmc/<fan\|temp\|power>/<name>@<entity>` | a BMC sensor whose status is not ok |
 | `fans/ceiling` | `fan_rpm_alarm_above` |
@@ -152,7 +155,7 @@ jq -r '.alarm_items[] | "\(.since | todate)  \(.text)"' /var/lib/horatio/state.j
 | `SEL: N memory events in 7d` / `ECC: N uncorrectable\|correctable errors since boot` | `sudo ipmitool sel elist \| grep -i ecc` names the DIMM; `sudo ras-mc-ctl --errors` for the OS-time trend. Before any `ipmitool sel clear`: `ipmitool sel save <file>` — the SEL is the only record of POST-time errors |
 | `SEL: N hardware events in 7d` | a PSU / fan / drive / thermal fault the BMC logged: `sudo ipmitool sel elist` (the lines are also in `sel_hardware`), then the matching sensor: `ipmitool sdr type 'Power Supply'` / `type fan`, or the drive. Tune `sel_fault_patterns` |
 | `sdX: SMART health FAILED` / `sdX (serial): grown defects N > baseline M` | `sudo smartctl --all /dev/sdX`; identify by serial; plan the swap; set the new serial in `grown_defect_baseline` |
-| `sdX: reallocated=` / `reported_uncorrect=` / `command_timeout=` / `pending=` / `offline_uncorrectable=` / `sdX: NC, trip point` | same; check your notes for this box's known-benign attributes first (some vendors pack operation counters into "error" attributes) |
+| `sdX: reallocated=N` / `reported_uncorrect=` / `command_timeout=` / `pending=` / `offline_uncorrectable=` (one line per attribute) / `sdX: NC, trip point` | `sudo smartctl --all /dev/sdX`; check your notes for this box's known-benign attributes first (some vendors pack operation counters into "error" attributes). When the count started is in `alarm_items[].since` and `alarms.jsonl`. A few remapped sectors with nothing pending can be accepted with `smart_baseline`; the alarm then returns only if the count grows |
 | `sdX: unreadable (…)` | nothing readable came back: drive dropped, a USB stick, `timeout` killed smartctl, or SMART disabled: `lsblk`, `dmesg`, `sudo smartctl --all /dev/sdX` |
 | `smartmontools not installed: drives are not monitored` | `apt install smartmontools`, then `sudo systemctl start horatio-collect.service` |
 | `sdX: self-test log has errors` | a scheduled self-test failed: `sudo smartctl --log selftest /dev/sdX` |
@@ -168,7 +171,7 @@ jq -r '.alarm_items[] | "\(.since | todate)  \(.text)"' /var/lib/horatio/state.j
 | `backup: <timer> has never fired` / `backup: last trigger Nh ago` / `unit failed: <backup service>` | `journalctl --unit <service>`; root's mail has the tail |
 | `collector: backup-timer: no such timer: <timer>` | `backup_timer` in the config names a unit systemd does not know: fix the name |
 | `unit failed: X` | `systemctl status X` |
-| `journal: N error-level messages` | `sudo journalctl --priority err --since -24hours`; `journal_errors.distinct` has the deduped texts. Known noise is filtered by `JOURNAL_IGNORE` in `health-collect.sh`; extend it |
+| `journal: <unit>: <message> (N in 24h, …)` / `journal: K more distinct error-level messages in 24h` | one line per distinct error-level message of the last 24 h, oldest first, at most 8: `sudo journalctl --priority err --since -24hours`; `journal_errors.distinct` has every text. Each stays for 24 h after its last occurrence. Noise particular to this box goes in `journal_ignore`; noise every box has is `JOURNAL_IGNORE` in `health-collect.sh` |
 | `collector: N SEL lines with unrecognised date format` | ipmitool's date format changed (locale or version): fix `SEL_DATE` in `health-collect.sh` |
 | `collector: <cmd>: …` | that command failed inside a collector: run it by hand as root |
 | `collector: <part> crashed: …` | a bug or an input the 15-min run cannot read; that part's section is missing from the snapshot (for `smart crashed: sdX`, only that drive: it shows as an error row and the other drives are still checked). Traceback: `journalctl --unit horatio-collect.service` |

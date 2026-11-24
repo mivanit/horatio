@@ -170,7 +170,7 @@ else
 fi
 
 python3 - "$tmp" "$OUT" <<'PY'
-import glob, json, os, re, sys, time, traceback
+import glob, hashlib, json, os, re, sys, time, traceback
 
 tmp, out = sys.argv[1], sys.argv[2]
 
@@ -282,8 +282,12 @@ SEL_FAULT_PATTERNS_DEFAULT = [
     "AC lost", "Redundancy Lost", "Lower Critical going", "Upper Critical going",
     "Drive Fault", "failure", "failed",
 ]
+# These two only make alarms quieter, so with a config that cannot be read they
+# fall back to "nothing accepted, nothing ignored" instead of crashing the
+# drives and journal sections with it.
+smart_baseline, journal_ignore = {}, []
 def load_config():
-    global sel_fault_patterns, grown_defect_baseline
+    global sel_fault_patterns, grown_defect_baseline, smart_baseline, journal_ignore
     try:
         with open(os.environ.get("HEALTH_CONFIG", "/etc/horatio/config.json")) as f:
             config = json.load(f)
@@ -294,6 +298,10 @@ def load_config():
     # A serial that is not listed is watched from 0, so a replacement drive is never
     # silently skipped; add it to the config once its factory count is known.
     grown_defect_baseline = config.get("grown_defect_baseline", {})
+    # The same idea for the ATA attributes below: {serial: {"reallocated": 8}} accepts
+    # what a drive already has, and the alarm returns when the count grows past it.
+    smart_baseline = config.get("smart_baseline", {})
+    journal_ignore = config.get("journal_ignore", [])
 part(load_config)
 
 # ---- SEL, memory events ------------------------------------------------------
@@ -512,9 +520,16 @@ def smart():
                 got[ATA_WATCH[a["id"]]] = (a.get("raw") or {}).get("value")
         if got:
             entry["attrs"] = got
-            bad = [f"{k}={v}" for k, v in got.items() if k in ATA_ALARM and (v or 0) > 0]
-            if bad:
-                alarm(f"{did}/attrs", f"{name}: {', '.join(bad)}")
+            # One alarm per attribute: each has its own count and its own history.
+            accepted = smart_baseline.get(serial)
+            accepted = accepted if isinstance(accepted, dict) else {}
+            for k, v in got.items():
+                base = accepted.get(k)
+                base = base if isinstance(base, int) and not isinstance(base, bool) and base > 0 else 0
+                if k in ATA_ALARM and (v or 0) > base:
+                    alarm(f"{did}/{k}", f"{name}: {k}={v}" + (f" (baseline {base})" if base else ""), v)
+            if accepted:
+                entry["attrs_baseline"] = {k: accepted[k] for k in got if k in accepted}
 
         drives.append(entry)
         # Everything about this drive was judged: its own alarms, and any earlier
@@ -657,24 +672,53 @@ part(failed_units)
 # ---- journal errors (last 24 h) ----------------------------------------------
 # Known-benign noise: ACPI IPMI region errors at every boot (a firmware quirk
 # of e.g. Dell R730 boards), an empty kernel line, and sudo without a password (typos, and
-# non-interactive sessions probing with sudo: "a password is required"). A
-# constant, not the config file: that file is a hardware-fault allowlist, this
-# is a log-noise denylist. Extend it from `journalctl --priority err --since
+# non-interactive sessions probing with sudo: "a password is required"). What
+# is noise on one box only (a driver that announces itself at error level on
+# every boot) goes in the config's `journal_ignore`, a list of regexes searched
+# in the whole line; find candidates with `journalctl --priority err --since
 # -7days` on the box.
+JOURNAL_MAX = 8      # distinct messages shown one by one; past that, a count
 def journal():
     JOURNAL_IGNORE = re.compile(r"ACPI Error|kernel:\s*$|pam_unix\(sudo:auth\)|a password is required")
+    ignore = [JOURNAL_IGNORE]
+    for pattern in journal_ignore if isinstance(journal_ignore, list) else [journal_ignore]:
+        try:
+            ignore.append(re.compile(pattern))
+        except (re.error, TypeError) as e:      # a typo must not cost the journal section
+            info.append(f"journal_ignore: skipped {pattern!r}: {e}")
     # short-iso: one line per message starting with its ISO timestamp, continuation
     # lines indented. The "timestamp host unit[pid]:" prefix is three tokens; sudo
     # pads its message with spaces after that, hence the strip.
     JOURNAL_PREFIX = re.compile(r"^\S+ \S+ \S+ ")
-    msgs = [JOURNAL_PREFIX.sub("", l).strip() for l in read("journal-err.txt").splitlines()
-            if re.match(r"\d{4}-\d\d-\d\dT", l) and not JOURNAL_IGNORE.search(l)]
+    lines = [l for l in read("journal-err.txt").splitlines()
+             if re.match(r"\d{4}-\d\d-\d\dT", l) and not any(p.search(l) for p in ignore)]
+    msgs = [JOURNAL_PREFIX.sub("", l).strip() for l in lines]
     distinct = set(msgs)
     state["journal_errors"] = {"hours": 24, "count": len(msgs), "distinct": sorted(distinct)}
-    if msgs:
-        # One transient error keeps this line for 24 h: intended, errors are surfaced.
-        alarm("journal", f"journal: {len(msgs)} error-level messages ({len(distinct)} distinct) in 24h, latest: {msgs[-1]}")
-    if capture_ok("journal-err"):
+
+    # One alarm per distinct message, so an important one is never hidden behind
+    # "latest: <some other line>". The text says who logged it; digit runs (pids,
+    # counts, addresses) do not make two messages different.
+    groups = {}
+    for l in lines:
+        m = re.match(r"(\S+) \S+ (\S+?)(?:\[\d+\])?: ?(.*)", l)
+        when = l.split()[0][:16].replace("T", " ")
+        who, msg = (m.group(2), m.group(3).strip()) if m else ("?", JOURNAL_PREFIX.sub("", l).strip())
+        said = msg if msg.startswith(f"{who}:") else f"{who}: {msg}"
+        digest = hashlib.sha1(re.sub(r"\d+", "#", said).encode()).hexdigest()[:8]
+        g = groups.setdefault(digest, {"n": 0, "first": when})
+        g.update(n=g["n"] + 1, last=when, said=said)
+    # Oldest first: the order, and so which ones are shown, does not change as
+    # new messages arrive. One transient error keeps its line for 24 h: intended.
+    shown = sorted(groups.items(), key=lambda kv: kv[1]["first"])
+    for digest, g in shown[:JOURNAL_MAX]:
+        when = f"at {g['first']}" if g["n"] == 1 else f"first {g['first']}, last {g['last']}"
+        alarm(f"journal/{digest}", f"journal: {g['said']} ({g['n']} in 24h, {when})")
+    if len(shown) > JOURNAL_MAX:
+        alarm("journal-more", f"journal: {len(shown) - JOURNAL_MAX} more distinct error-level messages in 24h")
+    check("journal-more")
+    # With more messages than are shown, one that is not shown is not gone.
+    if capture_ok("journal-err") and len(shown) <= JOURNAL_MAX:
         check("journal")
 part(journal)
 

@@ -20,6 +20,15 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
   is asleep) is kept in `alarm_held` instead of being reported as gone, and the 60 s
   snapshot waits three runs before clearing, so a value on its threshold does not flap.
   The log also records a `gap` when no snapshot was taken for a while and a `boot`.
+- Hardware collector: the journal alarm is now one line per distinct error-level message,
+  `journal: <unit>: <message> (N in 24h, first …, last …)`, oldest first and at most 8,
+  instead of `journal: N error-level messages … latest: <one of them>`, which could hide
+  an important message behind a harmless later one. New config key `journal_ignore`
+  (a list of regexes) drops noise particular to a box.
+- Hardware collector: the ATA attribute alarm is one line per attribute
+  (`sde: reallocated=8`, `sde: pending=2`) instead of one joined line, and new config key
+  `smart_baseline` (`{serial: {attribute: count}}`) accepts what a drive already has: the
+  alarm returns as `sde: reallocated=9 (baseline 8)` only when the count grows.
 - Hardware collector: `state.json` has `boot`, with how the previous boot ended (`clean`,
   its last log time and kernel). An unclean end (power cut, hang) is an `info` note for a day.
 

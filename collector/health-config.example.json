@@ -10,6 +10,8 @@
     "failed"
   ],
   "grown_defect_baseline": {},
+  "smart_baseline": {},
+  "journal_ignore": [],
   "fan_rpm_alarm_above": null,
   "gpu_temp_alarm_margin_c": 3,
   "smart_timeout_s": 60,
