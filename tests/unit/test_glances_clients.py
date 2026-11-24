@@ -189,6 +189,8 @@ def test_lifespan_cleans_up_clients_when_glances_start_fails(
     monkeypatch.setattr(server.APP.state, "glances_port", 12345, raising=False)
 
     def fail_start(port: int) -> None:
+        assert server._glances_client_shared is not None
+        assert server._glances_client_recording is not None
         clients.extend(
             [server._glances_client_shared, server._glances_client_recording]
         )
@@ -241,6 +243,8 @@ def test_lifespan_drains_replaced_recorder_before_closing_clients(
     async def run() -> None:
         with pytest.raises(RuntimeError, match="application failed"):
             async with server.lifespan(server.APP):
+                assert server._glances_client_shared is not None
+                assert server._glances_client_recording is not None
                 clients.extend(
                     [server._glances_client_shared, server._glances_client_recording]
                 )
