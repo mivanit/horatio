@@ -5,6 +5,37 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- Sensors on any Linux box: the dashboard reads Linux hwmon itself (`hwmon.py`, no root,
+  no collector) instead of Glances' sensors plugin, which is now switched off. It serves
+  `/api/4/sensors` in the same shape, so the cards, the OpenWrt backend and history read
+  one format, and temperature names are exactly Glances' (history and `temp_labels`
+  continue).
+  - Fans: every chip's fans, including boards whose fan chip keeps its readings under
+    `hwmonN/device/` (Fintek, older ITE), which Glances dropped whenever another chip
+    (e.g. the GPU) had a fan. Named `<chip> fan<N>` or by the kernel's label.
+  - Power: chip readings join the power bar and history, e.g. an AMD FX/Opteron CPU's
+    own estimate as "CPU (est.)", an ACPI power meter as the whole machine's draw.
+    Battery and charger "power" (a charge rate) is left out.
+  - Disconnected and faulty inputs (fault or disabled flags, -128 °C) are dropped
+    without renaming the sensors after them; backwards BIOS limits are put in order.
+  - config.json `fans`: per-fan `min_rpm` (an alarm, or a note with `"on_low": "note"`)
+    and `hide_if_zero` (default on: empty fan headers no longer show as 0 RPM fans),
+    plus a `default` rule. Alarms appear on the Hardware card, also on a box without the
+    collector, and at `/api/sensor-alarms` for login scripts.
+  - Hints on the Hardware card: a desktop with no fan readings is told to run
+    `sensors-detect` and load its Super I/O driver; a VM is told it has no sensors.
+  - config.json `sensor_labels` renames any sensor (fans and power too);
+    `temp_labels` is still read.
+- Power card: which reading is the whole machine is said by the data, never guessed from
+  names: the collector marks the BMC's row `total` and every row's `unit`, hwmon rows say
+  `total`, and history records name it in `power_total` (older records: the BMC's
+  "Pwr Consumption", as before). The BMC wins over an hwmon power meter. Segment colours
+  follow what a part is (CPU, DRAM, GPU), so "CPU (est.)" is coloured as a CPU.
+- Power card: the dashed PSU line and its warning appear only when `power_psu_watts` is
+  set, and without `power_max_watts` the bar scales to the reading (a 60 W desktop gets
+  a 100 W bar). The example config no longer ships 1200 W / 1100 W, which every new box
+  copied: remove them from your `config.json` if they are not your machine's.
+
 - Hardware card: a box without a BMC or without ECC reporting no longer shows
   "BMC log, memory events: 0 lifetime" or "ECC since boot: 0 corrected", which read as
   healthy counts of something that is not being measured. The collector writes `null`

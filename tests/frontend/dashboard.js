@@ -518,6 +518,7 @@ function testSensorFreshness() {
   context.escapeHtml = String;
   context.hwHint = () => '';
   context.segColorVar = () => '--color-accent';
+  evaluate(context, between(app, 'function powerSegKey', 'function segColorVar'));
   context.updateCardCritical = () => {};
   context.document.querySelector = () => context.elements.get('snapshot-age');
   evaluate(context,
@@ -587,6 +588,84 @@ function testHardwareMemoryRows() {
     sel_memory: { count: 0, recent: [] }, sel_hardware: { count: 0, recent: [] } });
   assert(server.includes('BMC log, memory events: 0 lifetime'));
   assert(server.includes('check: sudo ipmitool sel elist; sudo ras-mc-ctl --errors'));
+}
+
+// hwmon power (/api/4/sensors rows of type 'power') joins the bar as a part; a
+// whole-machine reading is the total, and the BMC's wins over an hwmon meter. No
+// PSU in config means no dashed line and no PSU warning.
+function testPowerFromHwmonAndTotals() {
+  const context = liveContext(['temps-value', 'temps-card', 'fans-card', 'fans-value', 'power-card', 'power-value',
+    'power-bar', 'snapshot-age']);
+  const now = 100000000;
+  context.Date = { now: () => now };
+  context.gpu = { ok: false };
+  context.charts = { temps: makeChart(), fans: makeChart() };
+  context.sensorsAgeText = () => '';
+  context.abbreviateSensorLabel = value => value;
+  context.getTempColor = () => '#123456';
+  context.escapeHtml = String;
+  context.segColorVar = () => '--color-accent';
+  context.setHtml = (el, html) => { el.innerHTML = html; };
+  context.document.querySelector = () => context.elements.get('snapshot-age');
+  evaluate(context,
+    between(config, 'const CORE_TEMP_LABEL', 'function formatTimeAgo') +
+    between(app, 'function powerSegKey', 'function segColorVar') +
+    'function tickTemps() {' + between(app, "  guard('temps',", "  guard('load',") + '}');
+  assert.deepEqual(['GPU 0', 'CPU 1', 'CPU (est.)', 'DRAM 0', 'GPU (amdgpu)', 'acme power3'].map(context.powerSegKey),
+    ['gpu0', 'cpu1', 'cpu0', 'dram0', 'gpu0', 'other']);
+  context.sensors = { ok: true, data: [
+    { type: 'power', label: 'CPU (est.)', value: 64, total: false },
+    { type: 'fan_speed', label: 'f71889ed fan1', value: 1600 },
+  ] };
+  context.tickTemps();
+  const bar = () => context.elements.get('power-bar').innerHTML;
+  assert(bar().includes('power-seg-cpu0') && !bar().includes('power-psu'), 'a part, coloured as a CPU, no PSU line');
+  assert.equal(context.elements.get('power-value').textContent, '≥ 64 W');
+  assert(bar().includes('scale 100 W'), '1.5 x 64 W rounded up to 50 W');
+  // An hwmon whole-machine meter, then the BMC's reading as well: the BMC wins.
+  context.sensors.data.push({ type: 'power', label: 'System (ACPI)', value: 150, total: true });
+  context.tickTemps();
+  assert.equal(context.elements.get('power-value').textContent, '150 W');
+  context.dataCache.sensors = { lastUpdate: now, data: { status: 'ok', age_sec: 0, alarms: [], power: [
+    { label: 'Pwr Consumption', value: 200, unit: 'W', total: true },
+    { label: 'PSU1 Current', value: 0.9, unit: 'A', total: false },
+  ] } };
+  context.thresholds.power_psu_watts = 500;
+  context.tickTemps();
+  assert.equal(context.elements.get('power-value').textContent, '200 W (40%)');
+  assert(bar().includes('power-psu') && !bar().includes('System (ACPI)') && !bar().includes('PSU1 Current'));
+  assert.deepEqual(context.errors, []);
+  // History: each record names its whole-machine reading; old records had only the BMC's.
+  evaluate(context, between(app, 'const LEGACY_POWER_TOTAL_KEY', '// History charts with more records'));
+  assert.equal(context.powerTotalKey({ power: { 'System (ACPI)': 150 }, power_total: 'System (ACPI)' }), 'System (ACPI)');
+  assert.equal(context.powerTotalKey({ power: { 'Pwr Consumption': 238, 'CPU 0': 80 } }), 'Pwr Consumption');
+  assert.equal(context.powerTotalKey({ power: { 'CPU (est.)': 64 } }), null);
+}
+
+// The server's own findings (hwmon fan rules, hints) reach the Hardware card through
+// /api/storage-health, also on a box with no collector snapshot at all.
+function testHardwareShowsServerSensorAlarms() {
+  const context = liveContext(['hardware-content', 'hardware-value', 'snapshot-age']);
+  context.Date = { now: () => 100000000 };
+  context.escapeHtml = String;
+  context.hwHint = () => '';
+  const critical = [];
+  context.updateCardCritical = (id, on) => critical.push(on);
+  context.document.querySelector = () => context.elements.get('snapshot-age');
+  context.dataCache.sensors = { lastUpdate: 100000000, data: { status: 'ok', age_sec: 0, alarms: [] } };
+  evaluate(context, between(app, 'function renderHardware', '// Power bar segment colours'));
+  const fanAlarm = 'fan f71889ed fan1: 0 RPM, below its 300 RPM minimum';
+  context.renderHardware({ status: 'missing', path: '/var/lib/horatio/state.json',
+    sensor_alarms: [fanAlarm], sensor_notes: ['a hint'] });
+  let html = context.elements.get('hardware-content').innerHTML;
+  assert(html.includes(fanAlarm) && html.includes('a hint') && html.includes('No health snapshot yet'));
+  assert.equal(context.elements.get('hardware-value').textContent, '1 issue');
+  assert.equal(critical.at(-1), true);
+  context.renderHardware({ status: 'ok', age_sec: 30, alarms: [], info: [],
+    sensor_alarms: [fanAlarm], sensor_notes: ['a hint'] });
+  html = context.elements.get('hardware-content').innerHTML;
+  assert.equal(context.elements.get('hardware-value').textContent, '1 issue');
+  assert(html.includes(fanAlarm) && html.includes('a hint'));
 }
 
 async function testPausedStatus() {
@@ -1502,7 +1581,7 @@ function testServicesCard() {
 }
 
 (async () => {
-  for (const test of [testHardwareMemoryRows, testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
+  for (const test of [testHardwareMemoryRows, testPowerFromHwmonAndTotals, testHardwareShowsServerSensorAlarms, testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testCapturePendingAndHiddenTab, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
     testVersionFooter]) {

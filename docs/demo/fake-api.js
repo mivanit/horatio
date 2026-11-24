@@ -221,10 +221,10 @@
       ],
       fans: Object.entries(s.fans).map(([label, value]) => ({ label, value })),
       power: [
-        { label: 'Pwr Consumption', value: Math.round(s.totalW), reading: `${Math.round(s.totalW)} Watts`, entity: 'bmc' },
-        { label: 'CPU 0', value: r1(s.cpuW), reading: `${r1(s.cpuW)} Watts`, entity: 'rapl' },
-        { label: 'DRAM 0', value: r1(s.dramW), reading: `${r1(s.dramW)} Watts`, entity: 'rapl' },
-        { label: 'PSU1 Current', value: r1(s.totalW / 230), reading: `${r1(s.totalW / 230)} Amps`, entity: 'bmc' },
+        { label: 'Pwr Consumption', value: Math.round(s.totalW), reading: `${Math.round(s.totalW)} Watts`, entity: 'bmc', unit: 'W', total: true },
+        { label: 'CPU 0', value: r1(s.cpuW), reading: `${r1(s.cpuW)} Watts`, entity: 'rapl', unit: 'W', total: false },
+        { label: 'DRAM 0', value: r1(s.dramW), reading: `${r1(s.dramW)} Watts`, entity: 'rapl', unit: 'W', total: false },
+        { label: 'PSU1 Current', value: r1(s.totalW / 230), reading: `${r1(s.totalW / 230)} Amps`, entity: 'bmc', unit: 'A', total: false },
       ],
       gpus: GPUS.map((g, i) => ({ index: i, mem_c: null, limits: { max_op: g.maxOp, slowdown: g.slowdown, mem_max_op: null } })),
     };
@@ -462,8 +462,8 @@
     '/4/load', '/4/uptime', '/4/system', '/4/fs',
     '/cpu-info', '/gpu-info', '/ip-info', '/ping', '/gpu-processes', '/disk-processes', '/network-processes',
     '/processlist', '/history', '/history/settings', '/history/record', '/history/field/temps',
-    '/history/field/processes', '/mail', '/storage-health', '/sensors', '/services', '/services/history',
-    '/version', '/list-endpoints',
+    '/history/field/processes', '/mail', '/storage-health', '/sensors', '/sensor-alarms', '/services',
+    '/services/history', '/version', '/list-endpoints',
   ];
 
   // Path (after /api) -> (query, t) => body, served with status 200.
@@ -527,6 +527,7 @@
     },
     '/storage-health': (q, t) => storageHealth(t),
     '/sensors': (q, t) => sensorsSnapshot(t),
+    '/sensor-alarms': () => ({ alarms: [], notes: [] }),
     '/services': (q, t) => servicesSnapshot(t),
     '/services/history': (q, t) => servicesHistory(q, t),
     '/history': q => history(q, null),

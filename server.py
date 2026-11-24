@@ -72,6 +72,8 @@ from starlette.middleware.base import RequestResponseEndpoint
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+import hwmon
+
 STATIC_DIR: Final[Path] = Path(__file__).parent / "static"
 INDEX_FILE: Final[Path] = Path(__file__).parent / "index.html"
 THEMES_DIR: Final[Path] = Path(__file__).parent / "themes"
@@ -587,6 +589,9 @@ def start_glances(port: int) -> subprocess.Popen[bytes]:
             # Glances otherwise phones PyPI on every start and tries to create
             # ~/.cache/glances, which is read-only under the systemd unit.
             "--disable-check-update",
+            # Sensors come from hwmon.py, which the server serves at /api/4/sensors.
+            "--disable-plugin",
+            "sensors",
         ],
         stdout=subprocess.DEVNULL,
         # Its crash reason, if it ever dies (the watchdog in
@@ -1869,13 +1874,9 @@ async def collect_history_sample(
             logger.warning("History: failed to fetch gpu: %s", e)
 
         try:
-            temps_resp: httpx.Response = await client.get(
-                f"{glances_url}/api/4/sensors", timeout=5.0
-            )
-            if temps_resp.status_code == 200:
-                temps_data = temps_resp.json()
+            temps_data = (await asyncio.to_thread(get_hw_sensors))["rows"]
         except Exception as e:
-            logger.warning("History: failed to fetch sensors: %s", e)
+            logger.warning("History: failed to read hwmon sensors: %s", e)
 
         try:
             load_resp: httpx.Response = await client.get(
@@ -2086,12 +2087,23 @@ async def collect_history_sample(
     if gpus:
         record["gpus"] = gpus
 
-    # Temperatures (point-in-time): CPU/board sensors from Glances, plus GPU
+    # Temperatures (point-in-time): CPU/board sensors from hwmon (hwmon.py), plus GPU
     # temps from nvidia-smi (merged into the same chart as the live view).
     temps: dict[str, float | None] = {}
-    # Power (point-in-time, watts): the BMC's system draw from the collector
-    # snapshot plus each GPU's draw from nvidia-smi.
+    # Power (point-in-time, watts): hwmon's chip readings, the collector's BMC and
+    # RAPL rows, and each GPU's draw from nvidia-smi. power_total names the one
+    # reading that is the whole machine, so the stacked chart never guesses.
     power: dict[str, float | None] = {}
+    power_total: str | None = None
+    hw_fans: dict[str, float] = {}
+    for sensor in temps_data:
+        value_hw: float | None = _round(sensor.get("value"), 1)
+        if sensor.get("type") == hwmon.FAN and value_hw is not None:
+            hw_fans[sensor["label"]] = value_hw
+        elif sensor.get("type") == hwmon.POWER and value_hw is not None:
+            power[sensor["label"]] = value_hw
+            if sensor.get("total") and power_total is None:
+                power_total = sensor["label"]
     sensor: dict[str, Any]
     for sensor in temps_data:
         # Only include temperature sensors (exclude battery, fan speed, etc.)
@@ -2118,22 +2130,19 @@ async def collect_history_sample(
                 if r.get("value") is not None
             }
         )
-        fans: dict[str, float] = {
-            r["label"]: r["value"]
-            for r in sensors.get("fans", [])
-            if r.get("value") is not None
-        }
-        if fans:
-            record["fans"] = fans
-        # Watts rows only (BMC total + RAPL CPU/DRAM): the same capture also carries PSU amps/volts.
-        power.update(
+        hw_fans.update(
             {
                 r["label"]: r["value"]
-                for r in sensors.get("power", [])
+                for r in sensors.get("fans", [])
                 if r.get("value") is not None
-                and str(r.get("reading", "")).endswith("Watts")
             }
         )
+        row: dict[str, Any]
+        for row in collector_power_rows(sensors):
+            power[row["label"]] = row["value"]
+            # The BMC measures the whole box: it wins over an hwmon meter.
+            if row["total"]:
+                power_total = row["label"]
     # Drive temperatures from the 15-min snapshot (SMART), fresh only, keyed by device.
     health: dict[str, Any] = await asyncio.to_thread(_get_storage_health)
     if health["status"] == "ok":
@@ -2146,6 +2155,8 @@ async def collect_history_sample(
                 and d.get("temperature_c") is not None
             }
         )
+    if hw_fans:
+        record["fans"] = hw_fans
     if temps:
         record["temps"] = temps
     st: dict[str, Any]
@@ -2154,6 +2165,8 @@ async def collect_history_sample(
             power[f"GPU {st['index']}"] = _round(st["power_draw"], 1)
     if power:
         record["power"] = power
+        if power_total is not None:
+            record["power_total"] = power_total
 
     # Load (point-in-time)
     if load_data:
@@ -4649,8 +4662,14 @@ def _get_storage_health(
 
 @APP.get("/api/storage-health")
 async def storage_health() -> Response:
-    """The collector's hardware health snapshot with alarms. Always 200; ``status`` says freshness."""
+    """The collector's hardware health snapshot with alarms. Always 200; ``status`` says
+    freshness. ``sensor_alarms`` / ``sensor_notes`` are the server's own (hwmon fan
+    rules, setup hints), present whatever the collector's state, so the Hardware card
+    shows them even on a box without the collector."""
     result: dict[str, Any] = await asyncio.to_thread(_get_storage_health)
+    hw: dict[str, Any] = await asyncio.to_thread(get_hw_sensors)
+    result["sensor_alarms"] = hw["alarms"]
+    result["sensor_notes"] = hw["notes"]
     return Response(content=json.dumps(result), media_type="application/json")
 
 
@@ -4661,6 +4680,74 @@ async def sensors_snapshot() -> Response:
         _get_storage_health, SENSORS_PATH, SENSORS_STALE_SEC
     )
     return Response(content=json.dumps(result), media_type="application/json")
+
+
+# ---------------------------------------------------------------------------
+# Hardware sensors from hwmon (hwmon.py): temperatures, fans, power. World-readable,
+# so the server reads them itself; the root collectors keep only what needs root.
+# ---------------------------------------------------------------------------
+
+HWMON_CACHE_SEC: Final[float] = 5.0  # several cards and the recorder read per poll
+_hwmon_lock: _thread.LockType = threading.Lock()
+_hwmon_cache: dict[str, Any] = {"at": -math.inf, "data": None}
+
+
+def get_hw_sensors() -> dict[str, Any]:
+    """``rows`` (Glances-shaped, fan rules applied), ``alarms`` and ``notes`` (sync).
+
+    The fan rules and the setup hints run here, in the one place that reads the
+    sensors, so the dashboard, history and /api/sensor-alarms always agree."""
+    with _hwmon_lock:
+        now: float = time.monotonic()
+        if now - _hwmon_cache["at"] < HWMON_CACHE_SEC and _hwmon_cache["data"]:
+            return _hwmon_cache["data"]
+        raw: list[dict[str, Any]] = hwmon.read_sensors()
+        rows, alarms, notes = hwmon.apply_fan_rules(raw, _CONFIG.get("fans"))
+        notes = [*notes, *hwmon.setup_notes(raw)]
+        data: dict[str, Any] = {"rows": rows, "alarms": alarms, "notes": notes}
+        _hwmon_cache.update(at=now, data=data)
+        return data
+
+
+@APP.get("/api/4/sensors")
+async def hw_sensors() -> Response:
+    """Temperatures, fans and power from hwmon, in Glances' sensors shape (it used to
+    be Glances' plugin; the OpenWrt backend serves the same shape). Power rows carry
+    ``total``: true only for a reading of the whole machine."""
+    data: dict[str, Any] = await asyncio.to_thread(get_hw_sensors)
+    return Response(content=json.dumps(data["rows"]), media_type="application/json")
+
+
+@APP.get("/api/sensor-alarms")
+async def sensor_alarms() -> Response:
+    """The alarms and notes the server itself decides (fan minimums, setup hints).
+    The collectors' alarms stay in their own files; a login script reads both."""
+    data: dict[str, Any] = await asyncio.to_thread(get_hw_sensors)
+    body: dict[str, Any] = {"alarms": data["alarms"], "notes": data["notes"]}
+    return Response(content=json.dumps(body), media_type="application/json")
+
+
+def collector_power_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """The collector snapshot's Watts rows as {label, value, total}.
+
+    A collector from this release writes ``unit`` and ``total``; an older one only
+    ``reading`` ("238 Watts") and ``entity`` ("rapl" for the CPU/DRAM parts), so for
+    one release both are read. The same capture also carries PSU amps."""
+    rows: list[dict[str, Any]] = []
+    r: Any
+    for r in snapshot.get("power", []):
+        if not isinstance(r, dict) or r.get("value") is None:
+            continue
+        watts: bool = (
+            r["unit"] == "W"
+            if "unit" in r
+            else str(r.get("reading", "")).endswith("Watts")
+        )
+        if not watts:
+            continue
+        total: bool = bool(r["total"]) if "total" in r else r.get("entity") != "rapl"
+        rows.append({"label": r.get("label", ""), "value": r["value"], "total": total})
+    return rows
 
 
 # The Glances plugins the UI reads, the only ones the /api proxy forwards. An
@@ -4675,7 +4762,6 @@ GLANCES_PROXY_PLUGINS: Final[tuple[str, ...]] = (
     "gpu",
     "network",
     "diskio",
-    "sensors",
     "load",
     "uptime",
     "system",
@@ -4698,6 +4784,8 @@ async def list_endpoints() -> Response:
     """Return list of all API endpoints this server implements."""
     endpoints: list[str] = [
         *(f"/4/{plugin}" for plugin in GLANCES_PROXY_PLUGINS),
+        "/4/sensors",
+        "/sensor-alarms",
         "/cpu-info",
         "/gpu-info",
         "/ip-info",
@@ -5101,7 +5189,12 @@ def _str_map(key: str, value_types: tuple[type, ...]) -> dict[str, Any]:
 # Display names for temperature sensors ({"loc1": "I350 NIC"}); the dashboard
 # applies them, records keep the sensor's own name. Here they only let a
 # temp_thresholds entry be written under either name.
-TEMP_LABELS: Final[dict[str, str]] = _str_map("temp_labels", (str,))
+# config.json sensor_labels names any sensor (temperature, fan, power); temp_labels is
+# its older name, still read. sensor_labels wins where both name the same sensor.
+TEMP_LABELS: Final[dict[str, str]] = {
+    **_str_map("temp_labels", (str,)),
+    **_str_map("sensor_labels", (str,)),
+}
 # A sensor's own limit in °C, for sensors that run hot by design.
 TEMP_THRESHOLDS: Final[dict[str, float]] = _str_map("temp_thresholds", (int, float))
 

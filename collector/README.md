@@ -7,7 +7,12 @@ if you want one, a login MOTD script) only read:
 | Script | Every | Writes | What |
 |---|---|---|---|
 | `health-collect.sh` | 15 min | `/var/lib/horatio/state.json` | SMART per drive (serial, model, kind, size, temperature, verdict, SAS grown defects, what it holds), md arrays, EDAC counters, BMC event log (memory events + hardware faults), backup timer, failed units, journal errors, and the `alarms` / `info` lists |
-| `health-sensors.sh` | 60 s | `/var/lib/horatio/sensors.json` | fans, chassis temperatures, PSU amps + BMC watts (IPMI), CPU and DRAM watts per socket (Intel RAPL), per-GPU core and memory temperature, the driver's thermal limits, thermal slowdown state and counters, ECC (`nvidia-smi`), and their `alarms` |
+| `health-sensors.sh` | 60 s | `/var/lib/horatio/sensors.json` | fans, chassis temperatures, PSU amps + BMC watts (IPMI), CPU and DRAM watts per socket (Intel RAPL), per-GPU core and memory temperature, the driver's thermal limits, thermal slowdown state and counters, ECC (`nvidia-smi`), and their `alarms`. Power rows carry `unit` (W/A/V) and `total` (true for the BMC's whole-machine reading: Dell "Pwr Consumption", or a name with "System Power" / "Total Power"), so no consumer guesses from names |
+
+The collectors read only what needs root. Everything world-readable is read by the dashboard
+itself: Linux hwmon temperatures, fans and power (`hwmon.py`, served as `/api/4/sensors`), and
+the fan alarms from config.json `fans`, served as `/api/sensor-alarms` and shown on the
+Hardware card next to the collectors' alarms.
 
 ```bash
 sudo bash install.sh   # scripts -> /usr/local/bin, units -> /etc/systemd/system, config once
