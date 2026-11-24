@@ -1,5 +1,4 @@
-"""Sensor and power fixes from the 2026-11-24 review: each test failed at a468d9f.
-Numbers follow the review's list (dotfiles notes/horatio-review-2026-11-24.md)."""
+"""Regression checks for sensor rules, identity, and power accounting."""
 
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.support import ROOT
-from tests.unit.test_hwmon import BODEL, by_type, fan, tree
+from tests.unit.test_hwmon import by_type, fan, tree
 
 
 # ---- 2. a rule with min_rpm for a fan that is missing -----------------------------
@@ -346,21 +345,6 @@ def test_11_temperature_order_is_glances_natural_order(tmp_path: Path) -> None:
     }
     labels = [r["label"] for r in hwmon.read_sensors(tree(tmp_path, files) / "hwmon")]
     assert labels == sorted(labels, key=natural_keys), labels
-
-
-# ---- 12. the BODEL fixture against the live box -----------------------------------
-def test_12_bodel_fixture_matches_live_box(tmp_path: Path) -> None:
-    import hwmon
-
-    if not Path("/sys/class/hwmon/hwmon0").exists():
-        pytest.skip("no live hwmon")
-    live = sorted(r["label"] for r in hwmon.read_sensors() if r["type"] == hwmon.TEMP)
-    fixture = sorted(
-        r["label"]
-        for r in hwmon.read_sensors(tree(tmp_path, BODEL) / "hwmon")
-        if r["type"] == hwmon.TEMP
-    )
-    assert fixture == live
 
 
 # ---- review follow-ups: alias text, keys, typos, reserved names --------------------

@@ -226,8 +226,8 @@ class TestProcessPrivacy:
                 "Cron <root@box> backup",
             ),
             (
-                f"Cron <miv@box> TOKEN={SECRET} python3 /srv/sync.py -k {SECRET}",
-                "Cron <miv@box> sync.py",
+                f"Cron <example@box> TOKEN={SECRET} python3 /srv/sync.py -k {SECRET}",
+                "Cron <example@box> sync.py",
             ),
             (
                 f"Cron <root@box> python3 -c 'print(\"{SECRET}\")'",

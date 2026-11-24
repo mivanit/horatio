@@ -36,6 +36,8 @@ CAPTURES: dict[str, str] = {
     # One healthy DIMM: the default box has ECC reporting (tests about a box
     # without it pass None to drop this file).
     "edac/mc0/dimm0/dimm_label": "DIMM#0\n",
+    "edac/mc0/dimm0/dimm_ce_count": "0\n",
+    "edac/mc0/dimm0/dimm_ue_count": "0\n",
     "config.json": "{}",
     "out/sensors.json": "{}",
 }
@@ -173,7 +175,9 @@ def test_edac_uncorrectable(tmp_path: Path) -> None:
         },
     )[0]
     assert (state["edac"]["ce_total"], state["edac"]["ue_total"]) == (3, 1)
-    assert state["alarms"] == ["ECC: 1 uncorrectable errors since boot"]
+    assert state["alarms"] == [
+        "ECC CPU_SrcID#0_Ha#0_Chan#0_DIMM#0: 1 uncorrectable errors since boot"
+    ]
 
 
 def test_no_bmc_and_no_ecc_is_two_notes_and_no_counts(tmp_path: Path) -> None:
@@ -194,7 +198,7 @@ def test_no_bmc_and_no_ecc_is_two_notes_and_no_counts(tmp_path: Path) -> None:
 
 
 def test_edac_controller_without_dimms_is_not_monitored(tmp_path: Path) -> None:
-    # bodel: /sys/devices/system/edac/mc exists (edac_mce_amd) but holds no DIMMs.
+    # an AMD desktop: /sys/devices/system/edac/mc exists (edac_mce_amd) but holds no DIMMs.
     state: dict[str, Any] = collect(
         tmp_path, {"edac/mc0/dimm0/dimm_label": None, "edac/mc0/ce_count": "0\n"}
     )[0]
@@ -257,7 +261,7 @@ def test_md_degraded(tmp_path: Path) -> None:
         },
     )[0]
     assert state["md"][0]["members"] == [
-        {"name": "sda1", "state": ["in_sync"], "errors": 0}
+        {"name": "sda1", "state": ["in_sync"], "errors": None}
     ]
     assert state["alarms"] == ["md0: DEGRADED (1 missing)"]
 
@@ -291,8 +295,8 @@ def test_missing_sensors_snapshot(tmp_path: Path) -> None:
 
 def test_failed_units_and_journal_errors(tmp_path: Path) -> None:
     journal: str = (
-        "2026-11-17T19:57:38+0000 serverus serverus-fans[1]: service exit signal\n"
-        "2026-11-17T19:58:00+0000 serverus sudo[2]:   miv : a password is required\n"
+        "2026-11-17T19:57:38+0000 host chassis-fans[1]: service exit signal\n"
+        "2026-11-17T19:58:00+0000 host sudo[2]:   alice : a password is required\n"
     )
     state: dict[str, Any] = collect(
         tmp_path,
@@ -304,7 +308,7 @@ def test_failed_units_and_journal_errors(tmp_path: Path) -> None:
     assert state["failed_units"] == ["x.service"]
     assert state["alarms"] == [
         "unit failed: x.service",
-        "journal: serverus-fans: service exit signal (1 in 24h, at 2026-11-17 19:57)",
+        "journal: chassis-fans: service exit signal (1 in 24h, at 2026-11-17 19:57)",
     ]
     assert state["journal_errors"] == {
         "hours": 24,
@@ -327,7 +331,7 @@ def test_err_sidecars_alarm_except_empty_sel(tmp_path: Path) -> None:
 def test_unconverted_backup_date_crashes_only_the_backup_section(
     tmp_path: Path,
 ) -> None:
-    # 2026-11-17 on serverus: systemd 255's date reached int() and no state.json
+    # 2026-11-17 on host: systemd 255's date reached int() and no state.json
     # was written for hours, hiding every other alarm with it.
     state: dict[str, Any]
     rc: int
@@ -392,7 +396,7 @@ def test_malformed_config_crashes_only_what_needs_it(tmp_path: Path) -> None:
     assert rc == 1
     assert [a.split(": ")[:2] for a in state["alarms"]] == [
         ["collector", "load_config crashed"],
-        ["ECC", "1 uncorrectable errors since boot"],
+        ["ECC DIMM#0", "1 uncorrectable errors since boot"],
         ["collector", "smart crashed"],
     ]
     assert [(d["device"], "error" in d) for d in state["drives"]] == [("sda", True)]
@@ -407,7 +411,9 @@ def test_a_drive_that_crashes_the_check_costs_only_itself(tmp_path: Path) -> Non
         tmp_path,
         {
             **smart(tmp_path, "sda", 0, ok),
-            **smart(tmp_path, "sdb", 0, {**ok, "scsi_grown_defect_list": "many"}),
+            **smart(
+                tmp_path, "sdb", 0, {**ok, "ata_smart_attributes": {"table": [None]}}
+            ),
             **smart(tmp_path, "sdc", 0, {**ok, "smart_status": {"passed": False}}),
         },
     )
@@ -445,8 +451,8 @@ def test_each_alarm_has_a_stable_key_and_counters_a_value(tmp_path: Path) -> Non
     assert (state["schema"], state["boot_id"]) == (1, "boot-1")
     assert state["alarm_items"] == [
         {
-            "key": "ecc/uncorrectable",
-            "text": "ECC: 2 uncorrectable errors since boot",
+            "key": "ecc/dimm/mc0/dimm0/uncorrectable",
+            "text": "ECC DIMM#0: 2 uncorrectable errors since boot",
             "value": 2,
         },
         {"key": "smart/S1/health", "text": "sda: SMART health FAILED"},
@@ -481,7 +487,7 @@ def test_only_what_was_really_evaluated_is_checked(tmp_path: Path) -> None:
     for key in (
         "sel/memory",
         "sel/hardware",
-        "ecc/correctable",
+        "ecc/dimm/mc0/dimm0/correctable",
         "smart/S1/health",
         "smart/S1/selftest",
         "smart/dev:sda/unreadable",
@@ -530,10 +536,12 @@ def test_only_what_was_really_evaluated_is_checked(tmp_path: Path) -> None:
             "block/md0/md/mismatch_cnt": "8\n",
         },
     )[0]
-    assert covered(hidden, "ecc/uncorrectable") and not covered(
+    assert covered(hidden, "ecc/dimm/mc0/dimm0/uncorrectable") and not covered(
         hidden, "ecc/correctable"
     )
-    assert covered(hidden, "md/md0/degraded") and not covered(hidden, "md/md0/mismatch")
+    assert not covered(hidden, "md/md0/degraded") and not covered(
+        hidden, "md/md0/mismatch"
+    )
 
 
 # ---- how the previous boot ended ----------------------------------------------
@@ -546,8 +554,8 @@ def test_boot_record_says_how_the_previous_boot_ended(tmp_path: Path) -> None:
         {
             "boot_id": "boot-2\n",
             "tmp/prev-boot.txt": (
-                "2026-11-24T01:21:24+00:00 serverus tailscaled[2068]: open-conn-track: timeout\n"
-                "2026-11-24T01:21:26+00:00 serverus tailscaled[2068]: wg: handshake failed\n"
+                "2026-11-24T01:21:24+00:00 host tailscaled[2068]: open-conn-track: timeout\n"
+                "2026-11-24T01:21:26+00:00 host tailscaled[2068]: wg: handshake failed\n"
             ),
             "tmp/prev-boot-kernel.txt": "Linux version 6.8.0-147-generic (buildd@x) (gcc)\n",
         },
@@ -565,8 +573,8 @@ def test_boot_record_says_how_the_previous_boot_ended(tmp_path: Path) -> None:
 
 def test_previous_boot_clean_old_or_unknown(tmp_path: Path) -> None:
     clean: str = (
-        "2026-10-22T03:19:17+00:00 serverus systemd-shutdown[1]: Sending SIGTERM to remaining processes...\n"
-        "2026-10-22T03:19:17+00:00 serverus systemd-journald[2875594]: Journal stopped\n"
+        "2026-10-22T03:19:17+00:00 host systemd-shutdown[1]: Sending SIGTERM to remaining processes...\n"
+        "2026-10-22T03:19:17+00:00 host systemd-journald[2875594]: Journal stopped\n"
     )
     state: dict[str, Any] = collect(tmp_path / "clean", {"tmp/prev-boot.txt": clean})[0]
     assert state["boot"]["previous"] == {
@@ -579,7 +587,7 @@ def test_previous_boot_clean_old_or_unknown(tmp_path: Path) -> None:
     state = collect(
         tmp_path / "old",
         {
-            "tmp/prev-boot.txt": "2026-11-24T01:21:26+00:00 serverus x[1]: last words\n",
+            "tmp/prev-boot.txt": "2026-11-24T01:21:26+00:00 host x[1]: last words\n",
             "uptime": "90000.0 1.0\n",
         },
     )[0]
@@ -592,15 +600,15 @@ def test_previous_boot_clean_old_or_unknown(tmp_path: Path) -> None:
 
 
 def journal_line(when: str, unit: str, message: str) -> str:
-    return f"2026-11-{when}+00:00 serverus {unit}: {message}\n"
+    return f"2026-11-{when}+00:00 host {unit}: {message}\n"
 
 
 def test_journal_gives_each_distinct_message_its_own_alarm(tmp_path: Path) -> None:
     failsafe: str = (
-        "serverus-fans: failsafe, requesting 100 %: ipmitool timed out after {} s"
+        "chassis-fans: failsafe, requesting 100 %: ipmitool timed out after {} s"
     )
     journal: str = (
-        journal_line("23T15:28:18", "serverus-fans[1275534]", failsafe.format(10))
+        journal_line("23T15:28:18", "chassis-fans[1275534]", failsafe.format(10))
         + journal_line(
             "24T01:24:03",
             "kernel",
@@ -612,12 +620,12 @@ def test_journal_gives_each_distinct_message_its_own_alarm(tmp_path: Path) -> No
             "ACPI Error: AE_NOT_EXIST, Returned by Handler for [IPMI]",
         )
         # The same message from another process, with another number in it.
-        + journal_line("24T03:00:00", "serverus-fans[2190]", failsafe.format(12))
+        + journal_line("24T03:00:00", "chassis-fans[2190]", failsafe.format(12))
         + "    a continuation line\n"
     )
     state: dict[str, Any] = collect(tmp_path, {"tmp/journal-err.txt": journal})[0]
     assert state["alarms"] == [
-        "journal: serverus-fans: failsafe, requesting 100 %: ipmitool timed out after 12 s (2 in 24h, first 2026-11-23 15:28, last 2026-11-24 03:00)",
+        "journal: chassis-fans: failsafe, requesting 100 %: ipmitool timed out after 12 s (2 in 24h, first 2026-11-23 15:28, last 2026-11-24 03:00)",
         "journal: kernel: NVRM: loading NVIDIA UNIX x86_64 Kernel Module  580.196.07 (1 in 24h, at 2026-11-24 01:24)",
     ]
     assert all(k.startswith("journal/") and len(k) == 16 for k in keys(state))
@@ -777,7 +785,9 @@ def test_a_drive_that_crashes_the_check_is_keyed_and_cleared_by_its_letter(
         tmp_path,
         {
             **smart(tmp_path, "sda", 0, ok),
-            **smart(tmp_path, "sdb", 0, {**ok, "scsi_grown_defect_list": "many"}),
+            **smart(
+                tmp_path, "sdb", 0, {**ok, "ata_smart_attributes": {"table": [None]}}
+            ),
         },
     )[0]
     assert keys(state) == ["smart/dev:sdb/crash"]

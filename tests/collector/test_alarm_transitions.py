@@ -1,0 +1,217 @@
+"""Unknown readings cannot clear an alarm: real collectors through the tracker."""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+import pytest
+
+from tests.collector.test_collect import collect, covered, smart
+from tests.collector.test_sensors import TestGPUSensors as SensorCapture
+from tests.collector.test_sensors import gpu_csv
+
+
+@pytest.fixture
+def tracker(app_dir: Path, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    for name in ("hwmon", "hostcheck", "zfs", "server"):
+        spec = importlib.util.spec_from_file_location(name, app_dir / f"{name}.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        monkeypatch.setitem(sys.modules, spec.name, module)
+        spec.loader.exec_module(module)
+    return module
+
+
+def transition(
+    tracker: ModuleType,
+    fault: dict[str, Any],
+    unknown: dict[str, Any],
+    healthy: dict[str, Any],
+    key: str,
+) -> None:
+    known, _ = tracker.track_alarms({}, fault["alarm_items"], fault["checked"], 1000, 3)
+    assert key in known
+    for now in (1060, 1120, 1180):
+        known, events = tracker.track_alarms(
+            known, unknown["alarm_items"], unknown["checked"], now, 3
+        )
+        assert not any(e["event"] == "cleared" and e["key"] == key for e in events)
+        assert known[key]["since"] == 1000
+    known, _ = tracker.track_alarms(
+        known, fault["alarm_items"], fault["checked"], 1240, 3
+    )
+    assert known[key]["since"] == 1000
+    for now in (1300, 1360, 1420):
+        known, events = tracker.track_alarms(
+            known, healthy["alarm_items"], healthy["checked"], now, 3
+        )
+    assert key not in known
+    assert any(e["event"] == "cleared" and e["key"] == key for e in events)
+
+
+def test_bmc_unreadable_sensor_and_missing_fan_hold(tracker: ModuleType) -> None:
+    runner = SensorCapture()
+
+    def capture(fans: str) -> dict[str, Any]:
+        return runner.collect(
+            files={"fan.txt": fans}, config={"fan_rpm_alarm_above": 1500}
+        )[0]
+
+    fault = capture(
+        "Fan1 | 30h | cr | 7.1 | 2000 RPM\nFan2 | 31h | ok | 7.2 | 1000 RPM\n"
+    )
+    unknown = capture(
+        "Fan1 | 30h | ns | 7.1 | No Reading\nFan2 | 31h | ok | 7.2 | 1000 RPM\n"
+    )
+    missing = capture("Fan2 | 31h | ok | 7.2 | 1000 RPM\n")
+    healthy = capture(
+        "Fan1 | 30h | ok | 7.1 | 1000 RPM\nFan2 | 31h | ok | 7.2 | 1000 RPM\n"
+    )
+    for key in ("bmc/fan/Fan1@7.1", "fans/ceiling/Fan1@7.1"):
+        transition(tracker, fault, unknown, healthy, key)
+        transition(tracker, fault, missing, healthy, key)
+    disabled = runner.collect(config={"fan_rpm_alarm_above": None})[0]
+    assert covered(disabled, "fans/ceiling/Fan1@7.1")
+
+
+@pytest.mark.parametrize(
+    "field,key", [("ecc", "ecc"), ("retired", "retired_pages"), ("sw", "slowdown")]
+)
+def test_gpu_unavailable_field_holds_independently(
+    tracker: ModuleType, field: str, key: str
+) -> None:
+    runner = SensorCapture()
+    fault = runner.collect(csv=gpu_csv(ecc=5, retired="Yes", sw="Active"))[0]
+    fields: dict[str, Any] = {
+        "ecc": 0,
+        "retired": "No",
+        "sw": "Not Active",
+        field: "[N/A]",
+    }
+    unknown = runner.collect(csv=gpu_csv(**fields))[0]
+    healthy = runner.collect(csv=gpu_csv())[0]
+    transition(tracker, fault, unknown, healthy, f"gpu/0/{key}")
+    other = "gpu/0/retired_pages" if field == "ecc" else "gpu/0/ecc"
+    assert covered(unknown, other)
+
+
+def test_gpu_missing_limits_hold_but_disabled_rule_clears(tracker: ModuleType) -> None:
+    runner = SensorCapture()
+    limit = "GPU 00000000:01:00.0\n    GPU Max Operating Temp : 70 C\n"
+    fault = runner.collect(csv=gpu_csv(core=69), temperature=limit)[0]
+    unknown = runner.collect(csv=gpu_csv(core=60), temperature="")[0]
+    healthy = runner.collect(csv=gpu_csv(core=60), temperature=limit)[0]
+    transition(tracker, fault, unknown, healthy, "gpu/0/temp/core")
+    assert covered(
+        runner.collect(config={"gpu_temp_alarm_margin_c": None})[0], "gpu/0/temp/core"
+    )
+
+
+def test_missing_dimm_does_not_clear_its_uncorrectable_error(
+    tracker: ModuleType, tmp_path: Path
+) -> None:
+    second: dict[str, str | None] = {
+        "edac/mc0/dimm1/dimm_label": "DIMM#1",
+        "edac/mc0/dimm1/dimm_ce_count": "0",
+        "edac/mc0/dimm1/dimm_ue_count": "0",
+    }
+    fault = collect(
+        tmp_path / "fault", {**second, "edac/mc0/dimm0/dimm_ue_count": "1"}
+    )[0]
+    unknown = collect(
+        tmp_path / "unknown", {**second, "edac/mc0/dimm0/dimm_label": None}
+    )[0]
+    healthy = collect(tmp_path / "healthy", second)[0]
+    transition(tracker, fault, unknown, healthy, "ecc/dimm/mc0/dimm0/uncorrectable")
+    assert not covered(
+        unknown, "ecc/uncorrectable"
+    )  # old aggregate evidence is not reassigned
+
+
+def test_corrected_ecc_retains_sum_and_inventory_dependencies(
+    tracker: ModuleType, tmp_path: Path
+) -> None:
+    state = collect(
+        tmp_path,
+        {
+            "edac/mc0/dimm0/dimm_ce_count": "30",
+            "edac/mc0/dimm1/dimm_label": "DIMM#1",
+            "edac/mc0/dimm1/dimm_ce_count": "30",
+            "edac/mc0/dimm1/dimm_ue_count": "0",
+        },
+    )[0]
+    alarm = next(a for a in state["alarm_items"] if a["key"] == "ecc/correctable")
+    assert alarm["value"] == 60
+    assert alarm["requires"] == [
+        "ecc/dimm/mc0/dimm0/correctable",
+        "ecc/dimm/mc0/dimm1/correctable",
+    ]
+    assert all(covered(state, key) for key in alarm["requires"])
+    assert not covered(state, "ecc/correctable")
+    unknown = collect(
+        tmp_path / "unknown",
+        {
+            "edac/mc0/dimm0/dimm_label": None,
+            "edac/mc0/dimm1/dimm_label": "DIMM#1",
+            "edac/mc0/dimm1/dimm_ce_count": "30",
+            "edac/mc0/dimm1/dimm_ue_count": "0",
+        },
+    )[0]
+    healthy = collect(
+        tmp_path / "healthy",
+        {
+            "edac/mc0/dimm1/dimm_label": "DIMM#1",
+            "edac/mc0/dimm1/dimm_ce_count": "0",
+            "edac/mc0/dimm1/dimm_ue_count": "0",
+        },
+    )[0]
+    transition(tracker, state, unknown, healthy, "ecc/correctable")
+
+
+def test_missing_scalar_fields_are_unknown_not_zero(tmp_path: Path) -> None:
+    report = {
+        "serial_number": "S1",
+        "smart_status": {"passed": True},
+        "nvme_smart_health_information_log": {"percentage_used": 0},
+        "ata_smart_attributes": {"table": [{"id": 5, "raw": {}}]},
+    }
+    state = collect(
+        tmp_path,
+        {
+            **smart(tmp_path, "sda", 0, report),
+            "edac/mc0/dimm0/dimm_ue_count": None,
+            "block/md0/md/dev-sda1/state": "in_sync",
+            "block/md0/md/sync_action": "idle",
+        },
+    )[0]
+    for key in (
+        "smart/S1/media_errors",
+        "smart/S1/reallocated",
+        "smart/S1/temperature",
+        "ecc/dimm/mc0/dimm0/uncorrectable",
+        "ecc/dimm/mc0/dimm0/correctable",
+        "md/md0/degraded",
+        "md/md0/mismatch",
+        "md/md0/member/sda1/errors",
+    ):
+        assert not covered(state, key), key
+    assert covered(state, "smart/S1/percentage_used")
+    assert covered(state, "md/md0/member/sda1/state")
+    assert state["edac"]["ue_total"] is None
+
+
+def test_missing_psu_reading_keeps_role_without_confusing_amps() -> None:
+    state = SensorCapture().collect(
+        files={
+            "power.txt": "PS1 Input Power | 70h | ok | 10.1 | 100 Watts\nPS2 Input Power | 71h | ns | 10.2 | No Reading\nPS3 Input Current | 72h | ns | 10.3 | No Reading\n"
+        }
+    )[0]
+    assert [(r["value"], r["psu_input"]) for r in state["power"]] == [
+        (100.0, True),
+        (None, True),
+        (None, False),
+    ]

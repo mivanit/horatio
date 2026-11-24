@@ -246,10 +246,10 @@ def test_visible_mounts_unit() -> None:
             line(29, 33, "/usr", "ext4"),
             line(33, 2, "/", "ext4"),
             line(40, 33, "/home", "ext4"),  # its own partition...
-            line(41, 40, "/home/miv/media", "xfs"),  # ...with a disk inside
+            line(41, 40, "/home/example/media", "xfs"),  # ...with a disk inside
             line(42, 33, "/mnt/my\\040disk", "ext4"),  # space, escaped
             line(43, 40, "/home", "tmpfs"),  # ProtectHome=tmpfs covers both
-            line(44, 43, "/home/miv/horatio", "ext4"),  # BindReadOnlyPaths=
+            line(44, 43, "/home/example/horatio", "ext4"),  # BindReadOnlyPaths=
         ]
     )
     assert server._visible_mounts(mountinfo) == {
@@ -258,7 +258,7 @@ def test_visible_mounts_unit() -> None:
         "/": "ext4",
         "/mnt/my disk": "ext4",
         "/home": "tmpfs",
-        "/home/miv/horatio": "ext4",
+        "/home/example/horatio": "ext4",
     }
 
 

@@ -24,7 +24,7 @@ def test_read_http_targets() -> None:
     targets: list[Any] = server._read_http_targets(
         {
             "http_targets": [
-                {"name": "pages", "url": "http://serverus:8000/"},
+                {"name": "pages", "url": "http://example-host:8000/"},
                 {
                     "name": "cloud",
                     "url": "https://box:9200/",
@@ -35,7 +35,7 @@ def test_read_http_targets() -> None:
         }
     )
     assert targets == [
-        server.HttpTarget("pages", "http://serverus:8000/", None, False),
+        server.HttpTarget("pages", "http://example-host:8000/", None, False),
         server.HttpTarget("cloud", "https://box:9200/", 302, True),
     ]
     bad: object
@@ -45,7 +45,7 @@ def test_read_http_targets() -> None:
         [{"url": "http://x/"}],
         [{"name": "", "url": "http://x/"}],
         [{"name": "x"}],
-        [{"name": "x", "url": "serverus:8000"}],
+        [{"name": "x", "url": "example-host:8000"}],
         [{"name": "x", "url": "ftp://x/"}],
         [{"name": "x", "url": "http://x/", "status": "200"}],
         [{"name": "x", "url": "http://x/", "status": True}],

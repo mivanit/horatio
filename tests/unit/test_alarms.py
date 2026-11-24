@@ -884,7 +884,7 @@ def test_api_alarms_carries_the_servers_own_notes(
     monkeypatch.setattr(
         server,
         "server_findings",
-        lambda: {
+        lambda refresh=True: {
             "alarms": [],
             "alarm_items": [],
             "checked": [],

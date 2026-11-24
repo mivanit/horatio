@@ -468,6 +468,12 @@ function testTempLabelsAndLimits() {
   assert.deepEqual(plain(context.charts.temps.data.datasets[0].backgroundColor),
     ['52/95/110', '70/65/80', '99/100/110'],
     'own limit by display name or sensor name; critical stays above it; junk is ignored');
+  const fan = '@pci0000:00/0000:01:00.0/amdgpu/fan1';
+  assert.equal(context.tempDisplayLabel(fan), 'amdgpu fan1 (0000:01:00.0)');
+  assert.equal(context.tempDisplayLabel(fan.replace('01:00.0', '02:00.0')), 'amdgpu fan1 (0000:02:00.0)');
+  context.dashboardConfig.sensor_labels = { [fan]: 'Front GPU fan' };
+  assert.equal(context.tempDisplayLabel(fan), 'Front GPU fan');
+  assert.equal(context.tempDisplayLabel('legacy fan'), 'legacy fan');
 }
 
 function testTempsWithoutSensors() {
@@ -581,7 +587,7 @@ function testHardwareSince() {
   const header = () => context.elements.get('hardware-value').textContent;
   const t = Math.floor(now / 1000);
   const item = (key, text, since, extra = {}) => ({ key, text, since, ...extra });
-  const journal = ['journal: serverus-fans: failsafe (1 in 24h, at 2026-11-23 15:28)', 'journal: kernel: NVRM (1 in 24h, at 2026-11-24 01:24)'];
+  const journal = ['journal: chassis-fans: failsafe (1 in 24h, at 2026-11-23 15:28)', 'journal: kernel: NVRM (1 in 24h, at 2026-11-24 01:24)'];
   const state = { status: 'ok', age_sec: 30,
     alarms: ['sde: reallocated=8', ...journal],
     alarm_items: [item('smart/S/reallocated', 'sde: reallocated=8', t - 2 * 86400 - 3600, { value: 8, initial: true }),
@@ -761,6 +767,32 @@ function testPowerFromHwmonAndTotals() {
   assert.equal(context.powerTotalKey({ power: { 'System (ACPI)': 150 }, power_total: 'System (ACPI)' }), 'System (ACPI)');
   assert.equal(context.powerTotalKey({ power: { 'Pwr Consumption': 238, 'CPU 0': 80 } }), 'Pwr Consumption');
   assert.equal(context.powerTotalKey({ power: { 'CPU (est.)': 64 } }), null);
+
+  // The normalized API is authoritative, including an empty list. Legacy PSU
+  // readings cannot become a partial total or a component beside CPU power.
+  const snapshot = context.dataCache.sensors.data;
+  snapshot.power = [
+    { label: 'PS1 Input Power', unit: 'W', value: 100, psu_input: true },
+    { label: 'PS2 Input Power', unit: null, value: null, psu_input: true },
+  ];
+  context.tickTemps();
+  assert.equal(context.elements.get('power-value').textContent, '150 W (30%)', 'the ACPI total wins over incomplete PSU inputs');
+  assert(!bar().includes('PS1 Input Power'));
+  snapshot.power_rows = [{ label: 'PSU input', value: 230, total: true }];
+  context.tickTemps();
+  assert.equal(context.elements.get('power-value').textContent, '230 W (46%)', 'the server can supply a verified complete PSU sum');
+  snapshot.power_rows = [];
+  context.sensors.data = context.sensors.data.filter(s => s.type !== 'power' || !s.total);
+  context.tickTemps();
+  assert.equal(context.elements.get('power-value').textContent, '≥ 64 W', 'no total means a lower bound');
+  delete snapshot.power_rows;
+  snapshot.power = [{ label: 'PS1 Input Power', value: 100, reading: '100 Watts' }];
+  context.tickTemps();
+  assert.equal(context.elements.get('power-value').textContent, '≥ 64 W', 'older collectors without role flags are conservative too');
+  context.sensors.data.find(s => s.type === 'fan_speed').id = '@platform/controller0/acme/fan1';
+  context.tickTemps();
+  assert.deepEqual(plain(context.charts.fans.data.labels), ['acme fan1 (controller0)']);
+  assert.deepEqual(context.errors, []);
 }
 
 // The server's own findings (hwmon fan rules, hints) reach the Hardware card through
@@ -1726,6 +1758,130 @@ function testHardwareErrorKeepsServerFindings() {
   assert.equal(critical.at(-1), true);
 }
 
+function testHardwareIndependentSources() {
+  const context = liveContext(['hardware-content', 'hardware-value', 'snapshot-age']);
+  const now = Date.UTC(2026, 10, 24, 8), ts = now / 1000;
+  context.Date = class extends Date { static now() { return now; } };
+  context.escapeHtml = String;
+  context.hwHint = () => '';
+  context.updateCardCritical = (id, on) => { context.statuses.critical = on; };
+  context.updateCardWarning = (id, count) => { context.statuses.warning = count > 0; };
+  context.document.querySelector = () => context.elements.get('snapshot-age');
+  evaluate(context, between(app, 'function renderHardware', '// Power bar segment colours') +
+    between(app, 'function backupService', '// The sensors snapshot'));
+  const item = (key, text) => ({ key, text, since: ts - 3600 });
+  const held = (key, text) => ({ ...item(key, text), unchecked_since: ts - 120 });
+  const snapshot = {
+    status: 'ok', age_sec: 5,
+    alarms: ['GPU ECC errors', 'collector driver mismatch'],
+    alarm_items: [item('gpu/0/ecc', 'GPU ECC errors'), item('gpu/driver-mismatch', 'collector driver mismatch')],
+    alarm_held: [held('bmc/fan/chassis', 'Chassis fan fault')], info: ['Collector diagnostic note'],
+  };
+  context.dataCache.sensors = { lastUpdate: now, data: snapshot };
+  context.dataCache.alarms = { lastUpdate: now, data: { recent: [
+    { event: 'cleared', timestamp: new Date(now - 60000).toISOString(), text: 'Previous fault', active_for_s: 60 },
+  ] } };
+  const server = {
+    sensor_alarms: ['Host driver mismatch: reboot fixes it', 'CPU fan stopped'],
+    sensor_alarm_items: [item('gpu/driver-mismatch', 'Host driver mismatch: reboot fixes it'), item('fan/cpu', 'CPU fan stopped')],
+    sensor_alarm_held: [held('fan/case', 'Case fan fault')], sensor_notes: ['Host diagnostic note'],
+  };
+  const html = () => context.elements.get('hardware-content').innerHTML;
+  const header = () => context.elements.get('hardware-value').textContent;
+  for (const status of ['ok', 'missing', 'error', 'stale']) {
+    context.renderHardware({ ...server, status, age_sec: 30, detail: 'invalid timestamp',
+      edac: { uptime_seconds: 3600, ce_total: 0, ue_total: 0 },
+      sel_memory: { count: 0, recent: [] }, sel_hardware: { count: 0, recent: [] },
+      backup: { age_hours: 2, timer: 'backup.timer' } });
+    assert.equal(header(), '3 issues', `${status}: independent alarms stay counted`);
+    for (const text of ['GPU ECC errors', 'Host driver mismatch', 'CPU fan stopped', 'Case fan fault',
+      'Chassis fan fault', 'Collector diagnostic note', 'Host diagnostic note', 'Recent changes', 'Previous fault', '(1 h)']) {
+      assert(html().includes(text), `${status}: ${text}`);
+    }
+    assert(!html().includes('collector driver mismatch'), 'only the duplicate mismatch diagnosis is suppressed');
+    assert(!html().includes('no alarms'));
+    assert(context.statuses.critical);
+    if (status === 'missing') assert(html().includes('No health snapshot yet'));
+    if (status === 'error') assert(html().includes('Cannot read') && html().includes('invalid timestamp'));
+    const stateKnown = status === 'ok' || status === 'stale';
+    for (const text of ['ECC since boot', 'BMC log', 'last run 2 h ago', 'ras-mc-ctl', 'ipmitool', 'backup.service']) {
+      assert.equal(html().includes(text), stateKnown, `${status}: collector detail ${text}`);
+    }
+  }
+  context.renderHardware({ status: 'missing' });
+  assert.equal(header(), '2 issues');
+  assert(html().includes('collector driver mismatch'), 'the collector diagnosis survives when the host has none');
+  context.renderHardware({ status: 'ok', age_sec: 0, sensor_alarms: ['GPU ECC errors'],
+    sensor_alarm_items: [item('unrelated/key', 'GPU ECC errors')] });
+  assert.equal(header(), '3 issues', 'matching text is not a reason to merge distinct diagnoses');
+
+  snapshot.alarms = []; snapshot.alarm_items = []; snapshot.alarm_held = [];
+  context.renderHardware({ status: 'error', sensor_alarm_held: server.sensor_alarm_held });
+  assert.equal(header(), '1 unchecked');
+  assert(html().includes('Case fan fault') && html().includes('not re-checked'));
+  for (const sensor_status of ['pending', 'stale']) {
+    context.renderHardware({ status: 'ok', age_sec: 0, sensor_status });
+    assert.equal(header(), `checks ${sensor_status}`);
+    assert(context.statuses.warning && !html().includes('no alarms'));
+  }
+  context.renderHardware({ status: 'error' });
+  assert.equal(header(), 'snapshot unavailable');
+  assert(context.statuses.warning && !context.statuses.critical);
+  context.renderHardware({ status: 'ok', age_sec: 0, sensor_status: 'ok' });
+  assert.equal(header(), 'all clear');
+  assert(!context.statuses.warning && !context.statuses.critical);
+  snapshot.status = 'stale';
+  context.renderHardware({ status: 'ok', age_sec: 0 });
+  assert(!html().includes('Collector diagnostic note'), 'old sensor notes are not presented as current');
+}
+
+function testPowerHistoryPerRecord() {
+  const context = liveContext([]);
+  Object.assign(context, {
+    HISTORY_METRICS: { power: { perDevice: true, unit: ' W' }, fans: { perDevice: true, unit: ' RPM' } },
+    CHART_TICK: {}, CHART_GRID: {}, CHART_FONT_SIZE: 16, HISTORY_AXIS_WIDTH: 84, HISTORY_PLOT_INSET: 8,
+    axisNumber: v => v,
+    Chart: class { constructor(canvas, chart) { return chart; } },
+  });
+  evaluate(context, between(config, 'const CORE_TEMP_LABEL', 'function formatTimeAgo') +
+    between(app, 'function extractHistoryValue', '// Create a history card for a metric'));
+  const record = power => ({ timestamp: '2026-11-24T12:00:00Z', power });
+  const plot = records => context.createHistoryChart('canvas', 'power', records, 'percent', 24, 'stack');
+  const column = (chart, index) => plain(Object.fromEntries(chart.data.datasets
+    .filter(d => d.data[index] != null).map(d => [d.label, d.data[index]])));
+  const old = { ...record({ 'Pwr Consumption': 200, 'System (ACPI)': 200, 'CPU 0': 50 }), power_total: 'Pwr Consumption' };
+  assert.deepEqual(column(plot([old]), 0), { 'CPU 0': 50, other: 150 }, 'old records do not stack two totals');
+  const acpi = record({ 'System (ACPI)': 200, 'CPU 0': 50 });
+  assert.deepEqual(column(plot([acpi, old]), 1), column(plot([old]), 0), 'a wider range cannot change a record');
+  assert.deepEqual(column(plot([acpi]), 0), { 'CPU 0': 50, other: 150 });
+  const custom = { ...record({ meter: 200, 'CPU 0': 50, auxiliary: 5 }), power_total: 'meter', power_totals: ['meter'] };
+  const parts = record({ meter: 20, 'CPU 0': 50, auxiliary: 5 });
+  const mixed = plot([custom, parts]);
+  assert.deepEqual(column(mixed, 0), { 'CPU 0': 50, auxiliary: 5, other: 145 });
+  assert.deepEqual(column(mixed, 1), { 'CPU 0': 50, meter: 20, auxiliary: 5 }, 'a total in another record cannot erase a component');
+  assert.deepEqual(column(mixed, 1), column(plot([parts]), 0));
+  const items = i => mixed.data.datasets.filter(d => d.data[i] != null)
+    .map(d => ({ dataIndex: i, parsed: { y: d.data[i] } }));
+  assert.equal(mixed.options.plugins.tooltip.callbacks.footer(items(0)), 'total 200 W');
+  assert.equal(mixed.options.plugins.tooltip.callbacks.footer(items(1)), '≥ 75 W');
+  const named = record({ 'System Power': 200, 'Power Meter': 200, 'CPU 0': 50 });
+  assert.deepEqual(column(plot([named]), 0), { 'CPU 0': 50, other: 150 });
+  const noTotal = { ...named, power_totals: [] };
+  assert.deepEqual(column(plot([noTotal]), 0), { 'CPU 0': 50, 'System Power': 200, 'Power Meter': 200 }, 'explicit metadata takes precedence over legacy guesses');
+  assert.deepEqual(column(plot([{ timestamp: old.timestamp }, old]), 0), {}, 'missing records remain gaps');
+
+  const fanId = '@pci0000:00/0000:01:00.0/amdgpu/fan1';
+  const fans = context.createHistoryChart('canvas', 'fans', [
+    { timestamp: old.timestamp, fans: { [fanId]: 1200 }, gpu_fans: { 'GPU 1 fan': 25 } },
+  ], 'percent', 24, 'range');
+  assert.equal(fans.data.datasets.find(d => d.label === 'Fans median').data[0], 1200, 'GPU percent never enters the RPM range');
+  assert.equal(fans.data.datasets.find(d => d.label === 'GPU 1 fan').yAxisID, 'y1');
+  const individual = context.createHistoryChart('canvas', 'fans', [
+    { timestamp: old.timestamp, fans: { [fanId]: 1200, 'legacy fan': 800 } },
+  ]);
+  assert.deepEqual(plain(individual.data.datasets.map(d => d.label)), ['amdgpu fan1 (0000:01:00.0)', 'legacy fan']);
+}
+
 // The Fans header never compares RPM with a GPU fan's percent.
 function testFansHeader() {
   const context = liveContext([]);
@@ -1736,7 +1892,7 @@ function testFansHeader() {
 }
 
 (async () => {
-  for (const test of [testHardwareMemoryRows, testHardwareErrorKeepsServerFindings, testFansHeader, testPowerFromHwmonAndTotals, testHardwareShowsServerSensorAlarms, testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
+  for (const test of [testHardwareMemoryRows, testHardwareErrorKeepsServerFindings, testHardwareIndependentSources, testPowerHistoryPerRecord, testFansHeader, testPowerFromHwmonAndTotals, testHardwareShowsServerSensorAlarms, testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testHardwareSince, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testCapturePendingAndHiddenTab, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
     testVersionFooter]) {

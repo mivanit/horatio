@@ -27,10 +27,10 @@ def by_type(rows: list[dict[str, Any]], kind: str) -> dict[str, dict[str, Any]]:
     return {r["label"]: r for r in rows if r["type"] == kind}
 
 
-# bodel (MSI 970A, FX-6300) as it is now, on the proprietary NVIDIA driver (no
+# AMD FX desktop with Fintek sensors and the proprietary NVIDIA driver (no
 # hwmon of its own): f71882fg keeps everything, even `name`, under device/;
 # k10temp; fam15h_power.
-BODEL: dict[str, str] = {
+FINTEK_AMD: dict[str, str] = {
     "hwmon/hwmon0/device/name": "f71889ed",
     "hwmon/hwmon0/device/temp1_input": "31000",
     "hwmon/hwmon0/device/temp1_max": "85000",
@@ -57,16 +57,16 @@ NOUVEAU: dict[str, str] = {
 }
 
 
-def test_bodel_keeps_glances_temperature_names_and_finds_every_fan(
+def test_fintek_keeps_glances_temperature_names_and_finds_every_fan(
     tmp_path: Path,
 ) -> None:
     import hwmon
 
     rows: list[dict[str, Any]] = hwmon.read_sensors(
-        tree(tmp_path, {**BODEL, **NOUVEAU}) / "hwmon"
+        tree(tmp_path, {**FINTEK_AMD, **NOUVEAU}) / "hwmon"
     )
     temps: dict[str, dict[str, Any]] = by_type(rows, hwmon.TEMP)
-    # Exactly what Glances called them, checked against the live box: history and
+    # The established Glances names: history and
     # temp_labels keep working.
     assert sorted(temps) == [
         "f71889ed 0",
@@ -92,7 +92,7 @@ def test_bodel_keeps_glances_temperature_names_and_finds_every_fan(
 def test_glances_naming_for_labels_duplicates_and_sort_order(tmp_path: Path) -> None:
     import hwmon
 
-    # A two-socket coretemp box (serverus-like): labelled sensors keep their label,
+    # A two-socket coretemp box: labelled sensors keep their label,
     # a repeated label gets " 1", " 2"... counted per chip, as Glances does. hwmon10
     # sorts before hwmon2 (psutil sorts path strings).
     files: dict[str, str] = {
@@ -355,3 +355,149 @@ def test_fan_alarms_are_keyed_by_the_fan_not_by_its_reading() -> None:
     assert notes[0].startswith("fan case: 0 RPM")
     # apply_fan_rules is the same findings with the alarms as plain text.
     assert hwmon.apply_fan_rules([fan("cpu", 0)], rules)[1] == [items[0]["text"]]
+
+
+def test_missing_fan_uses_the_same_effective_rule_as_a_present_fan() -> None:
+    import hwmon
+
+    alias = {"raw": "CPU"}
+    cases = [
+        ({"default": {"min_rpm": 300}, "raw": {"hide_if_zero": False}}, 300),
+        ({"default": {"on_low": "note"}, "raw": {"min_rpm": 300}}, None),
+        ({"CPU": {"min_rpm": 300}, "raw": {"min_rpm": 600}}, 600),
+        ({"CPU": {"min_rpm": 300}, "raw": {"min_rpm": None}}, None),
+    ]
+    for rules, minimum in cases:
+        _, present, _, read = hwmon.fan_status([fan("raw", 0)], rules, aliases=alias)
+        _, absent, _, missing = hwmon.fan_status([], rules, aliases=alias)
+        assert read == missing == ["fan/raw"]
+        if minimum is None:
+            assert present == absent == []
+        else:
+            assert len(present) == len(absent) == 1
+            assert present[0]["key"] == absent[0]["key"] == "fan/raw"
+            assert f"{minimum} RPM" in present[0]["text"]
+            assert f"min_rpm {minimum}" in absent[0]["text"]
+
+
+def test_default_only_missing_fan_holds_until_rule_is_disabled() -> None:
+    import hwmon
+    import server
+
+    identity = "@pci0000:00/0000:01:00.0/amdgpu/fan1"
+    row = {**fan("amdgpu fan1", 0), "id": identity}
+    rules = {"default": {"min_rpm": 300}}
+    _, items, _, checked = hwmon.fan_status([row], rules)
+    memory, _ = server.track_alarms({}, items, checked, 1000, 3)
+    for now in (1030, 1060, 1090):
+        _, items, _, checked = hwmon.fan_status([], rules, known={identity})
+        memory, events = server.track_alarms(memory, items, checked, now, 3)
+        assert events == []
+    assert memory[f"fan/{identity}"]["since"] == 1000
+    for now in (1120, 1150, 1180):
+        _, items, _, checked = hwmon.fan_status([], {}, known={identity})
+        memory, events = server.track_alarms(memory, items, checked, now, 3)
+    assert memory == {} and events[0]["event"] == "cleared"
+
+
+def test_device_disappearance_and_reprobe_never_transfer_a_fan_rule(
+    tmp_path: Path,
+) -> None:
+    import hwmon
+    import server
+
+    def read(root: Path, devices: list[tuple[str, int]]) -> list[dict[str, Any]]:
+        files: dict[str, str] = {}
+        links: dict[str, str] = {}
+        for number, (device, rpm) in enumerate(devices):
+            files[f"devices/{device}/present"] = ""
+            files[f"hwmon/hwmon{number}/name"] = "amdgpu"
+            files[f"hwmon/hwmon{number}/fan1_input"] = str(rpm)
+            links[f"hwmon/hwmon{number}/device"] = f"../../devices/{device}"
+        tree(root, files, links)
+        return hwmon.read_sensors(root / "hwmon", root / "thermal")
+
+    original = read(tmp_path / "first", [("gpu-a", 0), ("gpu-b", 1000)])
+    faulty_id, healthy_id = [r["id"] for r in original]
+    assert faulty_id != healthy_id
+    rules = {faulty_id: {"min_rpm": 300}}
+    _, alarms, _, checked = hwmon.fan_status(original, rules)
+    memory, _ = server.track_alarms({}, alarms, checked, 1000, 3)
+    survivor = read(tmp_path / "restart", [("gpu-b", 1000)])
+    assert survivor[0]["label"] == original[0]["label"]  # old ordinal naming moves
+    assert survivor[0]["id"] == healthy_id
+    for now in (1030, 1060, 1090):
+        _, alarms, _, checked = hwmon.fan_status(survivor, rules)
+        memory, events = server.track_alarms(memory, alarms, checked, now, 3)
+        assert events == []
+    assert memory[f"fan/{faulty_id}"]["since"] == 1000
+    # A legacy label is never allowed to select the healthy survivor instead.
+    _, unresolved, notes, _ = hwmon.fan_status(
+        survivor, {"amdgpu fan1": {"min_rpm": 300}}
+    )
+    assert len(unresolved) == 1 and "stable id" in unresolved[0]["text"]
+    assert unresolved[0]["key"] == "fan/amdgpu fan1"
+    assert notes == []
+
+
+def test_stable_alias_and_spinning_state_follow_physical_fan() -> None:
+    import hwmon
+
+    identity = "@platform/fan-controller/controller/fan1"
+    row = {**fan("CPU Fan", 0), "id": identity}
+    aliases = {identity: "Processor fan"}
+    _, alarms, _, checked = hwmon.fan_status(
+        [row], {"Processor fan": {"min_rpm": 300}}, aliases=aliases
+    )
+    assert checked == [f"fan/{identity}"]
+    assert alarms == [
+        {
+            "key": f"fan/{identity}",
+            "text": "fan Processor fan: 0 RPM, below its 300 RPM minimum",
+        }
+    ]
+    assert hwmon.fan_status([row], {}, spun={identity})[0] == [row]
+    assert hwmon.fan_status([row], {}, spun={"CPU Fan"})[0] == []
+
+
+def test_class_symlink_identity_ignores_probe_number(tmp_path: Path) -> None:
+    import hwmon
+
+    identifiers = []
+    for boot, number in (("first", 2), ("second", 9)):
+        root = tmp_path / boot
+        physical = f"devices/platform/fan-controller/hwmon/hwmon{number}"
+        tree(
+            root,
+            {f"{physical}/name": "controller", f"{physical}/fan1_input": "900"},
+            {f"hwmon/hwmon{number}": f"../{physical}"},
+        )
+        identifiers.append(
+            hwmon.read_sensors(root / "hwmon", root / "thermal")[0]["id"]
+        )
+    assert identifiers == ["@platform/fan-controller/controller/fan1"] * 2
+
+
+def test_an_ambiguous_alias_never_selects_a_physical_fan() -> None:
+    import hwmon
+
+    ids = ["@devices/a/controller/fan1", "@devices/b/controller/fan1"]
+    rows = [{**fan("CPU Fan", 1000), "id": identity} for identity in ids]
+    aliases = dict.fromkeys(ids, "CPU")
+    _, alarms, _, checked = hwmon.fan_status(
+        rows, {"CPU": {"min_rpm": 300}}, aliases=aliases
+    )
+    assert [alarm["key"] for alarm in alarms] == ["fan/CPU"]
+    assert "cannot identify" in alarms[0]["text"]
+    assert checked == [f"fan/{identity}" for identity in ids] + ["fan/CPU"]
+
+
+def test_invalid_minimum_is_unknown_but_null_deliberately_disables() -> None:
+    import hwmon
+
+    for rows in ([], [fan("cpu", 0)]):
+        _, alarms, notes, checked = hwmon.fan_status(rows, {"cpu": {"min_rpm": "300"}})
+        assert alarms == [] and "not a number" in notes[0]
+        assert checked == []
+        _, alarms, _, checked = hwmon.fan_status(rows, {"cpu": {"min_rpm": None}})
+        assert alarms == [] and checked == ["fan/cpu"]

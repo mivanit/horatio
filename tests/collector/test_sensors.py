@@ -395,8 +395,8 @@ class TestGPUSensors:
             {"key": "bmc/temp/Temp@3.2", "text": "Temp (3.2): status cr"},
             {"key": "bmc/temp/Inlet Temp@7.1", "text": "Inlet Temp: status nc"},
             {
-                "key": "fans/ceiling",
-                "text": "fans: 1 over 15000 RPM (boost back on, manual override, or box hot), e.g. Fan1 17640",
+                "key": "fans/ceiling/Fan1@7.1",
+                "text": "fan Fan1: 17640 RPM over 15000 RPM ceiling (boost back on, manual override, or box hot)",
             },
             {"key": "gpu/0/slowdown", "text": "GPU 0: thermal slowdown active (sw)"},
             {
@@ -416,7 +416,14 @@ class TestGPUSensors:
             )
 
         state: dict[str, Any]
-        state, _ = self.collect()
+        readings = {
+            "fan.txt": "Fan1 | 30h | ok | 7.1 | 1200 RPM\n",
+            "temp.txt": "Temp | 0Eh | ok | 3.1 | 32 degrees C\n",
+        }
+        state, _ = self.collect(
+            files=readings,
+            temperature="GPU 00000000:01:00.0\n    Memory Max Operating Temp : 95 C\n",
+        )
         key: str
         for key in (
             "bmc/fan/Fan1@7.1",
@@ -431,7 +438,8 @@ class TestGPUSensors:
 
         # The BMC timed out on the fans; nvidia-smi answered the query but not -q.
         state, _ = self.collect(
-            files={"fan.err": "exit 124\n", "gpu-temp.err": "exit 124\n"}
+            files={**readings, "fan.err": "exit 124\n", "gpu-temp.err": "exit 124\n"},
+            config={"fan_rpm_alarm_above": 15000},
         )
         assert state["alarms"] == [
             "collector: fan: exit 124",
@@ -451,23 +459,25 @@ class TestGPUSensors:
         state, _ = self.collect(files={"no-bmc": ""})
         assert not covered(state, "bmc/temp/Temp@3.1")
 
-    def test_a_driver_library_mismatch_is_left_to_the_dashboard(
+    @pytest.mark.parametrize("stream", ["stdout", "stderr"])
+    def test_a_driver_library_mismatch_remains_an_observed_alarm(
         self: TestGPUSensors,
+        stream: str,
     ) -> None:
         # nvidia-smi after a driver update under the running module: exit 18 and
         # the message on stdout, for the query and for -q alike.
         mismatch: dict[str, str | int] = {
-            "stdout": "Failed to initialize NVML: Driver/library version mismatch\n"
+            stream: "Failed to initialize NVML: Driver/library version mismatch\n"
             "NVML library version: 580.190\n",
             "status": 18,
         }
         state, _ = self.collect(
-            extended=mismatch, basic=mismatch, temperature=str(mismatch["stdout"])
+            extended=mismatch, basic=mismatch, temperature=str(mismatch[stream])
         )
-        # Not three vague collector alarms: the server raises the one that says why.
-        assert state["alarms"] == []
+        # Exactly one diagnosis survives even if the server cannot inspect NVML.
+        assert [a["key"] for a in state["alarm_items"]] == ["gpu/driver-mismatch"]
+        assert "version mismatch" in state["alarms"][0]
         assert state["gpus"] == []
-        assert any("version mismatch" in line for line in state["info"])
 
 
 def test_power_rows_say_their_unit_and_which_is_the_total(tmp_path: Path) -> None:

@@ -666,20 +666,21 @@ function renderHardware(data) {
   if (stateKnown && !stale && !serverUnknown && !sensorsUnknown && alarms.length === 0 && unchecked.length === 0) issues.push(hwRow('text-success', 'no alarms'));
   info.filter(i => !/^(sd[a-z]+|nvme\d+n\d+):/.test(i)).forEach(i => issues.push(hwRow('hw-note', i)));
 
+  // Collector details are usable only with a valid snapshot timestamp.
   const memory = [];
-  if (data.edac) {
+  if (stateKnown && data.edac) {
     const hours = data.edac.uptime_seconds != null ? Math.round(data.edac.uptime_seconds / 3600) : null;
     memory.push(hwRow('', `ECC since boot${hours != null ? ` (${hours} h)` : ''}: ${data.edac.ce_total ?? '?'} corrected, ${data.edac.ue_total ?? '?'} uncorrectable`));
   }
-  if (data.sel_memory) memory.push(hwRow('', `BMC log, memory events: ${data.sel_memory.count} lifetime, ${data.sel_memory.recent?.length ?? '?'} in the last 7 days`));
-  if (data.sel_hardware) memory.push(hwRow('', `BMC log, hardware faults: ${data.sel_hardware.count} lifetime, ${data.sel_hardware.recent?.length ?? '?'} in the last 7 days`));
+  if (stateKnown && data.sel_memory) memory.push(hwRow('', `BMC log, memory events: ${data.sel_memory.count} lifetime, ${data.sel_memory.recent?.length ?? '?'} in the last 7 days`));
+  if (stateKnown && data.sel_hardware) memory.push(hwRow('', `BMC log, hardware faults: ${data.sel_hardware.count} lifetime, ${data.sel_hardware.recent?.length ?? '?'} in the last 7 days`));
   // The hint names only the tools for what is present: no ipmitool line on a box without a BMC.
   const memCheck = [data.sel_memory || data.sel_hardware ? 'sudo ipmitool sel elist' : null,
                     data.edac ? 'sudo ras-mc-ctl --errors' : null].filter(Boolean);
   if (memory.length) memory.push(hwRow('hw-note', `check: ${memCheck.join('; ')}`));
 
   const backup = [];
-  if (data.backup) {
+  if (stateKnown && data.backup) {
     const b = data.backup;
     backup.push(hwRow('', b.age_hours != null ? `last run ${Math.round(b.age_hours)} h ago` : 'no run on record'));
     backup.push(hwRow('hw-note', `check: systemctl list-timers ${b.timer}; journalctl --unit ${backupService(b.timer)} --since -2days`));

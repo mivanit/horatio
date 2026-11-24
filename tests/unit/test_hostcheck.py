@@ -214,3 +214,42 @@ def test_a_failing_nvidia_smi_is_logged_once_with_its_stdout(
         "nvidia-smi failed (exit 18): Failed to initialize NVML: Driver/library version"
         " mismatch (the driver was updated under the running module: reboot)"
     ]
+
+
+def test_unreadable_reboot_flag_holds_an_alarm_but_absence_clears_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hostcheck
+    import server
+
+    flag = write(tmp_path / "reboot-required", "", 1000)
+    monkeypatch.setattr(hostcheck, "birth_time", lambda path: None)
+    now = 1000 + 8 * DAY
+    first = hostcheck.reboot_required(tmp_path, now=now)
+    known, _ = server.track_alarms({}, first.alarms, first.checked, now, 3)
+    stat = Path.stat
+
+    def denied(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+        if path == flag:
+            raise PermissionError("permission denied")
+        return stat(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "stat", denied)
+        unknown = hostcheck.reboot_required(tmp_path, now=now)
+    assert unknown.checked == []
+    assert "cannot read reboot requirement" in unknown.notes[0]
+    for step in range(1, 4):
+        known, events = server.track_alarms(
+            known, unknown.alarms, unknown.checked, now + step, 3
+        )
+        assert events == []
+    assert known["reboot/required"]["since"] == now
+    flag.unlink()
+    recovered = hostcheck.reboot_required(tmp_path, now=now)
+    for step in range(4, 7):
+        known, events = server.track_alarms(
+            known, recovered.alarms, recovered.checked, now + step, 3
+        )
+    assert known == {}
+    assert events[0]["event"] == "cleared"

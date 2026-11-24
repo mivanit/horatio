@@ -1,8 +1,5 @@
-"""ZFS pool alarms (zfs.py), erring on the side of failing loudly. The fixtures in
-tests/fixtures/zfs are built from the OpenZFS 2.4.1 source for `zpool status -j
---json-int` (not captured from a real pool; dotfiles
-notes/horatio-investigation-2026-11-24/zfs-fixtures/owner-real-test.sh captures
-real ones)."""
+"""ZFS pool alarms. Fixtures model OpenZFS 2.4.1 `zpool status -j --json-int`
+output; they are synthetic, not captures from a live pool."""
 
 from __future__ import annotations
 
@@ -78,7 +75,7 @@ def test_a_healthy_recently_scrubbed_pool_is_quiet(tmp_path: Path) -> None:
     found, summary = check(run, seen=tmp_path / "seen.json")
     assert found.alarms == [] and found.notes == []
     assert run.calls == [["/usr/sbin/zpool", "status", "-j", "--json-int"]]
-    assert {"zfs/unreadable", "zfs/tank"} <= set(found.checked)
+    assert {"zfs/unreadable", "zfs/tank/state", "zfs/tank/errors"} <= set(found.checked)
     assert summary["status"] == "ok" and summary["pools"][0]["name"] == "tank"
     # The pool is remembered, so if it later disappears that is an alarm.
     assert json.loads((tmp_path / "seen.json").read_text()) == ["tank"]
@@ -114,7 +111,7 @@ def test_errors_in_log_special_and_cache_vdevs_count_too() -> None:
     pool: dict[str, Any] = json.loads(fixture("healthy"))["pools"]["tank"]
     pool["logs"] = {"slog": {"read_errors": 0, "write_errors": 2, "checksum_errors": 0}}
     pool["l2cache"] = {"cache": {"checksum_errors": 1}}
-    assert zfs.vdev_errors(pool) == 3
+    assert zfs.vdev_errors(pool) == (3, False)
 
 
 def test_expected_pools_that_cannot_be_read_alarm_loudly() -> None:
@@ -225,3 +222,120 @@ def test_zfs_joins_the_servers_own_findings(monkeypatch: pytest.MonkeyPatch) -> 
     )
     found: dict[str, Any] = server.server_findings()
     assert found["alarm_items"] == [alarm] and "zfs/tank" in found["checked"]
+
+
+@pytest.mark.parametrize("initial", ["healthy", "never-scrubbed"])
+@pytest.mark.parametrize(
+    ("function", "scan_state"),
+    [("SCRUB", "SCANNING"), ("SCRUB", "CANCELED"), ("RESILVER", "FINISHED")],
+)
+def test_unfinished_scrubs_hold_previous_alarms_until_a_scrub_finishes(
+    initial: str, function: str, scan_state: str
+) -> None:
+    import server
+
+    now = SCRUBBED + 50 * DAY
+    first, _ = check(zpool(fixture(initial)), now=now)
+    key = "zfs/tank/" + ("scrub-overdue" if initial == "healthy" else "never-scrubbed")
+    known, _ = server.track_alarms({}, first.alarms, first.checked, now, 3)
+    pool = json.loads(fixture("healthy"))
+    pool["pools"]["tank"]["scan_stats"].update(function=function, state=scan_state)
+    unknown, _ = check(zpool(json.dumps(pool)), now=now)
+    for step in range(1, 4):
+        known, events = server.track_alarms(
+            known, unknown.alarms, unknown.checked, now + step * 60, 3
+        )
+        assert events == []
+    assert known[key]["since"] == now
+    assert "unchecked_since" in known[key]
+    assert "zfs/tank/state" in unknown.checked
+    assert "zfs/tank/errors" in unknown.checked
+
+    pool["pools"]["tank"]["scan_stats"].update(
+        function="SCRUB", state="FINISHED", end_time=int(now + 240)
+    )
+    recovered, _ = check(zpool(json.dumps(pool)), now=now + 240)
+    for step in range(4, 7):
+        known, events = server.track_alarms(
+            known, recovered.alarms, recovered.checked, now + step * 60, 3
+        )
+    assert key not in known
+    assert [(event["event"], event["key"]) for event in events] == [("cleared", key)]
+
+
+def test_finished_scrub_without_a_completion_time_is_not_checked() -> None:
+    pool = json.loads(fixture("healthy"))
+    del pool["pools"]["tank"]["scan_stats"]["end_time"]
+    found, _ = check(zpool(json.dumps(pool)))
+    assert "zfs/tank/scrub-overdue" not in found.checked
+    assert "zfs/tank/never-scrubbed" not in found.checked
+    assert "completion time unknown" in found.notes[0]
+
+
+def test_incomplete_error_counters_hold_an_old_fault_but_report_known_errors() -> None:
+    import server
+
+    first, _ = check(zpool(fixture("degraded-errors")), now=SCRUBBED)
+    known, _ = server.track_alarms({}, first.alarms, first.checked, SCRUBBED, 3)
+    raw = json.loads(fixture("healthy"))
+    root = raw["pools"]["tank"]["vdevs"]["tank"]
+    del root["read_errors"]
+    unknown, summary = check(zpool(json.dumps(raw)))
+    assert "zfs/tank/errors" not in unknown.checked
+    assert summary["pools"][0]["errors"] is None
+    for step in range(1, 4):
+        known, events = server.track_alarms(
+            known, unknown.alarms, unknown.checked, SCRUBBED + step * 60, 3
+        )
+    assert "zfs/tank/errors" in known
+    assert "zfs/tank/state" not in known  # independent healthy state can recover
+    assert known["zfs/tank/errors"]["since"] == SCRUBBED
+    root["write_errors"] = 2
+    positive, _ = check(zpool(json.dumps(raw)))
+    assert keys(positive) == ["zfs/tank/errors"]
+
+
+def test_legacy_pool_inventory_survives_failed_reads_and_later_disappearance(
+    tmp_path: Path,
+) -> None:
+    seen = tmp_path / "seen.json"
+
+    def run_table(table: str, rc: int = 0) -> Any:
+        replies = [(2, "", "invalid option 'j'"), (rc, table, "")]
+        return lambda args: replies.pop(0)
+
+    found, _ = check(run_table("tank\tONLINE\n"), seen=seen)
+    assert keys(found) == ["zfs/json-unsupported"]
+    assert json.loads(seen.read_text()) == ["tank"]
+    found, summary = check(run_table("", rc=1), seen=seen)
+    assert summary["status"] == "error"
+    assert "zfs/tank/missing" not in found.checked
+    assert json.loads(seen.read_text()) == ["tank"]
+    # Every call reloads the file: no in-memory discovery survives this transition.
+    found, _ = check(run_table(""), seen=seen)
+    assert keys(found) == ["zfs/json-unsupported", "zfs/tank/missing"]
+    assert json.loads(seen.read_text()) == ["tank"]
+
+
+@pytest.mark.parametrize("pool", [None, [], {}, {"state": None}])
+def test_malformed_pool_entries_are_unreadable(pool: Any, tmp_path: Path) -> None:
+    seen = tmp_path / "seen.json"
+    found, summary = check(
+        zpool(json.dumps({"pools": {"tank": pool}})), pools=["tank"], seen=seen
+    )
+    assert keys(found) == ["zfs/unreadable"]
+    assert summary["status"] == "error"
+    assert not any(key.startswith("zfs/tank") for key in found.checked)
+    assert not seen.exists()
+
+
+def test_malformed_legacy_output_does_not_check_or_remember_partial_inventory(
+    tmp_path: Path,
+) -> None:
+    replies = [(2, "", "invalid option 'j'"), (0, "tank\tONLINE\nbroken\n", "")]
+    seen = tmp_path / "seen.json"
+    found, summary = check(lambda args: replies.pop(0), seen=seen)
+    assert summary["status"] == "error"
+    assert "zfs/unreadable" in keys(found)
+    assert not any(key.startswith("zfs/tank") for key in found.checked)
+    assert not seen.exists()
