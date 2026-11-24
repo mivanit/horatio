@@ -371,7 +371,7 @@ class TestGPUSensors:
 
     # ---- identity: a stable key per alarm, and what was really checked -------
 
-    def test_keys_name_the_sensor_by_entity_and_the_gpu_by_index(
+    def test_keys_name_the_sensor_by_entity_and_the_gpu_by_pci_bus(
         self: TestGPUSensors,
     ) -> None:
         temps: str = (
@@ -398,9 +398,12 @@ class TestGPUSensors:
                 "key": "fans/ceiling/Fan1@7.1",
                 "text": "fan Fan1: 17640 RPM over 15000 RPM ceiling (boost back on, manual override, or box hot)",
             },
-            {"key": "gpu/0/slowdown", "text": "GPU 0: thermal slowdown active (sw)"},
             {
-                "key": "gpu/0/ecc",
+                "key": "gpu/pci/0000:01:00.0/slowdown",
+                "text": "GPU 0: thermal slowdown active (sw)",
+            },
+            {
+                "key": "gpu/pci/0000:01:00.0/ecc",
                 "text": "GPU 0: 2 uncorrected ECC errors since driver load",
                 "value": 2,
             },
@@ -429,8 +432,8 @@ class TestGPUSensors:
             "bmc/fan/Fan1@7.1",
             "bmc/temp/Temp@3.1",
             "fans/ceiling",
-            "gpu/0/temp/memory",
-            "gpu/0/slowdown",
+            "gpu/pci/0000:01:00.0/temp/memory",
+            "gpu/pci/0000:01:00.0/slowdown",
             "capture/gpu",
             "unparsed/fan",
         ):
@@ -445,16 +448,24 @@ class TestGPUSensors:
             "collector: fan: exit 124",
             "collector: gpu-temp: exit 124",
         ]
-        for key in ("bmc/fan/Fan1@7.1", "fans/ceiling", "gpu/0/temp/memory"):
+        for key in (
+            "bmc/fan/Fan1@7.1",
+            "fans/ceiling",
+            "gpu/pci/0000:01:00.0/temp/memory",
+        ):
             assert not covered(state, key), key
-        for key in ("bmc/temp/Temp@3.1", "gpu/0/slowdown", "gpu/0/ecc"):
+        for key in (
+            "bmc/temp/Temp@3.1",
+            "gpu/pci/0000:01:00.0/slowdown",
+            "gpu/pci/0000:01:00.0/ecc",
+        ):
             assert covered(state, key), key
         # With the temperature rules switched off there is nothing left to check.
         state, _ = self.collect(
             files={"gpu-temp.err": "exit 124\n"},
             config={"gpu_temp_alarm_margin_c": None},
         )
-        assert covered(state, "gpu/0/temp/memory")
+        assert covered(state, "gpu/pci/0000:01:00.0/temp/memory")
         # No BMC at all: its alarms are neither raised nor cleared.
         state, _ = self.collect(files={"no-bmc": ""})
         assert not covered(state, "bmc/temp/Temp@3.1")

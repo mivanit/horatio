@@ -473,7 +473,23 @@ function testTempLabelsAndLimits() {
   assert.equal(context.tempDisplayLabel(fan.replace('01:00.0', '02:00.0')), 'amdgpu fan1 (0000:02:00.0)');
   context.dashboardConfig.sensor_labels = { [fan]: 'Front GPU fan' };
   assert.equal(context.tempDisplayLabel(fan), 'Front GPU fan');
+  context.dashboardConfig.sensor_labels['amdgpu fan1'] = 'Original fan alias';
+  assert.equal(context.tempDisplayLabel(fan, 'amdgpu fan1'), 'Front GPU fan', 'an id alias takes precedence');
+  delete context.dashboardConfig.sensor_labels[fan];
+  assert.equal(context.tempDisplayLabel(fan, 'amdgpu fan1'), 'Original fan alias', 'display aliases do not require migration to ids');
   assert.equal(context.tempDisplayLabel('legacy fan'), 'legacy fan');
+  const composite = 'Composite [pci0000:00/0000:01:00.0/temp1]';
+  assert.equal(context.tempDisplayLabel(composite), composite, 'unaliased devices retain distinct labels');
+  context.dashboardConfig.sensor_labels.Composite = 'Drive temperature';
+  assert.equal(context.tempDisplayLabel(composite), 'Drive temperature', 'Lua physical keys preserve old display aliases');
+  context.dashboardConfig.sensor_labels[composite] = 'Primary drive';
+  assert.equal(context.tempDisplayLabel(composite), 'Primary drive');
+  const aggregated = context.aggregateCoreTemps([
+    { label: 'Core 0', value: 40 }, { label: 'Core 1 [platform/coretemp.0/temp3]', value: 60 },
+    { label: composite, value: 30 },
+  ]);
+  assert.equal(aggregated.cores.median, 50, 'old and physical-key CPU samples retain their core band');
+  assert.deepEqual(plain(aggregated.rest), [{ label: composite, value: 30 }]);
 }
 
 function testTempsWithoutSensors() {
@@ -792,6 +808,10 @@ function testPowerFromHwmonAndTotals() {
   context.sensors.data.find(s => s.type === 'fan_speed').id = '@platform/controller0/acme/fan1';
   context.tickTemps();
   assert.deepEqual(plain(context.charts.fans.data.labels), ['acme fan1 (controller0)']);
+  context.dashboardConfig.sensor_labels = { 'f71889ed fan1': 'CPU fan' };
+  context.tickTemps();
+  assert.deepEqual(plain(context.charts.fans.data.labels), ['CPU fan']);
+  assert.equal(context.tempDisplayLabel('@platform/controller0/acme/fan1'), 'CPU fan', 'history can use the current inventory label without changing its key');
   assert.deepEqual(context.errors, []);
 }
 
@@ -1284,6 +1304,8 @@ function historySettingsContext() {
     querySelector(selector) { return this.children.get(selector.slice(1)); }
     querySelectorAll() { return [...this.children.values()].filter(el => ['input', 'button'].includes(el.tag)); }
     addEventListener(type, callback) { this.events[type] = callback; }
+    setAttribute(name, value) { this[name] = value; }
+    focus() {}
     click() { if (!this.disabled) return this.events.click?.(); }
     remove() { this.removed = true; }
     getBoundingClientRect() { return { left: 0, bottom: 10 }; }
@@ -1296,8 +1318,8 @@ function historySettingsContext() {
       getElementById: id => popups.findLast(popup => !popup.removed)?.children.get(id),
       addEventListener() {}, removeEventListener() {},
     },
-    safeFetch() { const pending = defer(); reads.push(pending); return pending.promise; },
-    fetch(url, options) { const pending = defer(); writes.push({ ...pending, body: JSON.parse(options.body) }); return pending.promise; },
+    safeFetch(url) { const pending = defer(); reads.push({ ...pending, url }); return pending.promise; },
+    fetch(url, options) { const pending = defer(); writes.push({ ...pending, url, body: JSON.parse(options.body) }); return pending.promise; },
     setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; },
   });
   evaluate(context, between(app, 'let historySettingsPopup =', '// Middle-click on History label'));
@@ -1307,7 +1329,7 @@ function historySettingsContext() {
     reads[index].resolve({ ok, data });
     await new Promise(setImmediate);
   };
-  const finishWrite = (index, data, ok = true) => writes[index].resolve({ ok, json: async () => data });
+  const finishWrite = (index, data, ok = true, status = ok ? 200 : 400) => writes[index].resolve({ ok, status, json: async () => data });
   return { context, reads, writes, timers, current, open, finishRead, finishWrite };
 }
 
@@ -1352,6 +1374,15 @@ async function testHistorySettingsLoading() {
   assert.equal(h.reads.length, 2, 'Reset uses the defaults included in the initial read');
   assert.equal(field('interval').value, '300');
   assert.equal(field('processes-enabled').checked, false);
+  h.context.closeHistorySettingsPopup();
+  popup = h.open();
+  await h.finishRead(2, { ...historySettings, editable: false, password_configured: false,
+    detail: 'Edit www/config.json and restart the service.' });
+  assert(field('confirm').disabled && field('interval').disabled && field('password').disabled);
+  assert.equal(field('status').textContent, 'Edit www/config.json and restart the service.');
+  const writes = h.writes.length;
+  await h.context.submitHistorySettings();
+  assert.equal(h.writes.length, writes, 'a read-only backend never gets a settings POST');
 }
 
 async function testHistorySettingsPopupOwnership() {
@@ -1833,6 +1864,47 @@ function testHardwareIndependentSources() {
   snapshot.status = 'stale';
   context.renderHardware({ status: 'ok', age_sec: 0 });
   assert(!html().includes('Collector diagnostic note'), 'old sensor notes are not presented as current');
+  snapshot.status = 'missing'; snapshot.expected = false;
+  context.renderHardware({ status: 'missing', expected: false, sensor_status: 'ok' });
+  assert.equal(header(), 'no detected issues');
+  assert(!context.statuses.warning && !context.statuses.critical);
+  assert(html().includes('Hardware collector not configured') && html().includes('Sensors collector not configured'));
+  assert(!html().includes('no alarms') && !html().includes('text-warning'));
+  context.renderHardware({ status: 'missing', expected: true, sensor_status: 'ok' });
+  assert.equal(header(), 'snapshot unavailable');
+  assert(context.statuses.warning, 'expected-but-missing remains a warning');
+  context.renderHardware({ status: 'error', expected: false });
+  assert(context.statuses.warning, 'configuration cannot make corrupt data healthy');
+  snapshot.status = 'stale';
+  context.renderHardware({ status: 'missing', expected: false });
+  assert(context.statuses.warning, 'stale sensors still warn even with expected:false');
+  snapshot.status = 'missing';
+  context.renderHardware({ status: 'missing', expected: false, sensor_alarm_held: server.sensor_alarm_held });
+  assert.equal(header(), '1 unchecked');
+  assert(context.statuses.warning, 'optional coverage cannot hide a retained alarm');
+
+  snapshot.status = 'ok';
+  snapshot.alarm_held = [held('bmc/fan/removed', 'Removed chassis fan')];
+  context.dataCache.alarms.data.retirement = { supported: true, password_configured: true };
+  const selected = [];
+  context.openAlarmRetirement = alarm => selected.push(alarm);
+  const retiredSources = { status: 'ok', age_sec: 0,
+    alarm_held: [held('smart/removed/health', 'Removed drive')], sensor_alarm_held: server.sensor_alarm_held };
+  context.renderHardware(retiredSources);
+  assert.equal((html().match(/data-retire-alarm=/g) || []).length, 3, 'only retained faults get retirement controls');
+  for (let i = 0; i < 3; i++) context.elements.get('hardware-content').onclick({
+    target: { closest: () => ({ dataset: { retireAlarm: String(i) }, disabled: false }) },
+  });
+  assert.deepEqual(selected.map(h => h.source), ['state', 'sensors', 'dashboard']);
+  assert(selected.every(h => h.since === ts - 3600 && h.unchecked_since === ts - 120));
+  context.dataCache.alarms.data.retirement.password_configured = false;
+  context.renderHardware(retiredSources);
+  assert(html().includes('disabled') && html().includes('Configure the settings password'));
+  context.dataCache.alarms.data.retirement.supported = false;
+  context.renderHardware(retiredSources);
+  assert(!html().includes('data-retire-alarm='), 'older backends do not offer an unsupported operation');
+  assert(context.hwEventText({ event: 'retired', text: 'Removed drive', timestamp: new Date(now).toISOString() })
+    .includes('retired by operator: Removed drive'));
 }
 
 function testPowerHistoryPerRecord() {
@@ -1851,6 +1923,10 @@ function testPowerHistoryPerRecord() {
     .filter(d => d.data[index] != null).map(d => [d.label, d.data[index]])));
   const old = { ...record({ 'Pwr Consumption': 200, 'System (ACPI)': 200, 'CPU 0': 50 }), power_total: 'Pwr Consumption' };
   assert.deepEqual(column(plot([old]), 0), { 'CPU 0': 50, other: 150 }, 'old records do not stack two totals');
+  const legacyPsu = { ...old, power: { ...old.power, 'PS1 Input Power': 100, 'PS2 Input Power': 100 } };
+  assert.deepEqual(column(plot([legacyPsu]), 0), { 'CPU 0': 50, other: 150 }, 'legacy PSU inputs are not additional components');
+  const partialPsu = record({ 'PS1 Input Power': 100, 'PS2 Input Power': null, 'CPU 0': 50 });
+  assert.deepEqual(column(plot([partialPsu]), 0), { 'CPU 0': 50 }, 'an unknown PSU never becomes zero or a guessed whole-machine total');
   const acpi = record({ 'System (ACPI)': 200, 'CPU 0': 50 });
   assert.deepEqual(column(plot([acpi, old]), 1), column(plot([old]), 0), 'a wider range cannot change a record');
   assert.deepEqual(column(plot([acpi]), 0), { 'CPU 0': 50, other: 150 });
@@ -1882,6 +1958,95 @@ function testPowerHistoryPerRecord() {
   assert.deepEqual(plain(individual.data.datasets.map(d => d.label)), ['amdgpu fan1 (0000:01:00.0)', 'legacy fan']);
 }
 
+async function testHistoryCapabilities() {
+  const calls = [];
+  const context = vm.createContext({ getCssColor: () => '#123456', dashboardConfig: {},
+    historyCards: new Map(), createHistoryCard: metric => calls.push(metric) });
+  evaluate(context, between(config, 'const HISTORY_METRICS =', '// Track active history cards') +
+    between(config, '// Endpoint discovery:', '// Helper to fetch with error tracking') +
+    between(app, 'function showAllHistory', '// Hide all history cards') +
+    between(app, 'function historyErrorHTML', '// Extract metric value'));
+  const metrics = ['cpu', 'cpu_cores', 'memory', 'network', 'temps', 'load', 'swap', 'drive-usage', 'ping'];
+  const endpoints = ['/history', '/history/field/temps', '/4/cpu', '/4/percpu', '/4/mem', '/4/network',
+    '/4/sensors', '/4/load', '/4/memswap', '/4/fs', '/ping'];
+  context.safeFetch = async () => ({ ok: true, data: { endpoints, history_metrics: metrics } });
+  await context.fetchEndpointList();
+  context.showAllHistory();
+  assert.deepEqual(calls, metrics, 'Show All follows the backend inventory, including derived metrics');
+  assert(!context.historyMetricAvailable('cpu_freq') && !context.historyMetricAvailable('processes'));
+  const unavailable = context.historyErrorHTML('unavailable');
+  assert(unavailable.includes('does not provide') && !unavailable.includes('Could not reach') && !unavailable.includes('retry'));
+  // Older endpoint discovery responses have no history inventory. Supported
+  // live and side-field endpoints still prevent unsupported requests.
+  context.safeFetch = async () => ({ ok: true, data: { endpoints } });
+  await context.fetchEndpointList();
+  assert(context.historyMetricAvailable('temps'));
+  assert(!context.historyMetricAvailable('gpu') && !context.historyMetricAvailable('processes'));
+}
+
+async function testAlarmRetirement() {
+  const h = historySettingsContext();
+  const refreshed = [], rendered = [], cancelledTimers = [];
+  Object.assign(h.context, { AbortController,
+    clearTimeout: timer => cancelledTimers.push(timer),
+    updateCache: (key, data) => refreshed.push([key, data]),
+    renderHardware: data => rendered.push(data),
+  });
+  evaluate(h.context, between(app, 'let alarmRetirementPopup =', '// One line of the event log'));
+  const current = () => evaluate(h.context, 'alarmRetirementPopup');
+  const alarm = { source: 'dashboard', key: 'fan/@platform/removed/chip/fan1', since: 1000,
+    unchecked_since: 2000, text: 'Removed fan <name>' };
+  h.context.openAlarmRetirement(alarm);
+  let popup = current();
+  const field = id => popup.querySelector('#ar-' + id);
+  assert.equal(field('alarm').textContent, alarm.text, 'alarm text is inserted as text, not markup');
+  await h.context.submitAlarmRetirement(popup);
+  assert.equal(h.writes.length, 0, 'a password is required before any request');
+  field('password').value = 'wrong';
+  let pending = h.context.submitAlarmRetirement(popup);
+  await h.context.submitAlarmRetirement(popup);
+  assert.equal(h.writes.length, 1, 'an in-flight submission cannot be duplicated');
+  assert.equal(h.writes[0].url, '/api/alarms/retire');
+  assert.equal(h.timers.at(-1).delay, 30000, 'retirement allows an in-flight server health check to finish');
+  assert.deepEqual(h.writes[0].body, { source: alarm.source, key: alarm.key, since: 1000, unchecked_since: 2000, password: 'wrong' });
+  h.finishWrite(0, { error: 'Incorrect password' }, false, 401);
+  await pending;
+  assert.equal(field('status').textContent, 'Incorrect password');
+  assert(!field('confirm').disabled);
+  assert.equal(h.reads.length, 0, 'failed authentication does not claim a mutation or erase the row');
+
+  // A stale dialog cannot retire a different occurrence of the same key.
+  field('password').value = 'test';
+  pending = h.context.submitAlarmRetirement(popup);
+  h.finishWrite(1, { error: 'Alarm changed' }, false, 409);
+  await new Promise(setImmediate);
+  assert.deepEqual(h.reads.map(r => r.url), ['/api/alarms', '/api/sensors', '/api/storage-health']);
+  await h.finishRead(0, { held: [] });
+  await h.finishRead(1, { status: 'ok', alarm_held: [] });
+  await h.finishRead(2, { status: 'ok', sensor_alarm_held: [], sensor_alarms: ['Fan failed again'] });
+  await pending;
+  assert(field('status').textContent.includes('alarm changed'));
+  assert(field('confirm').disabled && field('password').value === '', 'a conflict needs a fresh selection');
+  assert.equal(rendered.at(-1).sensor_alarms[0], 'Fan failed again');
+  field('cancel').click();
+  assert.equal(current(), null);
+
+  h.context.openAlarmRetirement(alarm);
+  popup = current(); field('password').value = 'test';
+  pending = h.context.submitAlarmRetirement(popup);
+  h.finishWrite(2, { status: 'retired', source: alarm.source, key: alarm.key });
+  await new Promise(setImmediate);
+  await h.finishRead(3, { held: [], recent: [{ event: 'retired', text: alarm.text }] });
+  await h.finishRead(4, { status: 'ok', alarm_held: [] });
+  await h.finishRead(5, { status: 'ok', sensor_alarm_held: [] });
+  await pending;
+  assert.equal(current(), null);
+  assert.equal(field('password').value, '', 'the password is cleared on success');
+  assert.deepEqual(refreshed.slice(-3).map(([key]) => key), ['alarms', 'sensors', 'storageHealth']);
+  assert.deepEqual(rendered.at(-1).sensor_alarm_held, []);
+  assert.equal(cancelledTimers.length, 3, 'every completed attempt clears its deadline');
+}
+
 // The Fans header never compares RPM with a GPU fan's percent.
 function testFansHeader() {
   const context = liveContext([]);
@@ -1892,7 +2057,7 @@ function testFansHeader() {
 }
 
 (async () => {
-  for (const test of [testHardwareMemoryRows, testHardwareErrorKeepsServerFindings, testHardwareIndependentSources, testPowerHistoryPerRecord, testFansHeader, testPowerFromHwmonAndTotals, testHardwareShowsServerSensorAlarms, testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
+  for (const test of [testHardwareMemoryRows, testHardwareErrorKeepsServerFindings, testHardwareIndependentSources, testPowerHistoryPerRecord, testHistoryCapabilities, testAlarmRetirement, testFansHeader, testPowerFromHwmonAndTotals, testHardwareShowsServerSensorAlarms, testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testHardwareSince, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testCapturePendingAndHiddenTab, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
     testVersionFooter]) {

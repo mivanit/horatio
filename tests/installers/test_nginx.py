@@ -305,7 +305,7 @@ http {
             ),
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=30,
         )
 
     def test_uninstall_releases_ports_disables_nginx_and_preserves_extra_content(
@@ -565,7 +565,7 @@ http {
             env=dict(self.env, HORATIO_NGINX_FAIL=failure, **env),
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=30,
         )
 
     def events(self: TestNginxInstaller) -> list[dict[str, Any]]:

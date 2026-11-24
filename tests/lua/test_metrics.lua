@@ -179,6 +179,7 @@ check(public.ipv4 == nil and public.ipv6 == nil and public.error == "lookup fail
 -- request. `sleeps` counts the 1 s windows; the fake sleep is what moves time on.
 local sleeps, on_sleep = 0, nil
 local globbed = {}
+local realpaths = {}
 package.loaded.nixio = {
     nanosleep = function(seconds)
         assert(seconds == 1, "window length")
@@ -190,7 +191,7 @@ package.loaded.nixio = {
         local list, i = globbed[pattern], 0
         assert(list, "unexpected glob: " .. pattern)
         return function() i = i + 1; return list[i] end, #list
-    end},
+    end, realpath = function(path) return realpaths[path] end},
 }
 local function counters(uptime, busy, idle, rx, tx)
     files["/proc/uptime"] = string.format("%.2f 0.00\n", uptime)
@@ -275,6 +276,36 @@ check(#sensors == 3 and sensors[1].label == "cpu-thermal" and sensors[1].value =
     and sensors[2].label == "mt7915_phy0 1" and sensors[2].value == 52
     and sensors[3].label == "board" and sensors[3].value == 38.3,
     "thermal zones and hwmon inputs are listed in order, labelled, unread ones skipped")
+
+-- Repeated hardware labels must not overwrite one another in history. Neither
+-- hwmon probe indices nor NVMe controller indices are durable identities.
+local function drive_sensor(index, device, value)
+    local path = "/sys/class/hwmon/hwmon" .. index
+    files[path .. "/temp1_input"] = tostring(value) .. "\n"
+    files[path .. "/temp1_label"] = "Composite\n"
+    realpaths[path .. "/device"] = device
+    return path .. "/temp1_input"
+end
+local first = drive_sensor(0, "/sys/devices/pci0000:00/0000:01:00.0/nvme/nvme0", 41000)
+local second = drive_sensor(1, "/sys/devices/pci0000:00/0000:02:00.0/nvme/nvme1", 42000)
+globbed = {["/sys/class/thermal/thermal_zone*"] = {},
+    ["/sys/class/hwmon/hwmon*/temp*_input"] = {second, first}}
+sensors = metrics.sensors()
+local first_key, second_key = sensors[1].key, sensors[2].key
+check(first_key ~= second_key and not first_key:find("hwmon0", 1, true)
+    and not first_key:find("nvme0", 1, true), "same-label NVMe sensors have distinct physical series keys")
+globbed["/sys/class/hwmon/hwmon*/temp*_input"] = {second}
+check(metrics.sensors()[1].key == second_key, "removing the first device does not rename the remaining series")
+first = drive_sensor(8, "/sys/devices/pci0000:00/0000:01:00.0/nvme/nvme7", 43000)
+second = drive_sensor(3, "/sys/devices/pci0000:00/0000:02:00.0/nvme/nvme2", 44000)
+globbed["/sys/class/hwmon/hwmon*/temp*_input"] = {first, second}
+sensors = metrics.sensors()
+check(sensors[1].key == second_key and sensors[2].key == first_key,
+    "changing both hwmon and NVMe enumeration preserves physical series keys")
+realpaths = {}
+sensors = metrics.sensors()
+check(#sensors == 2 and sensors[1].key == false and sensors[2].key == false,
+    "unidentified duplicates stay visible without inventing history identities")
 globbed = {["/sys/class/thermal/thermal_zone*"] = {}, ["/sys/class/hwmon/hwmon*/temp*_input"] = {}}
 check(#metrics.sensors() == 0, "a router with no sensors reports none")
 package.loaded.nixio = nil

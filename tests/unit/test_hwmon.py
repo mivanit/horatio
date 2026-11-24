@@ -501,3 +501,150 @@ def test_invalid_minimum_is_unknown_but_null_deliberately_disables() -> None:
         assert checked == []
         _, alarms, _, checked = hwmon.fan_status(rows, {"cpu": {"min_rpm": None}})
         assert alarms == [] and checked == ["fan/cpu"]
+
+
+def test_usb_hid_identity_uses_host_port_and_interface_not_probe_counters(
+    tmp_path: Path,
+) -> None:
+    import hwmon
+
+    def identity(
+        root: Path,
+        bus: int,
+        instance: str,
+        port: int = 2,
+        interface: int = 0,
+        version: str = "2.00",
+    ) -> str | None:
+        hub = f"devices/pci0000:00/0000:00:14.0/usb{bus}"
+        physical = f"{hub}/{bus}-{port}/{bus}-{port}:1.{interface}/0003:0C70:F00D.{instance}/hwmon/hwmon9"
+        tree(
+            root,
+            {
+                f"{hub}/version": version,
+                f"{physical}/name": "cooler",
+                f"{physical}/fan1_input": "900",
+            },
+        )
+        return hwmon._fan_id(root / physical, "cooler", 1)
+
+    original = identity(tmp_path / "first", 1, "0001")
+    assert original is not None
+    assert identity(tmp_path / "reboot", 8, "00A0") == original
+    assert identity(tmp_path / "other-port", 8, "00A0", port=3) != original
+    assert identity(tmp_path / "other-interface", 8, "00A0", interface=1) != original
+    assert identity(tmp_path / "other-hub", 8, "00A0", version="3.00") != original
+
+
+def test_i2c_identity_retains_controller_address_and_mux_channel(
+    tmp_path: Path,
+) -> None:
+    import hwmon
+
+    def identity(
+        root: Path,
+        bus: int,
+        child: int,
+        channel: int = 3,
+        address: str = "002d",
+        port: int = 0,
+        link_channel: bool = True,
+    ) -> str | None:
+        adapter = f"devices/platform/i2c-controller/i2c-{bus}"
+        mux = f"{adapter}/{bus}-0070"
+        child_bus = f"{mux}/i2c-{child}"
+        physical = f"{child_bus}/{child}-{address}/hwmon/hwmon4"
+        links = {f"{child_bus}/mux_device": ".."}
+        if link_channel:
+            links[f"{mux}/channel-{channel}"] = f"i2c-{child}"
+        tree(
+            root,
+            {
+                f"{adapter}/name": f"controller port {port}",
+                f"{physical}/name": "fancontroller",
+                f"{physical}/fan1_input": "900",
+            },
+            links,
+        )
+        return hwmon._fan_id(root / physical, "fancontroller", 1)
+
+    original = identity(tmp_path / "first", 7, 50)
+    assert original is not None
+    assert identity(tmp_path / "reboot", 9, 73) == original
+    assert identity(tmp_path / "other-channel", 9, 73, channel=4) != original
+    assert identity(tmp_path / "other-address", 9, 73, address="002e") != original
+    assert identity(tmp_path / "other-port", 9, 73, port=1) != original
+    assert identity(tmp_path / "unknown-channel", 9, 73, link_channel=False) is None
+
+
+def test_old_history_alias_and_physical_alias_count_as_one_target() -> None:
+    import hwmon
+
+    identity = "@platform/controller/controller/fan1"
+    row = {**fan("controller fan1", 900), "id": identity}
+    aliases = {"controller fan1": "CPU", identity: "CPU"}
+    _, alarms, notes, checked = hwmon.fan_status(
+        [row], {"CPU": {"min_rpm": 300}}, aliases=aliases
+    )
+    assert alarms == notes == []
+    assert checked == [f"fan/{identity}"]
+    # A missing historical label is display-only; the explicit physical alias
+    # still selects the configured device, including when it is absent.
+    _, alarms, _, checked = hwmon.fan_status(
+        [], {"CPU": {"min_rpm": 300}}, aliases=aliases
+    )
+    assert [alarm["key"] for alarm in alarms] == checked == [f"fan/{identity}"]
+
+
+def test_history_alias_does_not_override_a_conflicting_physical_target() -> None:
+    import hwmon
+
+    first = "@platform/a/controller/fan1"
+    second = "@platform/b/controller/fan1"
+    aliases = {"controller fan1": "CPU", first: "CPU"}
+    _, alarms, _, _ = hwmon.fan_status(
+        [{**fan("controller fan1", 900), "id": second}],
+        {"CPU": {"min_rpm": 300}},
+        aliases=aliases,
+    )
+    assert [a["key"] for a in alarms] == ["fan/CPU"]
+    assert "cannot identify" in alarms[0]["text"]
+
+
+def test_unidentified_fan_reports_current_low_reading_without_clearing_history() -> (
+    None
+):
+    import hwmon
+    import server
+
+    row = {**fan("controller fan1", 0), "id": None}
+    legacy = "fan/controller fan1"
+    known, _ = server.track_alarms(
+        {}, [{"key": legacy, "text": "old fault"}], [legacy], 1000, 3
+    )
+    for now in (1030, 1060, 1090):
+        _, items, notes, checked = hwmon.fan_status(
+            [row], {"default": {"min_rpm": 300}}, known={"controller fan1"}
+        )
+        assert len(items) == 1 and "below its 300 RPM" in items[0]["text"]
+        assert "key" not in items[0] and checked == []
+        assert "cannot be tracked" in notes[0]
+        known, events = server.track_alarms(known, items, checked, now, 3)
+        assert events == [] and known[legacy]["since"] == 1000
+    _, alarms, notes, _ = hwmon.fan_status(
+        [row], {"controller fan1": {"min_rpm": 300, "on_low": "note"}}
+    )
+    assert alarms == [] and any("below its 300 RPM" in note for note in notes)
+    assert not any("choose a stable id" in note for note in notes)
+
+
+def test_huge_integer_minimum_is_reported_as_invalid_configuration() -> None:
+    import hwmon
+
+    huge = 10**1000
+    assert hwmon._minimum({"min_rpm": huge}) is None
+    _, alarms, notes, checked = hwmon.fan_status(
+        [fan("cpu", 0)], {"default": {"min_rpm": huge}}
+    )
+    assert alarms == [] and checked == []
+    assert any("not a number" in note for note in notes)

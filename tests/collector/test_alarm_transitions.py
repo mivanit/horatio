@@ -96,8 +96,12 @@ def test_gpu_unavailable_field_holds_independently(
     }
     unknown = runner.collect(csv=gpu_csv(**fields))[0]
     healthy = runner.collect(csv=gpu_csv())[0]
-    transition(tracker, fault, unknown, healthy, f"gpu/0/{key}")
-    other = "gpu/0/retired_pages" if field == "ecc" else "gpu/0/ecc"
+    transition(tracker, fault, unknown, healthy, f"gpu/pci/0000:01:00.0/{key}")
+    other = (
+        "gpu/pci/0000:01:00.0/retired_pages"
+        if field == "ecc"
+        else "gpu/pci/0000:01:00.0/ecc"
+    )
     assert covered(unknown, other)
 
 
@@ -107,9 +111,10 @@ def test_gpu_missing_limits_hold_but_disabled_rule_clears(tracker: ModuleType) -
     fault = runner.collect(csv=gpu_csv(core=69), temperature=limit)[0]
     unknown = runner.collect(csv=gpu_csv(core=60), temperature="")[0]
     healthy = runner.collect(csv=gpu_csv(core=60), temperature=limit)[0]
-    transition(tracker, fault, unknown, healthy, "gpu/0/temp/core")
+    transition(tracker, fault, unknown, healthy, "gpu/pci/0000:01:00.0/temp/core")
     assert covered(
-        runner.collect(config={"gpu_temp_alarm_margin_c": None})[0], "gpu/0/temp/core"
+        runner.collect(config={"gpu_temp_alarm_margin_c": None})[0],
+        "gpu/pci/0000:01:00.0/temp/core",
     )
 
 
@@ -217,3 +222,51 @@ def test_missing_psu_reading_keeps_role_without_confusing_amps() -> None:
         (None, True),
         (None, False),
     ]
+
+
+def test_gpu_identity_survives_index_changes_and_holds_legacy_evidence(
+    tracker: ModuleType,
+) -> None:
+    runner = SensorCapture()
+    fault = runner.collect(
+        csv=gpu_csv(index=0, bus="00000000:01:00.0", ecc=5)
+        + gpu_csv(index=1, bus="00000000:02:00.0")
+    )[0]
+    survivor = runner.collect(csv=gpu_csv(index=0, bus="00000000:02:00.0"))[0]
+    physical = "gpu/pci/0000:01:00.0/ecc"
+    legacy = "gpu/0/ecc"
+    known, _ = tracker.track_alarms(
+        {},
+        fault["alarm_items"] + [{"key": legacy, "text": "legacy ECC fault"}],
+        fault["checked"],
+        1000,
+        3,
+    )
+    for now in (1060, 1120, 1180):
+        known, events = tracker.track_alarms(
+            known, survivor["alarm_items"], survivor["checked"], now, 3
+        )
+        assert events == []
+        assert known[physical]["since"] == known[legacy]["since"] == 1000
+        assert (
+            "unchecked_since" in known[physical] and "unchecked_since" in known[legacy]
+        )
+    returned = runner.collect(csv=gpu_csv(index=1, bus="0000:01:00.0", ecc=5))[0]
+    known, events = tracker.track_alarms(
+        known, returned["alarm_items"], returned["checked"], 1240, 3
+    )
+    assert events == [] and known[physical]["since"] == 1000
+    healthy = runner.collect(csv=gpu_csv(index=1, bus="00000000:01:00.0"))[0]
+    for now in (1300, 1360, 1420):
+        known, events = tracker.track_alarms(
+            known, healthy["alarm_items"], healthy["checked"], now, 3
+        )
+    assert physical not in known and legacy in known
+    assert [e["key"] for e in events if e["event"] == "cleared"] == [physical]
+
+
+def test_unreadable_gpu_bus_identity_does_not_check_index_alarms() -> None:
+    state = SensorCapture().collect(csv=gpu_csv(bus="[N/A]", ecc=5))[0]
+    assert state["gpus"] == []
+    assert any("invalid PCI bus identity" in text for text in state["alarms"])
+    assert not any(prefix.startswith("gpu/") for prefix in state["checked"])

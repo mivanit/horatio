@@ -204,6 +204,25 @@ end
 local function busy(result)
     return type(result) == "table" and result.status == "skipped" and result.reason == "busy"
 end
+
+do
+    local h, m = fixture("sensor-identities")
+    m.sensors = function() return {
+        {type = "temperature_core", label = "Composite", key = "Composite [device-a/temp1]", value = 41},
+        {type = "temperature_core", label = "Composite", key = "Composite [device-b/temp1]", value = 42},
+        {type = "temperature_core", label = "unknown", key = false, value = 43},
+        {type = "temperature_core", label = "legacy", value = 44},
+    } end
+    local result = h.record_now()
+    local temps = result.record and result.record.temps or {}
+    check(result.status == "ok" and temps["Composite [device-a/temp1]"] == 41
+        and temps["Composite [device-b/temp1]"] == 42 and temps.legacy == 44
+        and temps.Composite == nil and temps.unknown == nil,
+        "temperature history uses stable keys without overwriting duplicate labels")
+    local settings = h.get_settings()
+    check(settings.editable == false and settings.detail:find("www/config.json", 1, true),
+        "Lua advertises settings as read-only with configuration instructions")
+end
 local function in_child(fn)
     -- Flush before fork so a child's normal exit cannot duplicate prior output.
     io.stdout:flush(); io.stderr:flush()

@@ -360,7 +360,9 @@ def test_mail_cache_unit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     assert server._get_mail_cached()["count"] == 3 and len(reads) == 3, "unchanged"
     spool.write_text("From a\n\nFrom b\n\n")
     assert server._get_mail_cached()["count"] == 4, "a changed spool is re-read"
-    spool.chmod(0o600)  # e.g. fixing an unreadable spool: mtime and size unchanged
+    spool.chmod(
+        (spool.stat().st_mode & 0o777) ^ 0o040
+    )  # change access, whatever the umask
     assert server._get_mail_cached()["count"] == 5, "a permission change is re-read"
 
 

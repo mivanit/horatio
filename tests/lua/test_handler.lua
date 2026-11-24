@@ -16,6 +16,7 @@ end
 local record_checks = {}
 package.preload["history"] = function()
     return {init = function() end,
+        get_settings = function() return {editable = false, detail = "Edit www/config.json"} end,
         maybe_record = function(scheduled) record_checks[#record_checks + 1] = scheduled end}
 end
 
@@ -34,6 +35,7 @@ for _, case in ipairs({
     {"GET", "/missing", 404, "Not Found"},
     {"GET", "/history/record", 405, "Method Not Allowed"},
     {"POST", "/history/settings", 501, "Not Implemented"},
+    {"GET", "/history/settings", 200, "OK", {'"editable":false', 'www/config.json'}},
     {"GET", "/4/cpu", 500, "Internal Server Error"},
     -- Byte totals cross OpenWrt Lua's signed 32-bit integer boundary. These
     -- must remain exact JSON numbers for memory, swap, and storage cards.
@@ -42,7 +44,7 @@ for _, case in ipairs({
     {"GET", "/4/fs", 200, "OK", {'"size":8589934592', '"used":4294967296'}},
     -- Same contract as the Python backend; a router checkout has no build.
     {"GET", "/version", 200, "OK", {'"version":"' .. version .. '"', '"build":null'}},
-    {"GET", "/list-endpoints", 200, "OK", {'"/version"', '"backend":"lua"'}},
+    {"GET", "/list-endpoints", 200, "OK", {'"/version"', '"backend":"lua"', '"history_metrics"', '"drive-usage"'}},
     {"GET", "/history/tick", 200, "OK", {'"status":"ok"'}},
 }) do
     output = {}
