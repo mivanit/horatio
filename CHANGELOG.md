@@ -5,6 +5,19 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- Alarm recovery requires readable evidence for each rule. Missing BMC/GPU,
+  SMART, RAID and memory readings retain earlier alarms; per-device fan and ECC
+  alarms survive partial device inventories. NVIDIA driver mismatches remain
+  alarms even when the installed library version cannot be inferred.
+- Linux fan rules now use physical device/channel ids from `/api/4/sensors`, or
+  aliases of those ids. Existing display-name rules need a configuration update;
+  they cannot silently move to another fan. Defaults still apply to all fans.
+- Hardware findings and history remain visible without the main health snapshot.
+  Host/ZFS checks refresh in the tracker, with pending/stale status in the API.
+  Starting or canceling a scrub does not clear an overdue scrub alarm, and older
+  ZFS versions retain discovered pools for missing-pool detection.
+- Power normalization rejects incomplete PSU sums. Stacked history handles known
+  legacy total labels per record, without rewriting old history files.
 - The server raises its own host alarms, in `/api/alarms` and on the Hardware card:
   `/run/reboot-required` (a note, an alarm after a week), an NVIDIA kernel module that
   no longer matches the installed library (at once; the text says whether a reboot fixes

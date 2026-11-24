@@ -4838,7 +4838,8 @@ def _sensor_hidden(label: str) -> bool:
     names: list[str] = [label, TEMP_LABELS.get(label, label)]
     if label.startswith("@") and label.count("/") >= 2:
         _, chip, channel = label.rsplit("/", 2)
-        names.append(f"{chip} {channel}")
+        friendly: str = f"{chip} {channel}"
+        names.extend((friendly, TEMP_LABELS.get(friendly, friendly)))
     return any(p.match(n) for p in _SENSOR_HIDE for n in names)
 
 
@@ -5034,6 +5035,12 @@ def collector_power_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     if (
         psu
         and all(_number(r.get("value")) and r.get("unit") == "W" for r in psu)
+        and not any(
+            isinstance(item, dict)
+            and str(item.get("key", "")).split("#", 1)[0]
+            in ("capture/power", "unparsed/power")
+            for item in snapshot.get("alarm_items") or []
+        )
         and not any(row["total"] for row in rows)
     ):
         rows.append(
