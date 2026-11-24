@@ -293,7 +293,7 @@ horatio/
 ├── VERSION, CHANGELOG.md        # the release number and what each release changed
 ├── collector/                   # root collectors, their units, config example, alarm table
 ├── nginx/                       # optional reverse proxy with subdomains per service
-├── lua/                         # Lua backend; uhttpd deployment on OpenWrt
+├── lua/                         # Lua backend; separate Linux/systemd and OpenWrt installers
 ├── openwrt/install.sh            # compatibility entrypoint for older installations
 ├── logs/                        # runtime: history.jsonl, server.log, glances.log
 └── pyproject.toml, uv.lock
@@ -338,8 +338,9 @@ make test PYTEST_ARGS='-k history -v'          # select tests by name
 ```
 
 The default suite does not require Lua. `make test-lua` and `make check-all`
-fail explicitly if native dependencies are unavailable; they never silently
-skip the Lua checks. CI runs both suites in separate jobs.
+fail explicitly if the native Lua/Nixio dependencies are unavailable. The additional
+HTTP runtime tests require `LUA_RUNTIME`; they are skipped when it is unset and run
+in a separate CI job that builds the private Linux runtime.
 
 [GitHub Actions](.github/workflows/check.yml) runs these Make targets on pushes,
 pull requests, and manual dispatches. Formatting, typing, Linux tests, and native
@@ -364,11 +365,50 @@ The collectors are tested against hand-written fixture directories; recipe in
 
 ### Lua backend
 
-A small Lua backend serves the same frontend on OpenWrt routers without Python or Glances,
-reading `/proc` and `/sys` directly. The backend is named Lua; its current installer
-and HTTP hosting still depend on OpenWrt's UCI, procd and uhttpd. It provides the
-core metrics and history subset, not the Python backend's GPU, host-alarm or
-root-collector features:
+A small Lua backend serves the same frontend without Python or Glances, reading
+Linux `/proc` and `/sys` directly. Both installers use uhttpd and the same Lua
+metrics/history implementation. It provides core CPU, memory, network, filesystem,
+temperature and history data; it does not collect the Python backend's GPU, fan,
+power, host-alarm or root-collector data.
+
+On ordinary Linux with systemd, run as the user who owns the checkout:
+
+```bash
+# Build prerequisites on Debian/Ubuntu (use equivalent packages on other distros):
+sudo apt-get install build-essential cmake pkg-config curl ca-certificates libcrypt-dev wget
+sh lua/install-linux.sh
+# Optional: listen on a specific LAN address instead of the default loopback address.
+LISTEN_ADDRESS=192.168.1.10 PORT=8080 sh lua/install-linux.sh
+# Update code, then reinstall (repeat any LISTEN_ADDRESS/PORT overrides):
+git pull && sh lua/install-linux.sh
+sh lua/install-linux.sh --uninstall
+```
+
+The installer builds pinned Lua, Nixio, JSON and uhttpd dependencies privately in
+`.lua-runtime/`; it does not install OpenWrt's package manager, UCI or procd. A changed
+build recipe triggers a rebuild. Building needs a C toolchain and internet access;
+running needs neither Python nor development packages. The supported service manager
+is systemd; package installation instructions above are for Debian/Ubuntu. Other
+systemd distributions need equivalent build prerequisites installed first.
+
+To build and test the runtime without installing a systemd service:
+
+```bash
+sh scripts/setup-lua-runtime.sh /tmp/horatio-lua-runtime
+LUA_RUNTIME=/tmp/horatio-lua-runtime uv run --locked pytest tests/lua/test_runtime.py
+```
+
+The service is `horatio-lua.service`, runs as the installing user, and defaults to
+`127.0.0.1:8080`. It serves only `www/`, with directory listings disabled. Use
+`journalctl -u horatio-lua.service` for diagnostics and
+`sudo systemctl restart horatio-lua.service` after editing `www/config.json`.
+`horatio-lua-history.timer` requests a history tick every five minutes. Uninstall
+removes the services and keeps the checkout, runtime, config and history. Python
+and Lua cannot share a listening port or write the same history concurrently; use
+separate checkouts and ports when comparing them. Lua HTTP has no authentication;
+use a trusted network or an authenticated reverse proxy for access beyond loopback.
+
+On OpenWrt, use its separate installer:
 
 ```bash
 cd lua

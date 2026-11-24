@@ -1,5 +1,6 @@
 TODO.md
 .venv/
+.lua-runtime/
 logs/
 static/chart.umd.min.js
 .password

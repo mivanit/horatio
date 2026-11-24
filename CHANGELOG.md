@@ -5,6 +5,10 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- The Lua backend has a separate Linux/systemd installer, alongside its OpenWrt
+  installer. Native dependencies are built in the checkout, the service runs as
+  the installing user, and a systemd timer records history while the dashboard is closed.
+
 - Source layout: Python modules live in `python/`, and the lightweight Lua backend
   lives in `lua/`. Config, credentials, logs and frontend assets stay at the root;
   the served `/tui.py` URL stays the same. The installer updates the Python service

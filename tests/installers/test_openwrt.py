@@ -125,9 +125,11 @@ class TestOpenWrtInstaller:
         script = script.replace("/etc/init.d/uhttpd", "test-uhttpd-service")
         script = script.replace("/etc/init.d/cron", "test-cron-service")
         script = script.replace("/etc/crontabs", str(self.root / "crontabs"))
-        script = re.sub(
-            r'CHARTJS_SHA256="[a-f0-9]+"', f'CHARTJS_SHA256="{ASSET_HASH}"', script
+        helper = (ROOT / "lua/prepare-web.sh").read_text()
+        helper = re.sub(
+            r'CHARTJS_SHA256="[a-f0-9]+"', f'CHARTJS_SHA256="{ASSET_HASH}"', helper
         )
+        (self.root / "lua/prepare-web.sh").write_text(helper)
         self.script: Path = self.root / "lua/install.sh"
         self.script.write_text(script)
         mock: Path = self.bin / "mock"
@@ -308,7 +310,7 @@ class TestOpenWrtInstaller:
         for key in ("CHARTJS_VERSION", "CHARTJS_SHA256"):
             pattern: str = rf'^{key}="([^"]+)"$'
             router: re.Match[str] | None = re.search(
-                pattern, (ROOT / "lua/install.sh").read_text(), re.MULTILINE
+                pattern, (ROOT / "lua/prepare-web.sh").read_text(), re.MULTILINE
             )
             linux: re.Match[str] | None = re.search(
                 pattern, (ROOT / "install.sh").read_text(), re.MULTILINE
