@@ -90,6 +90,73 @@ def test_degraded_with_errors_alarms_on_state_and_errors() -> None:
     assert found.alarms[1]["value"] > 0
 
 
+@pytest.mark.parametrize(
+    "state", ["FAULTED", "UNAVAIL", "OFFLINE", "DEGRADED", "REMOVED"]
+)
+def test_unhealthy_idle_spare_alarms_without_io_counters(state: str) -> None:
+    raw = json.loads(fixture("healthy"))
+    raw["pools"]["tank"]["spares"] = {"spare-disk": {"guid": 333, "state": state}}
+    found, summary = check(zpool(json.dumps(raw)))
+    assert keys(found) == ["zfs/tank/spare/333/state"]
+    assert found.alarms[0]["value"] == state
+    assert "spare-disk" in found.alarms[0]["text"]
+    assert "zfs/tank/errors" in found.checked
+    assert summary["pools"][0]["state"] == "ONLINE"
+    assert summary["pools"][0]["errors"] == 0
+    assert found.notes == []
+
+
+@pytest.mark.parametrize("healthy_state", ["AVAIL", "INUSE"])
+def test_spare_fault_holds_without_evidence_and_clears_for_same_guid(
+    healthy_state: str,
+) -> None:
+    import server
+
+    raw = json.loads(fixture("healthy"))
+    pool = raw["pools"]["tank"]
+    pool["spares"] = {"old-path": {"guid": 333, "state": "FAULTED"}}
+    first, _ = check(zpool(json.dumps(raw)))
+    key = "zfs/tank/spare/333/state"
+    now = SCRUBBED + DAY
+    known, _ = server.track_alarms({}, first.alarms, first.checked, now, 3)
+
+    for inventory in (
+        {},
+        {"old-path": {"guid": 444, "state": healthy_state}},
+        {"new-path": {"guid": 333}},
+        {"new-path": {"guid": 333, "state": "UNKNOWN"}},
+        {"new-path": {"guid": 333, "state": None}},
+        {"new-path": {"state": healthy_state}},
+        None,
+    ):
+        pool["spares"] = inventory
+        unknown, _ = check(zpool(json.dumps(raw)))
+        assert key not in unknown.checked
+        for _ in range(3):
+            now += 60
+            known, events = server.track_alarms(
+                known, unknown.alarms, unknown.checked, now, 3
+            )
+            assert events == []
+            assert known[key]["since"] == SCRUBBED + DAY
+
+    # A changed path and string-form GUID still identify the original spare.
+    pool["spares"] = {"new-path": {"guid": "333", "state": healthy_state}}
+    healthy, summary = check(zpool(json.dumps(raw)))
+    assert healthy.alarms == [] and healthy.notes == []
+    assert key in healthy.checked and "zfs/tank/errors" in healthy.checked
+    assert summary["pools"][0]["errors"] == 0
+    for step in range(3):
+        now += 60
+        known, events = server.track_alarms(
+            known, healthy.alarms, healthy.checked, now, 3
+        )
+        if step < 2:
+            assert key in known and events == []
+    assert key not in known
+    assert [(event["event"], event["key"]) for event in events] == [("cleared", key)]
+
+
 def test_never_scrubbed_and_overdue_are_alarms_a_scrub_running_is_a_note() -> None:
     found, _ = check(zpool(fixture("never-scrubbed")))
     assert keys(found) == ["zfs/tank/never-scrubbed"]

@@ -95,6 +95,7 @@ class TestGPUSensors:
         basic: dict[str, str | int] | None = None,
         config: dict[str, Any] | None = None,
         files: dict[str, str] | None = None,
+        installed: bool = True,
     ) -> tuple[dict[str, Any], list[list[str]]]:
         """`files` are written into the stage after the real GPU capture has run,
         so a test can supply BMC tables or overwrite a capture's .err sidecar."""
@@ -108,7 +109,7 @@ class TestGPUSensors:
             replies: dict[str, Any] = {
                 "extended": extended
                 if extended is not None
-                else {"stdout": csv or gpu_csv()},
+                else {"stdout": csv if csv is not None else gpu_csv()},
                 "basic": basic
                 if basic is not None
                 else {"stdout": gpu_csv(counters=False)},
@@ -117,9 +118,11 @@ class TestGPUSensors:
             (stage / "replies.json").write_text(json.dumps(replies))
             fake_bin: Path = stage / "bin"
             fake_bin.mkdir()
-            command: Path = fake_bin / "nvidia-smi"
-            command.write_text(f"#!{sys.executable}\n{FAKE_SMI}")
-            command.chmod(0o755)
+            if installed:
+                command: Path = fake_bin / "nvidia-smi"
+                command.write_text(f"#!{sys.executable}\n{FAKE_SMI}")
+                command.chmod(0o755)
+            (fake_bin / "python3").symlink_to(sys.executable)
             # Records each limit it is given, then runs the command without one.
             fake_timeout: Path = fake_bin / "timeout"
             fake_timeout.write_text(
@@ -128,14 +131,16 @@ class TestGPUSensors:
             fake_timeout.chmod(0o755)
             env: dict[str, str] = dict(
                 os.environ,
-                PATH=f"{fake_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+                PATH=f"{fake_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+                if installed
+                else str(fake_bin),
                 HEALTH_CONFIG=str(stage / "config.json"),
                 FAKE_SMI_REPLIES=str(stage / "replies.json"),
                 FAKE_SMI_CALLS=str(stage / "calls.jsonl"),
             )
             subprocess.run(
                 [
-                    "bash",
+                    "/bin/bash",
                     "-c",
                     'set -uo pipefail\ntmp="$1"\n' + GPU_CAPTURE,
                     "bash",
@@ -166,9 +171,17 @@ class TestGPUSensors:
             assert len({i["key"] for i in items}) == len(items), items
             calls: list[list[str]] = [
                 json.loads(line)
-                for line in (stage / "calls.jsonl").read_text().splitlines()
+                for line in (
+                    (stage / "calls.jsonl").read_text().splitlines()
+                    if (stage / "calls.jsonl").exists()
+                    else []
+                )
             ]
-            self.timeouts: list[str] = (stage / "timeouts").read_text().split()
+            self.timeouts: list[str] = (
+                (stage / "timeouts").read_text().split()
+                if (stage / "timeouts").exists()
+                else []
+            )
             return state, calls
 
     def test_gpu_timeout_comes_from_config(self: TestGPUSensors) -> None:
@@ -234,6 +247,7 @@ class TestGPUSensors:
                         "GPU 0: 3 uncorrected ECC errors since driver load",
                         "GPU 0: retired pages pending",
                     ]
+                    assert "gpu/driver-mismatch" in state["checked"]
                     assert len(calls) == 3
                     assert "temperature.memory" in calls[1][0]
                     assert "clocks_event_reasons_counters" not in calls[1][0]
@@ -302,6 +316,89 @@ class TestGPUSensors:
         assert [
             limits[key] for key in ("shutdown", "slowdown", "max_op", "mem_max_op")
         ] == [100, 90, 85, 87]
+
+    @pytest.mark.parametrize(
+        "core,alarms", [(86, []), (87, ["GPU 0: core 87 C >= slowdown 90 C - 3"])]
+    )
+    def test_core_falls_back_to_slowdown_without_a_max_operating_limit(
+        self: TestGPUSensors, core: int, alarms: list[str]
+    ) -> None:
+        state, _ = self.collect(
+            csv=gpu_csv(core=core, memory=99),
+            temperature="GPU 00000000:01:00.0\n    GPU Slowdown Temp : 90 C\n",
+        )
+        assert state["alarms"] == alarms
+        assert "gpu/pci/0000:01:00.0/temp/core" in state["checked"]
+        assert "gpu/pci/0000:01:00.0/temp/memory" not in state["checked"]
+        assert "gpu/pci/0000:01:00.0/temp/tlimit" not in state["checked"]
+
+    @pytest.mark.parametrize("current,threshold", [("N/A", "0"), ("1", "N/A")])
+    def test_incomplete_tlimit_pair_allows_slowdown_fallback(
+        self: TestGPUSensors, current: str, threshold: str
+    ) -> None:
+        state, _ = self.collect(
+            csv=gpu_csv(core=88),
+            temperature=tlimit_text(current, threshold)
+            + "    GPU Slowdown Temp : 90 C\n",
+        )
+        assert state["alarms"] == ["GPU 0: core 88 C >= slowdown 90 C - 3"]
+        assert "gpu/pci/0000:01:00.0/temp/tlimit" not in state["checked"]
+
+    def test_usable_tlimit_and_absolute_limits_take_precedence_over_slowdown(
+        self: TestGPUSensors,
+    ) -> None:
+        state, _ = self.collect(
+            csv=gpu_csv(core=99),
+            temperature=tlimit_text("9", "0") + "    GPU Slowdown Temp : 90 C\n",
+        )
+        assert state["alarms"] == []
+        assert "gpu/pci/0000:01:00.0/temp/tlimit" in state["checked"]
+        assert "gpu/pci/0000:01:00.0/temp/core" not in state["checked"]
+        state, _ = self.collect(
+            csv=gpu_csv(core=99),
+            temperature="GPU 00000000:01:00.0\n    GPU Max Operating Temp : 85 C\n    GPU Slowdown Temp : 90 C\n",
+        )
+        assert state["alarms"] == ["GPU 0: core 99 C >= max operating 85 C - 3"]
+
+    def test_slowdown_fallback_obeys_custom_and_disabled_margin(
+        self: TestGPUSensors,
+    ) -> None:
+        limits = "GPU 00000000:01:00.0\n    GPU Slowdown Temp : 90 C\n"
+        state, _ = self.collect(
+            csv=gpu_csv(core=85),
+            temperature=limits,
+            config={"gpu_temp_alarm_margin_c": 5},
+        )
+        assert state["alarms"] == ["GPU 0: core 85 C >= slowdown 90 C - 5"]
+        state, _ = self.collect(
+            csv=gpu_csv(core=99, sw="Active"),
+            temperature=limits,
+            config={"gpu_temp_alarm_margin_c": None},
+        )
+        assert state["alarms"] == ["GPU 0: thermal slowdown active (sw)"]
+        assert "gpu/pci/0000:01:00.0/temp" in state["checked"]
+
+    @pytest.mark.parametrize("capture", ["gpu", "gpu-temp"])
+    def test_failed_capture_cannot_clear_a_slowdown_temperature_alarm(
+        self: TestGPUSensors, capture: str
+    ) -> None:
+        state, _ = self.collect(
+            temperature="GPU 00000000:01:00.0\n    GPU Slowdown Temp : 90 C\n",
+            files={f"{capture}.err": "exit 124\n"},
+        )
+        assert "gpu/pci/0000:01:00.0/temp/core" not in state["checked"]
+        assert state["alarms"] == [f"collector: {capture}: exit 124"]
+
+    @pytest.mark.parametrize("core,slowdown", [("N/A", "90"), ("60", "N/A")])
+    def test_slowdown_fallback_needs_both_numeric_fields(
+        self: TestGPUSensors, core: str, slowdown: str
+    ) -> None:
+        state, _ = self.collect(
+            csv=gpu_csv(core=core),
+            temperature=f"GPU 00000000:01:00.0\n    GPU Slowdown Temp : {slowdown} C\n",
+        )
+        assert state["alarms"] == []
+        assert "gpu/pci/0000:01:00.0/temp/core" not in state["checked"]
 
     def test_old_and_new_tlimit_labels_use_relative_threshold(
         self: TestGPUSensors,
@@ -489,6 +586,32 @@ class TestGPUSensors:
         assert [a["key"] for a in state["alarm_items"]] == ["gpu/driver-mismatch"]
         assert "version mismatch" in state["alarms"][0]
         assert state["gpus"] == []
+        assert "gpu/driver-mismatch" not in state["checked"]
+
+    @pytest.mark.parametrize("csv", ["", "malformed\n", gpu_csv(bus="N/A")])
+    def test_successful_capture_checks_driver_mismatch_without_valid_gpu_rows(
+        self: TestGPUSensors, csv: str
+    ) -> None:
+        state, _ = self.collect(csv=csv)
+        assert state["gpus"] == []
+        assert "gpu/driver-mismatch" in state["checked"]
+        assert not any(key.startswith("gpu/pci/") for key in state["checked"])
+
+    def test_missing_nvidia_tool_does_not_check_driver_mismatch(
+        self: TestGPUSensors,
+    ) -> None:
+        state, calls = self.collect(installed=False)
+        assert calls == [] and self.timeouts == []
+        assert state["gpus"] == [] and state["alarms"] == []
+        assert "gpu/driver-mismatch" not in state["checked"]
+
+    @pytest.mark.parametrize("status", [9, 124])
+    def test_failed_nvidia_capture_does_not_check_driver_mismatch(
+        self: TestGPUSensors, status: int
+    ) -> None:
+        state, _ = self.collect(extended={"status": status})
+        assert "gpu/driver-mismatch" not in state["checked"]
+        assert state["alarms"] == [f"collector: gpu: exit {status}"]
 
 
 def test_power_rows_say_their_unit_and_which_is_the_total(tmp_path: Path) -> None:

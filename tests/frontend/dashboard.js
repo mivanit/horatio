@@ -477,9 +477,25 @@ function testTempLabelsAndLimits() {
   assert.equal(context.tempDisplayLabel(fan, 'amdgpu fan1'), 'Front GPU fan', 'an id alias takes precedence');
   delete context.dashboardConfig.sensor_labels[fan];
   assert.equal(context.tempDisplayLabel(fan, 'amdgpu fan1'), 'Original fan alias', 'display aliases do not require migration to ids');
+  assert.equal(context.tempDisplayLabel(fan, 'Processor Fan'), 'Processor Fan', 'an available kernel label wins over an id-built name');
+  const otherFan = fan.replace('01:00.0', '02:00.0');
+  const matchingFans = plain(context.sensorDisplayLabels([fan, otherFan], ['Processor Fan', 'Processor Fan']));
+  assert.notEqual(matchingFans[0], matchingFans[1], 'same-label fans remain distinguishable');
+  assert(matchingFans.every(label => label.startsWith('Processor Fan [')));
   assert.equal(context.tempDisplayLabel('legacy fan'), 'legacy fan');
   const composite = 'Composite [pci0000:00/0000:01:00.0/temp1]';
-  assert.equal(context.tempDisplayLabel(composite), composite, 'unaliased devices retain distinct labels');
+  assert.equal(context.tempDisplayLabel(composite), 'Composite', 'an unambiguous history label hides its physical path');
+  assert.equal(context.abbreviateSensorLabel(composite), 'NVMe');
+  assert.equal(context.abbreviateSensorLabel('Package id 0 [platform/coretemp.0/temp1]'), 'Pkg');
+  context.dashboardConfig.temp_thresholds.Composite = 65;
+  assert.equal(context.tempLimitFor(composite), 65, 'qualified history keys retain plain-name thresholds');
+  context.dashboardConfig.temp_thresholds[composite] = 75;
+  assert.equal(context.tempLimitFor(composite), 75, 'an identity-specific threshold takes precedence');
+  const otherComposite = composite.replace('01:00.0', '02:00.0');
+  assert.deepEqual(plain(context.sensorDisplayLabels([composite, otherComposite])), [composite, otherComposite],
+    'duplicate display names retain distinguishing physical identities');
+  assert.deepEqual(plain(context.sensorDisplayLabels(['Composite', composite])), ['Composite', composite],
+    'legacy and new series remain separate');
   context.dashboardConfig.sensor_labels.Composite = 'Drive temperature';
   assert.equal(context.tempDisplayLabel(composite), 'Drive temperature', 'Lua physical keys preserve old display aliases');
   context.dashboardConfig.sensor_labels[composite] = 'Primary drive';
@@ -807,7 +823,7 @@ function testPowerFromHwmonAndTotals() {
   assert.equal(context.elements.get('power-value').textContent, '≥ 64 W', 'older collectors without role flags are conservative too');
   context.sensors.data.find(s => s.type === 'fan_speed').id = '@platform/controller0/acme/fan1';
   context.tickTemps();
-  assert.deepEqual(plain(context.charts.fans.data.labels), ['acme fan1 (controller0)']);
+  assert.deepEqual(plain(context.charts.fans.data.labels), ['f71889ed fan1']);
   context.dashboardConfig.sensor_labels = { 'f71889ed fan1': 'CPU fan' };
   context.tickTemps();
   assert.deepEqual(plain(context.charts.fans.data.labels), ['CPU fan']);
@@ -1910,7 +1926,7 @@ function testHardwareIndependentSources() {
 function testPowerHistoryPerRecord() {
   const context = liveContext([]);
   Object.assign(context, {
-    HISTORY_METRICS: { power: { perDevice: true, unit: ' W' }, fans: { perDevice: true, unit: ' RPM' } },
+    HISTORY_METRICS: { power: { perDevice: true, unit: ' W' }, fans: { perDevice: true, unit: ' RPM' }, temps: { perDevice: true, unit: '°C' } },
     CHART_TICK: {}, CHART_GRID: {}, CHART_FONT_SIZE: 16, HISTORY_AXIS_WIDTH: 84, HISTORY_PLOT_INSET: 8,
     axisNumber: v => v,
     Chart: class { constructor(canvas, chart) { return chart; } },
@@ -1956,6 +1972,13 @@ function testPowerHistoryPerRecord() {
     { timestamp: old.timestamp, fans: { [fanId]: 1200, 'legacy fan': 800 } },
   ]);
   assert.deepEqual(plain(individual.data.datasets.map(d => d.label)), ['amdgpu fan1 (0000:01:00.0)', 'legacy fan']);
+  const physical = 'Composite [pci0000:00/0000:01:00.0/temp1]';
+  const temperatures = records => context.createHistoryChart('canvas', 'temps', records);
+  const current = { timestamp: old.timestamp, temps: { [physical]: 43 } };
+  assert.equal(temperatures([current]).data.datasets[0].label, 'Composite', 'a lone physical series has a short legend');
+  const mixedTemps = temperatures([{ timestamp: old.timestamp, temps: { Composite: 40 } }, current]);
+  assert.deepEqual(plain(mixedTemps.data.datasets.map(d => d.label)), ['Composite', physical]);
+  assert.deepEqual(plain(mixedTemps.data.datasets.map(d => d.data)), [[40, null], [null, 43]], 'display polish never joins old and new identities');
 }
 
 async function testHistoryCapabilities() {

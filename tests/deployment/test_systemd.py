@@ -138,7 +138,11 @@ def installed_host() -> Iterator[Path]:
         assert not Path(path).exists(), f"refusing existing installation: {path}"
     for port in (8080, 61208):
         with socket.socket() as probe:
+            # A stopped server can leave connections in TIME_WAIT. Match the
+            # servers' reuse setting while still rejecting an active listener.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe.bind(("127.0.0.1", port))
+            probe.listen()
     # A /tmp checkout would evade the ProtectHome/managed-interpreter regression.
     with tempfile.TemporaryDirectory(
         prefix="horatio-deployment-", dir=Path.home()

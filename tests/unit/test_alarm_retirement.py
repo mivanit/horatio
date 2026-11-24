@@ -309,8 +309,9 @@ def test_tracker_observation_and_retirement_cannot_overwrite_each_other(
     assert not any(event["event"] == "retired" for event in server._read_events())
 
 
+@pytest.mark.parametrize("cancellations", [1, 3])
 def test_cancelled_tracker_finishes_save_before_retirement(
-    payload: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    payload: dict[str, Any], monkeypatch: pytest.MonkeyPatch, cancellations: int
 ) -> None:
     import server
 
@@ -337,16 +338,82 @@ def test_cancelled_tracker_finishes_save_before_retirement(
         tracker = asyncio.create_task(server.track_alarms_once())
         try:
             assert await asyncio.to_thread(saving.wait, 5)
-            tracker.cancel()
             retirement = asyncio.create_task(server.retire_alarm(request(payload)))
-            await asyncio.sleep(0)
-            assert server._alarm_update_lock.locked()
+            for attempt in range(cancellations):
+                tracker.cancel(f"stop tracker {attempt}")
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                assert server._alarm_update_lock.locked()
+                assert not tracker.done() and not retirement.done()
         finally:
             release.set()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError, match="stop tracker 0"):
             await tracker
         assert (await retirement).status_code == 200
 
     asyncio.run(interrupted())
     assert KEY not in server._alarm_memory["dashboard"]["alarms"]
     assert server._load_alarm_memory() == server._alarm_memory
+
+
+def test_failed_save_does_not_replace_tracker_cancellation(
+    payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import server
+
+    saving = threading.Event()
+    release = threading.Event()
+
+    def failed_save(memory: dict[str, Any]) -> None:
+        saving.set()
+        if not release.wait(5):
+            raise RuntimeError("test did not release tracker save")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(server, "_save_alarm_memory", failed_save)
+    monkeypatch.setattr(
+        server, "_server_findings_or_none", lambda: {"alarm_items": [], "checked": []}
+    )
+    monkeypatch.setattr(server.time, "time", lambda: STAMP + 120)
+    server._alarm_memory_saved = 0
+
+    async def interrupted() -> None:
+        tracker = asyncio.create_task(server.track_alarms_once())
+        try:
+            assert await asyncio.to_thread(saving.wait, 5)
+            tracker.cancel("shutdown")
+            await asyncio.sleep(0)
+            assert server._alarm_update_lock.locked()
+        finally:
+            release.set()
+        # OSError here would be caught by alarm_tracker, restarting its loop
+        # while lifespan waits indefinitely for the cancelled tracker to exit.
+        with pytest.raises(asyncio.CancelledError, match="shutdown"):
+            await tracker
+
+    asyncio.run(interrupted())
+    assert not server._alarm_update_lock.locked()
+    assert "disk full" in caplog.text
+
+
+def test_failure_is_observed_when_cancellation_arrives_after_operation_finishes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import server
+
+    async def failed() -> None:
+        await asyncio.sleep(0)
+        raise OSError("completed save failed")
+
+    async def interrupted() -> None:
+        operation = asyncio.create_task(failed())
+        waiter = asyncio.create_task(server._finish_alarm_update(operation))
+        operation.add_done_callback(lambda done: waiter.cancel("shutdown"))
+        with pytest.raises(asyncio.CancelledError, match="shutdown"):
+            await waiter
+        assert operation.done()
+
+    asyncio.run(interrupted())
+    assert "completed save failed" in caplog.text

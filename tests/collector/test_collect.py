@@ -658,6 +658,46 @@ def test_journal_gives_each_distinct_message_its_own_alarm(tmp_path: Path) -> No
     )
 
 
+def test_journal_ignores_only_login_missing_lastlog_module(tmp_path: Path) -> None:
+    module = "pam_lastlog.so"
+    library = "/usr/lib/x86_64-linux-gnu/security/" + module
+    missing = "cannot open shared object file: No such file or directory"
+    journal = ""
+    for reference, resolved in (
+        (module, library),
+        (library, library),
+        (module, "/lib/security/" + module),
+    ):
+        for message in (
+            f"PAM unable to dlopen({reference}): {resolved}: {missing}",
+            f"PAM adding faulty module: {reference}",
+        ):
+            journal += journal_line("24T01:00:00", "login[123]", message)
+    # The removed module warning is not a blanket exemption for login/PAM:
+    # other services, dependencies, modules and load/authentication failures stay.
+    retained = [
+        ("sshd[123]", f"PAM unable to dlopen({module}): {library}: {missing}"),
+        ("login[123]", "PAM adding faulty module: pam_lastlog2.so"),
+        ("login[123]", "PAM adding faulty module: pam_lastlog.so.backup"),
+        ("login[123]", f"PAM unable to dlopen({module}): {library}: Permission denied"),
+        ("login[123]", f"PAM unable to dlopen({module}): libdependency.so: {missing}"),
+        (
+            "login[123]",
+            f"PAM unable to dlopen({module}): {library}: wrong ELF class: ELFCLASS32",
+        ),
+        ("login[123]", "pam_unix(login:auth): authentication failure"),
+        ("login[123]", "User reported: PAM adding faulty module: pam_lastlog.so"),
+    ]
+    for unit, message in retained:
+        journal += journal_line("24T01:01:00", unit, message)
+    state = collect(tmp_path, {"tmp/journal-err.txt": journal})[0]
+    assert state["journal_errors"]["count"] == len(retained)
+    assert set(state["journal_errors"]["distinct"]) == {
+        message for _, message in retained
+    }
+    assert len(state["alarms"]) == len(retained)
+
+
 def test_journal_shows_at_most_eight_messages_and_then_a_count(tmp_path: Path) -> None:
     journal: str = "".join(
         journal_line(f"24T01:{n:02d}:00", "app[1]", f"error {'abcdefghijk'[n]}")

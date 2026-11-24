@@ -121,6 +121,44 @@ def test_gpu_missing_limits_hold_but_disabled_rule_clears(tracker: ModuleType) -
     )
 
 
+def test_gpu_slowdown_fallback_requires_readable_limits_to_clear(
+    tracker: ModuleType,
+) -> None:
+    runner = SensorCapture()
+    limit = "GPU 00000000:01:00.0\n    GPU Slowdown Temp : 90 C\n"
+    fault = runner.collect(csv=gpu_csv(core=87), temperature=limit)[0]
+    healthy = runner.collect(csv=gpu_csv(core=86), temperature=limit)[0]
+    unknown = runner.collect(csv=gpu_csv(core=60), temperature="")[0]
+    failed = runner.collect(
+        csv=gpu_csv(core=60), temperature=limit, files={"gpu-temp.err": "exit 124\n"}
+    )[0]
+    key = "gpu/pci/0000:01:00.0/temp/core"
+    transition(tracker, fault, unknown, healthy, key)
+    transition(tracker, fault, failed, healthy, key)
+    assert covered(failed, "gpu/pci/0000:01:00.0/ecc")
+    disabled = runner.collect(config={"gpu_temp_alarm_margin_c": None})[0]
+    transition(tracker, fault, unknown, disabled, key)
+
+
+def test_driver_mismatch_needs_successful_capture_but_not_parsed_rows(
+    tracker: ModuleType,
+) -> None:
+    runner = SensorCapture()
+    fault = runner.collect(
+        extended={
+            "status": 18,
+            "stdout": "Failed to initialize NVML: Driver/library version mismatch\n",
+        }
+    )[0]
+    missing = runner.collect(installed=False)[0]
+    failed = runner.collect(extended={"status": 124})[0]
+    healthy = runner.collect(csv="")[0]
+    key = "gpu/driver-mismatch"
+    transition(tracker, fault, missing, healthy, key)
+    transition(tracker, fault, failed, healthy, key)
+    transition(tracker, fault, missing, runner.collect(csv="malformed\n")[0], key)
+
+
 def test_missing_dimm_does_not_clear_its_uncorrectable_error(
     tracker: ModuleType, tmp_path: Path
 ) -> None:

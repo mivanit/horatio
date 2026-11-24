@@ -12,6 +12,17 @@ import pytest
 from starlette.requests import Request
 
 
+@pytest.fixture(autouse=True)
+def collector_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_app: None
+) -> Path:
+    import server
+
+    marker = tmp_path / "collectors-disabled"
+    monkeypatch.setattr(server, "COLLECTORS_DISABLED_FILE", marker)
+    return marker
+
+
 def test_concurrent_interval_changes_leave_one_recorder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -157,13 +168,66 @@ def test_optional_collector_is_neutral_only_until_observed(
 
 
 def test_collector_discovery_failure_is_not_absence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, collector_marker: Path
 ) -> None:
     import server
 
     monkeypatch.setattr(server, "COLLECTOR_UNIT_DIRS", (tmp_path,))
+    collector_marker.touch()
     with patch.object(Path, "lstat", side_effect=PermissionError("denied")):
         assert server._collector_expected("state", {"status": "missing"})
+
+
+@pytest.mark.parametrize("source", ["state", "sensors"])
+def test_intentional_collector_removal_preserves_memory_and_reinstall_expectation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, collector_marker: Path, source: str
+) -> None:
+    import server
+
+    monkeypatch.setattr(server, "COLLECTOR_UNIT_DIRS", (tmp_path,))
+    missing = {"status": "missing"}
+    assert server._collector_expected(source, {"status": "ok"})
+    server._alarm_memory[source] = {"ts": 1, "alarms": {"fault": {"text": "held"}}}
+    remembered = json.loads(json.dumps(server._alarm_memory))
+    assert server._collector_expected(source, missing)
+
+    collector_marker.touch()
+    assert not server._collector_expected(source, missing)
+    assert server._alarm_memory == remembered and source in server._collectors_seen
+    server._collectors_seen.clear()
+    assert not server._collector_expected(source, missing), "uninstall survives restart"
+    for status in ("ok", "stale", "error"):
+        assert server._collector_expected(source, {"status": status})
+
+    unit_name = "horatio-collect" if source == "state" else "horatio-sensors"
+    unit = tmp_path / f"{unit_name}.timer"
+    unit.symlink_to("/dev/null")
+    assert server._collector_expected(source, missing), "installed/masked units win"
+    unit.unlink()
+    collector_marker.unlink()
+    assert server._collector_expected(source, missing), "reinstall restores expectation"
+    assert server._alarm_memory == remembered
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink", "unreadable"])
+def test_invalid_uninstall_marker_does_not_hide_missing_collectors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, collector_marker: Path, kind: str
+) -> None:
+    import server
+
+    monkeypatch.setattr(server, "COLLECTOR_UNIT_DIRS", (tmp_path,))
+    if kind == "directory":
+        collector_marker.mkdir()
+    elif kind == "symlink":
+        collector_marker.symlink_to(tmp_path / "missing-target")
+    else:
+        collector_marker.touch()
+
+        def denied(*args: Any, **kwargs: Any) -> Any:
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(Path, "open", denied)
+    assert server._collector_expected("state", {"status": "missing"})
 
 
 def test_sensor_api_exposes_optional_collector_expectation(
