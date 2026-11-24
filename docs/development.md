@@ -123,8 +123,9 @@ home, with the shipped systemd restrictions. Python covers fresh installation an
 v0.2.1 migration, including credentials, configuration, history and existing root
 collectors. It also uninstalls and reinstalls the collectors while the dashboard
 runs, checking neutral missing snapshots and preservation of a real journal alarm
-and history across a dashboard restart. Lua checks service restart and unattended recording by the actual
-five-minute timer; that test intentionally takes several minutes.
+and history across a dashboard restart. Lua checks service restart and unattended
+recording by the actual five-minute timer; that test intentionally takes several
+minutes.
 
 These tests install system services and require a disposable systemd host,
 passwordless sudo, the documented backend prerequisites, and a uv-managed Python

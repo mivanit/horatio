@@ -307,7 +307,9 @@ def test_python_upgrade_from_published_release(installed_host: Path) -> None:
         return True
 
     eventually(collectors_removed)
-    assert run("systemctl", "show", "horatio.service", "-p", "MainPID", "--value") == pid
+    assert (
+        run("systemctl", "show", "horatio.service", "-p", "MainPID", "--value") == pid
+    )
     assert remembered_fault() == fault
     run("sudo", "systemctl", "restart", "horatio.service")
     after_restart = records(app)
@@ -333,7 +335,9 @@ def test_python_upgrade_from_published_release(installed_host: Path) -> None:
             for row in api("/api/alarms")["active"]
         )
     )
-    assert run("systemctl", "show", "horatio.service", "-p", "MainPID", "--value") == pid
+    assert (
+        run("systemctl", "show", "horatio.service", "-p", "MainPID", "--value") == pid
+    )
     for path, content in saved.items():
         assert path.read_bytes() == content, path
     assert records(app)[: len(before)] == before
