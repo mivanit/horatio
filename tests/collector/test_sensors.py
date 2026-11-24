@@ -511,3 +511,53 @@ class TestGPUSensors:
         assert state["info"] == [
             "collector: alarm history not kept this run: JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
         ]
+
+
+def test_power_rows_say_their_unit_and_which_is_the_total(tmp_path: Path) -> None:
+    """The BMC's whole-machine reading is marked `total`, PSU amps are not Watts,
+    and RAPL sockets are parts: consumers read these fields, never the names."""
+    power: str = (
+        "Current 1        | 6Ah | ok  | 10.1 | 0.60 Amps\n"
+        "PS1 Input Power  | 70h | ok  | 10.1 | 120 Watts\n"
+        "Pwr Consumption  | 77h | ok  |  7.1 | 238 Watts\n"
+        "Current 2        | 6Bh | ns  | 10.2 | No Reading\n"
+    )
+    rapl1: str = (
+        "100.0\n/sys/class/powercap/intel-rapl:0 package-0 1000000 262143328850\n"
+    )
+    rapl2: str = (
+        "101.0\n/sys/class/powercap/intel-rapl:0 package-0 51000000 262143328850\n"
+    )
+    files: dict[str, str] = {
+        "fan.txt": "",
+        "temp.txt": "",
+        "power.txt": power,
+        "rapl1.txt": rapl1,
+        "rapl2.txt": rapl2,
+        "gpu.txt": "",
+        "gpu-temp.txt": "",
+        "config.json": "{}",
+    }
+    name: str
+    text: str
+    for name, text in files.items():
+        (tmp_path / name).write_text(text)
+    out: Path = tmp_path / "sensors.json"
+    subprocess.run(
+        [sys.executable, "-", str(tmp_path), str(out)],
+        input=PYTHON,
+        text=True,
+        env=dict(os.environ, HEALTH_CONFIG=str(tmp_path / "config.json")),
+        check=True,
+        capture_output=True,
+        timeout=10,
+    )
+    rows: list[dict[str, Any]] = json.loads(out.read_text())["power"]
+    assert [(r["label"], r["unit"], r["total"]) for r in rows] == [
+        ("Current 1", "A", False),
+        ("PS1 Input Power", "W", False),
+        ("Pwr Consumption", "W", True),
+        ("Current 2", None, False),
+        ("CPU 0", "W", False),
+    ]
+    assert rows[-1]["value"] == 50.0

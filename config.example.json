@@ -1,5 +1,5 @@
 {
-  "_comment": "Copied to config.json by install.sh on first run; config.json is gitignored and never overwritten. power_max_watts is the bar's right edge, power_psu_watts the dashed line, power_warn_fraction the orange threshold as a fraction of the PSU. limits.* are MB/s ceilings for each network interface and each drive (10 Gbit/s is 1250; a PCIe 5 NVMe about 15000): a sample over the cap counts as the cap and the record notes it under rate_capped; totals are sums and not capped. The server reads them at startup. http_targets lists URLs to check every services.check_interval seconds, e.g. {\"name\": \"immich\", \"url\": \"http://box:2283/api/server/ping\"}; optional \"status\": 200 requires that exact status (default: anything below 400), \"insecure\": true skips the TLS certificate check. config.json is served to every visitor, so put no passwords or tokens in a URL.",
+  "_comment": "Copied to config.json by install.sh on first run; config.json is gitignored and never overwritten. Add thresholds.power_psu_watts for the power bar's dashed PSU line and its warning (power_warn_fraction of it), and power_max_watts to fix the bar's right edge; without them the bar scales to the reading. sensor_labels renames any sensor; fans sets per-fan rules (min_rpm, on_low, hide_if_zero; README). limits.* are MB/s ceilings for each network interface and each drive (10 Gbit/s is 1250; a PCIe 5 NVMe about 15000): a sample over the cap counts as the cap and the record notes it under rate_capped; totals are sums and not capped. The server reads them at startup. http_targets lists URLs to check every services.check_interval seconds, e.g. {\"name\": \"immich\", \"url\": \"http://box:2283/api/server/ping\"}; optional \"status\": 200 requires that exact status (default: anything below 400), \"insecure\": true skips the TLS certificate check. config.json is served to every visitor, so put no passwords or tokens in a URL.",
   "title": "Horatio",
   "title_emoji": "🔭 Horatio",
   "ping_targets": [
@@ -31,8 +31,6 @@
     "gpu_util_percent": 80,
     "gpu_memory_percent": 80,
     "temp_celsius": 60,
-    "power_max_watts": 1200,
-    "power_psu_watts": 1100,
     "power_warn_fraction": 0.8,
     "network_mbps": 3,
     "disk_percent": 80,
@@ -40,6 +38,7 @@
     "swap_percent": 10,
     "ping_ms": 100
   },
-  "temp_labels": {},
-  "temp_thresholds": {}
+  "sensor_labels": {},
+  "temp_thresholds": {},
+  "fans": {}
 }

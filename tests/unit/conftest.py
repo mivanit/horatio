@@ -14,7 +14,8 @@ import pytest
 @pytest.fixture(autouse=True)
 def isolated_app(app_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     name: str
-    for name in ("server", "tui"):
+    # hwmon first: server imports it, and must get the copy, not the checkout's.
+    for name in ("hwmon", "server", "tui"):
         spec: importlib.machinery.ModuleSpec | None = (
             importlib.util.spec_from_file_location(name, app_dir / f"{name}.py")
         )

@@ -748,8 +748,9 @@ a.svc-label:hover { text-decoration: underline; }
 
 .text-bad { color: var(--text-bad); }
 
-/* Power card: one stacked bar of the BMC total, scaled to thresholds.power_max_watts,
-   with a marker at thresholds.power_psu_watts */
+/* Power card: one stacked bar of the whole-machine reading (or the measured parts),
+   scaled to thresholds.power_max_watts or the reading, with a marker at
+   thresholds.power_psu_watts when that is set */
 .power-bar {
   position: relative;
   display: flex;

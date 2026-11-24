@@ -128,7 +128,7 @@ else
 fi
 
 python3 - "$tmp" "$OUT" <<'PY'
-import glob, json, os, sys, time, traceback
+import glob, json, os, re, sys, time, traceback
 
 tmp, out = sys.argv[1], sys.argv[2]
 alarms = []
@@ -242,6 +242,16 @@ has_bmc = not os.path.exists(os.path.join(tmp, "no-bmc"))
 state["fans"] = sensors(read("fan.txt"), "fan")
 state["temps"] = sensors(read("temp.txt"), "temp")
 state["power"] = sensors(read("power.txt"), "power")
+# What each power row is, written here so no consumer infers it from names: `unit`
+# from the reading ("238 Watts" -> W, PSU "1.20 Amps" -> A), and `total` for the
+# BMC's whole-machine reading (Dell "Pwr Consumption"; other vendors' "System Power"
+# / "Total Power"). Other Watts rows, e.g. per-PSU input power, are parts.
+UNITS = {"Watts": "W", "Amps": "A", "Volts": "V"}
+BMC_TOTAL = re.compile(r"consumption|system power|total power", re.IGNORECASE)
+for r in state["power"]:
+    words = r["reading"].split()
+    r["unit"] = UNITS.get(words[-1]) if r["value"] is not None and words else None
+    r["total"] = r["unit"] == "W" and bool(BMC_TOTAL.search(r["name"]))
 sensor_alarms(state["fans"], "fan")
 sensor_alarms(state["temps"], "temp")
 sensor_alarms(state["power"], "power")
@@ -394,7 +404,8 @@ if t1 is not None and t2 is not None and t2 > t1:
             continue                        # core/uncore/psys: inside or above the package
         label = f"CPU {socket}" if domain.startswith("package") else f"DRAM {socket}"
         state["power"].append({"name": label, "label": label, "status": "ok", "entity": "rapl",
-                               "reading": f"{watts} Watts", "value": watts})
+                               "reading": f"{watts} Watts", "value": watts,
+                               "unit": "W", "total": False})
 
 # ---- collection failures (any non-empty .err sidecar) ------------------------
 for path in sorted(glob.glob(os.path.join(tmp, "*.err"))):

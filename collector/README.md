@@ -7,7 +7,12 @@ if you want one, a login MOTD script) only read:
 | Script | Every | Writes | What |
 |---|---|---|---|
 | `health-collect.sh` | 15 min | `/var/lib/horatio/state.json` | SMART per drive (serial, model, kind, size, temperature, verdict, SAS grown defects, what it holds), md arrays, EDAC counters, BMC event log (memory events + hardware faults), backup timer, failed units, journal errors, and the `alarms` / `info` lists |
-| `health-sensors.sh` | 60 s | `/var/lib/horatio/sensors.json` | fans, chassis temperatures, PSU amps + BMC watts (IPMI), CPU and DRAM watts per socket (Intel RAPL), per-GPU core and memory temperature, the driver's thermal limits, thermal slowdown state and counters, ECC (`nvidia-smi`), and their `alarms` |
+| `health-sensors.sh` | 60 s | `/var/lib/horatio/sensors.json` | fans, chassis temperatures, PSU amps + BMC watts (IPMI), CPU and DRAM watts per socket (Intel RAPL), per-GPU core and memory temperature, the driver's thermal limits, thermal slowdown state and counters, ECC (`nvidia-smi`), and their `alarms`. Power rows carry `unit` (W/A/V) and `total` (true for the BMC's whole-machine reading: Dell "Pwr Consumption", or a name with "System Power" / "Total Power"), so no consumer guesses from names |
+
+The collectors read only what needs root. Everything world-readable is read by the dashboard
+itself: Linux hwmon temperatures, fans and power (`hwmon.py`, served as `/api/4/sensors`), and
+the fan alarms from config.json `fans`, served as `/api/sensor-alarms` and shown on the
+Hardware card next to the collectors' alarms.
 
 ```bash
 sudo bash install.sh   # scripts -> /usr/local/bin, units -> /etc/systemd/system, config once
@@ -63,7 +68,10 @@ emit one string per finding; the dashboard's Hardware card (and any MOTD script)
 lists and adds no rules of its own. The card counts the 60 s file's alarms only while that file
 is fresh; a stale or missing one shows as "sensors stale" (alarms unknown), never as clear.
 `info` carries non-problems worth knowing (a drive in standby, a scrub in progress,
-no self-test on record). Any capture that failed or timed out is itself an alarm
+no self-test on record) and hardware that is not there to monitor: with no BMC,
+`sel_memory` and `sel_hardware` are `null`; with no DIMMs under EDAC (non-ECC memory, or
+ECC without its driver), `edac` is `null`. Each comes with one note, so an absent source
+never shows as a zero count. Any capture that failed or timed out is itself an alarm
 (`collector: …`), so a partial snapshot never reads as healthy; the 15-min run also alarms when
 the 60 s file is missing or older than 5 minutes. A part of the 15-min run that crashes on a
 value it cannot handle is a `collector: <part> crashed: …` alarm; the other parts still report,

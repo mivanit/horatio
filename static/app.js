@@ -589,13 +589,25 @@ function renderHardware(data) {
   const collector = 'horatio-collect.timer';
 
   const reset = resetHardwareHeader;
+  // The server's own findings (hwmon fan rules, setup hints): there whatever the
+  // collector's state, so a box without the collector still shows a stopped fan.
+  const serverAlarms = Array.isArray(data?.sensor_alarms) ? data.sensor_alarms : [];
+  const serverNotes = Array.isArray(data?.sensor_notes) ? data.sensor_notes : [];
   if (data?.status === 'missing') {
     // Expected before the housekeeping installer has run: not a failure.
-    content.innerHTML = `<div class="info-item mail-muted">No health snapshot yet (${escapeHtml(data.path || '')}); ` +
+    content.innerHTML = serverAlarms.map(a => hwRow('text-error', a)).join('') +
+      serverNotes.map(n => hwRow('hw-note', n)).join('') +
+      `<div class="info-item mail-muted">No health snapshot yet (${escapeHtml(data.path || '')}); ` +
       `is ${collector} installed?</div>`;
     updateCardNoData('hardware', true);
     updateCardWarning('hardware', 0, 0);
     reset();
+    if (serverAlarms.length) {
+      updateCardCritical('hardware', true);
+      const valueEl = document.getElementById('hardware-value');
+      valueEl.textContent = `${serverAlarms.length} issue${serverAlarms.length === 1 ? '' : 's'}`;
+      valueEl.className = 'value text-error';
+    }
     return;
   }
   if (data?.status === 'error') {
@@ -619,14 +631,16 @@ function renderHardware(data) {
     const item = Array.isArray(snap.alarm_items) ? snap.alarm_items[i] : null;
     return { text, item: item?.text === text ? item : null };
   });
-  const rows = [...withItems(data), ...(sensorsUnknown ? [] : withItems(sen))];
+  // The server's own alarms (hwmon fan rules) are text alone: it keeps no history of them.
+  const rows = [...withItems(data), ...(sensorsUnknown ? [] : withItems(sen)),
+                ...serverAlarms.map(text => ({ text, item: null }))];
   const alarms = rows.map(r => r.text);
   // Alarms the collector could not look at again this run (a failing drive that
   // is asleep, a BMC that timed out): not in `alarms`, and not known to be gone.
   const unchecked = [data, ...(sensorsUnknown ? [] : [sen])]
     .flatMap(snap => Array.isArray(snap?.alarm_held) ? snap.alarm_held : [])
     .filter(h => typeof h?.text === 'string' && h.unchecked_since != null);
-  const info = Array.isArray(data?.info) ? data.info : [];
+  const info = [...(Array.isArray(data?.info) ? data.info : []), ...serverNotes];
 
   // Header: the verdict, and the snapshot's OWN age (not when it was fetched).
   const valueEl = document.getElementById('hardware-value');
@@ -668,7 +682,10 @@ function renderHardware(data) {
   }
   if (data.sel_memory) memory.push(hwRow('', `BMC log, memory events: ${data.sel_memory.count} lifetime, ${data.sel_memory.recent?.length ?? '?'} in the last 7 days`));
   if (data.sel_hardware) memory.push(hwRow('', `BMC log, hardware faults: ${data.sel_hardware.count} lifetime, ${data.sel_hardware.recent?.length ?? '?'} in the last 7 days`));
-  if (memory.length) memory.push(hwRow('hw-note', 'check: sudo ipmitool sel elist; sudo ras-mc-ctl --errors'));
+  // The hint names only the tools for what is present: no ipmitool line on a box without a BMC.
+  const memCheck = [data.sel_memory || data.sel_hardware ? 'sudo ipmitool sel elist' : null,
+                    data.edac ? 'sudo ras-mc-ctl --errors' : null].filter(Boolean);
+  if (memory.length) memory.push(hwRow('hw-note', `check: ${memCheck.join('; ')}`));
 
   const backup = [];
   if (data.backup) {
@@ -865,10 +882,17 @@ function setHtml(el, html) {
 }
 
 // Power bar segment colours, shared by the CSS classes (style.css .power-seg-*) and the legend text.
+// A power part's colour slot, from what it is: "GPU 0" -> gpu0, "CPU 1" -> cpu1,
+// "CPU (est.)" -> cpu0, "DRAM 0" -> dram0; anything else (an amdgpu or chip reading
+// with no socket number past the second) is "other".
+function powerSegKey(label) {
+  const m = /^(gpu|cpu|dram)\b\D*(\d*)/i.exec(label);
+  const key = m ? m[1].toLowerCase() + (m[2] || '0') : 'other';
+  return ['gpu0', 'gpu1', 'cpu0', 'cpu1', 'dram0', 'dram1'].includes(key) ? key : 'other';
+}
 function segColorVar(label) {
-  const key = label.toLowerCase().replaceAll(' ', '');
   return { gpu0: '--color-gpu', gpu1: '--color-gpu-mem', cpu0: '--color-accent', cpu1: '--color-download',
-           dram0: '--color-success', dram1: '--color-warning' }[key] || '--text-muted';
+           dram0: '--color-success', dram1: '--color-warning' }[powerSegKey(label)] || '--text-muted';
 }
 
 // What to run for an alarm line, keyed by how the collector's alarm strings start.
@@ -2167,6 +2191,9 @@ async function fetchDataOnce() {
     // the IPMI-only fan card when the snapshot is fresh.
     const temps = [];
     const fans = [];
+    // {label, value, total, fromCollector}: hwmon chip readings (/api/4/sensors), the
+    // collector's BMC and RAPL rows, and GPU draw from nvidia-smi.
+    const power = [];
 
     // Every temp row carries its own warning/critical line: a chip's psutil
     // limits when Glances has them (it emits null otherwise -- hence ??, never ||),
@@ -2178,6 +2205,10 @@ async function fetchDataOnce() {
         warning: s.warning ?? thresholds.temp_celsius, critical: s.critical ?? 90
       }));
       sensors.data.filter(s => s.type === 'fan_speed' && s.value != null).forEach(s => fans.push(s));
+      // hwmon power (the server's reader; Glances and the OpenWrt backend have none).
+      // `total` is true only for a reading of the whole machine (an ACPI power meter).
+      sensors.data.filter(s => s.type === 'power' && s.value != null).forEach(s =>
+        power.push({ label: s.label, value: s.value, total: s.total === true }));
     }
 
     // Chassis fans, temps and power from the 60 s sensors snapshot (IPMI and
@@ -2217,7 +2248,6 @@ async function fetchDataOnce() {
       });
     }
 
-    const power = [];
     if (sen?.status === 'ok') {
       // GPU memory (HBM) temps: nvidia-smi only, so from the snapshot, placed right
       // after that GPU's core row. The memory has no throttle of its own: warn
@@ -2233,10 +2263,15 @@ async function fetchDataOnce() {
       });
       (sen.temps ?? []).forEach(t => t.value != null && temps.push({ label: t.label, value: t.value, warning: thresholds.temp_celsius, critical: 90 }));
       (sen.fans ?? []).forEach(f => f.value != null && fans.push({ label: f.label, value: f.value }));
-      // Watts rows only: the BMC total ("Pwr Consumption", the one non-RAPL Watts row)
-      // and the RAPL CPU/DRAM rows. The same capture also carries PSU amps and volts.
-      (sen.power ?? []).forEach(p => p.value != null && String(p.reading).endsWith('Watts') &&
-        power.push({ label: p.label, value: p.value, total: p.entity !== 'rapl' }));
+      // Watts rows only (the same capture carries PSU amps). The collector writes
+      // `unit` and `total`; one from before this release only `reading` and `entity`
+      // ('rapl' = a CPU/DRAM part), so both are read for one release.
+      (sen.power ?? []).forEach(p => {
+        const watts = p.unit !== undefined ? p.unit === 'W' : String(p.reading).endsWith('Watts');
+        if (p.value == null || !watts) return;
+        power.push({ label: p.label, value: p.value, fromCollector: true,
+                     total: p.total !== undefined ? p.total === true : p.entity !== 'rapl' });
+      });
     }
     // Drive temperatures from the 15-min SMART snapshot, keyed by device. SAS
     // drives report a trip point; the others get spinning-rust defaults (50 / 60).
@@ -2311,7 +2346,7 @@ async function fetchDataOnce() {
     const fansCard = document.getElementById('fans-card');
     if (fans.length > 0) {
       fansCard.style.display = '';
-      const labels = fans.map(f => f.label);
+      const labels = fans.map(f => tempDisplayLabel(f.label));
       const values = fans.map(f => f.value || 0);
       charts.fans.data.labels = labels;
       charts.fans.data.datasets[0].data = values;
@@ -2334,36 +2369,48 @@ async function fetchDataOnce() {
       const rank = l => l.startsWith('GPU') ? 0 : l.startsWith('CPU') ? 1 : l.startsWith('DRAM') ? 2 : 3;
       const parts = power.filter(p => !p.total).sort((a, b) => rank(a.label) - rank(b.label));
       const measured = parts.reduce((s, p) => s + p.value, 0);
-      const totalRow = power.find(p => p.total);
+      // The BMC measures the whole box from outside it: it wins over an hwmon meter.
+      const totalRow = power.find(p => p.total && p.fromCollector) ?? power.find(p => p.total);
       // The BMC total is read once a minute, the parts every 30 s; when the parts
       // briefly exceed it the bar is the parts, so the number is too.
       const total = totalRow ? Math.max(totalRow.value, measured) : measured;
       if (totalRow) parts.push({ label: 'other', value: total - measured });
-      const maxW = thresholds.power_max_watts || 1200;
-      const psuW = thresholds.power_psu_watts || 1100;
+      // The PSU line and its warning exist only when config.json names the PSU; the
+      // scale is config's power_max_watts, else the PSU plus a margin, else 1.5x the
+      // reading rounded up to 50 W (a desktop drawing 60 W gets a 100 W bar).
+      const psuW = thresholds.power_psu_watts || null;
+      const maxW = thresholds.power_max_watts || (psuW ? psuW * 1.1 : Math.max(50, Math.ceil(total * 1.5 / 50) * 50));
       const warnFrac = thresholds.power_warn_fraction || 0.8;
-      const segClass = l => 'power-seg-' + l.toLowerCase().replace(/[^a-z0-9-]/g, '');   // "GPU 0" -> power-seg-gpu0
+      const segClass = l => 'power-seg-' + powerSegKey(l);
       const segs = parts.map(p =>
         `<div class="power-seg ${segClass(p.label)}" style="width:${Math.min(100, p.value / maxW * 100).toFixed(2)}%" title="${escapeHtml(p.label)} ${Math.round(p.value)} W"></div>`).join('');
       // Legend labels take their segment's colour (dimmed by CSS) so the bar reads without hovering.
       const legend = parts.map(p =>
-        `<span style="color:${getCssColor(segColorVar(p.label))}"><i class="${segClass(p.label)}"></i>${escapeHtml(p.label)} <b>${Math.round(p.value)} W</b></span>`).join('');
+        `<span style="color:${getCssColor(segColorVar(p.label))}"><i class="${segClass(p.label)}"></i>${escapeHtml(tempDisplayLabel(p.label))} <b>${Math.round(p.value)} W</b></span>`).join('');
       setHtml(document.getElementById('power-bar'),
-        `<div class="power-bar"><div class="power-psu" style="left:${(psuW / maxW * 100).toFixed(2)}%" title="PSU ${psuW} W"></div>${segs}</div>` +
+        `<div class="power-bar">${psuW ? `<div class="power-psu" style="left:${(psuW / maxW * 100).toFixed(2)}%" title="PSU ${psuW} W"></div>` : ''}${segs}</div>` +
         `<div class="power-legend">${legend}</div>` +
-        `<div class="power-meta">PSU ${psuW} W (dashed line) · scale ${maxW} W · warns at ${Math.round(warnFrac * 100)}% of PSU` +
-        (totalRow ? '' : ' · no BMC total: measured parts only') + `</div>`);
+        `<div class="power-meta">${psuW ? `PSU ${psuW} W (dashed line) · ` : ''}scale ${Math.round(maxW)} W` +
+        (psuW ? ` · warns at ${Math.round(psuW * warnFrac)} W (${Math.round(warnFrac * 100)}% of PSU)` : '') +
+        (totalRow ? '' : ' · no whole-machine reading: measured parts only') + `</div>`);
       const valueEl = document.getElementById('power-value');
-      if (totalRow) {
+      if (totalRow && psuW) {
         const pct = total / psuW * 100;
         valueEl.textContent = `${Math.round(total)} W (${pct.toFixed(0)}%)`;
         valueEl.className = 'value' + (pct >= warnFrac * 100 ? ' text-warning' : '');
         updateCardWarning('power', total, psuW * warnFrac);
-      } else {
-        // Parts only (no BMC): a lower bound, which cannot be judged against the PSU.
-        valueEl.textContent = `≥ ${Math.round(total)} W`;
+      } else if (totalRow) {
+        // A whole-machine reading but no PSU configured: nothing to judge it against.
+        valueEl.textContent = `${Math.round(total)} W`;
         valueEl.className = 'value';
         updateCardWarning('power', 0, 0);
+      } else {
+        // Parts only (no whole-machine reading): a lower bound. Under the warning line
+        // it says nothing; over it, the machine is over it for certain, so it warns.
+        const over = psuW != null && total >= psuW * warnFrac;
+        valueEl.textContent = `≥ ${Math.round(total)} W`;
+        valueEl.className = 'value' + (over ? ' text-warning' : '');
+        updateCardWarning('power', psuW ? total : 0, psuW ? psuW * warnFrac : 0);
       }
       updateCardNoData('power', true);
     } else {
@@ -3356,8 +3403,13 @@ function extractHistoryValue(record, metric, rangeType = 'avg') {
 
 // Create a history chart
 // unitType: 'percent' | 'gb' for hasUnitToggle metrics, the selected field's key for fieldSelect ones
-// The BMC's whole-box reading in the power snapshot; every other Watts row is a part of it.
-const POWER_TOTAL_KEY = 'Pwr Consumption';
+// The whole-machine reading of a history record's power: the recorder names it in
+// `power_total`; records from before that only had the BMC's, always this name.
+const LEGACY_POWER_TOTAL_KEY = 'Pwr Consumption';
+function powerTotalKey(record) {
+  if (typeof record?.power_total === 'string') return record.power_total;
+  return record?.power?.[LEGACY_POWER_TOTAL_KEY] != null ? LEGACY_POWER_TOTAL_KEY : null;
+}
 // History charts with more records than this draw no per-point markers (see createHistoryChart).
 const HISTORY_MARKER_MAX = 500;   // about 3.5 days of 10-minute records
 
@@ -3606,10 +3658,13 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
         }
       });
       const stack = metric === 'power' && mode === 'stack';
+      // Per record, since the whole-machine reading can change name (a BMC added).
+      const totalKeys = stack ? records.map(powerTotalKey) : [];
+      const everTotal = new Set(totalKeys.filter(Boolean));
       let sensors = Array.from(sensorNames);
       if (stack) {
         const rank = l => l.startsWith('GPU') ? 0 : l.startsWith('CPU') ? 1 : l.startsWith('DRAM') ? 2 : 3;
-        sensors = sensors.filter(s => s !== POWER_TOTAL_KEY).sort((a, b) => rank(a) - rank(b)).concat('other');
+        sensors = sensors.filter(s => !everTotal.has(s)).sort((a, b) => rank(a) - rank(b)).concat('other');
       }
       // Band traces first, max right after min: its fill targets the previous dataset.
       const BAND_ORDER = band ? ['min', 'max', 'median', 'mean'].map(s => `${band} ${s}`) : [];
@@ -3620,17 +3675,18 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
         [`${band} mean`]: { borderDash: [2, 3], borderWidth: 1, pointRadius: 0 },
       } : {};
       datasets = sensors.map((sensor, i) => {
-        const data = values.map(v => {
+        const data = values.map((v, at) => {
           if (sensor === 'other') {
-            if (!v || v[POWER_TOTAL_KEY] == null) return null;
-            const parts = Object.entries(v).filter(([k]) => k !== POWER_TOTAL_KEY).reduce((s, [, x]) => s + (x ?? 0), 0);
-            return Math.max(0, v[POWER_TOTAL_KEY] - parts);
+            const key = totalKeys[at];
+            if (!v || !key || v[key] == null) return null;
+            const parts = Object.entries(v).filter(([k]) => !everTotal.has(k)).reduce((s, [, x]) => s + (x ?? 0), 0);
+            return Math.max(0, v[key] - parts);
           }
           return v?.[sensor] ?? null;
         });
         const color = band && sensor.startsWith(band + ' ') ? colors[0] : colors[i % colors.length];
         return {
-          label: metric === 'temps' ? tempDisplayLabel(sensor) : sensor,
+          label: ['temps', 'fans', 'power'].includes(metric) ? tempDisplayLabel(sensor) : sensor,
           data: data,
           borderColor: color,
           backgroundColor: stack ? withAlpha(color, '60') : sensor === `${band} max` ? withAlpha(color, '15') : 'transparent',

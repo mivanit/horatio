@@ -33,6 +33,9 @@ CAPTURES: dict[str, str] = {
     "tmp/prev-boot-kernel.txt": "",
     "uptime": "3600.25 7200.50\n",
     "boot_id": "boot-1\n",
+    # One healthy DIMM: the default box has ECC reporting (tests about a box
+    # without it pass None to drop this file).
+    "edac/mc0/dimm0/dimm_label": "DIMM#0\n",
     "config.json": "{}",
     "out/sensors.json": "{}",
 }
@@ -137,6 +140,10 @@ def test_quiet_box_has_no_alarms(tmp_path: Path) -> None:
     assert (state["alarms"], state["info"]) == ([], [])
     assert state["backup"] is None
     assert state["edac"]["uptime_seconds"] == 3600
+    assert (state["edac"]["ce_total"], state["edac"]["ue_total"]) == (0, 0)
+    # A BMC is present (no marker) and its log is empty: real zeros.
+    assert state["sel_memory"] == {"count": 0, "recent": []}
+    assert state["sel_hardware"] == {"count": 0, "recent": []}
 
 
 def test_markers_for_missing_tools(tmp_path: Path) -> None:
@@ -145,6 +152,8 @@ def test_markers_for_missing_tools(tmp_path: Path) -> None:
     )[0]
     assert state["alarms"] == ["smartmontools not installed: drives are not monitored"]
     assert state["info"] == ["no BMC (ipmitool or /dev/ipmi0 missing): no event log"]
+    # No BMC: no event-log counts at all, not "0 lifetime".
+    assert (state["sel_memory"], state["sel_hardware"]) == (None, None)
 
 
 def test_sel_memory_hardware_and_undated_lines(tmp_path: Path) -> None:
@@ -188,6 +197,35 @@ def test_edac_uncorrectable(tmp_path: Path) -> None:
     )[0]
     assert (state["edac"]["ce_total"], state["edac"]["ue_total"]) == (3, 1)
     assert state["alarms"] == ["ECC: 1 uncorrectable errors since boot"]
+
+
+def test_no_bmc_and_no_ecc_is_two_notes_and_no_counts(tmp_path: Path) -> None:
+    # A desktop: neither source exists, so the Hardware card gets no "0 events" rows.
+    state: dict[str, Any] = collect(
+        tmp_path, {"tmp/no-bmc": "", "edac/mc0/dimm0/dimm_label": None}
+    )[0]
+    assert (state["sel_memory"], state["sel_hardware"], state["edac"]) == (
+        None,
+        None,
+        None,
+    )
+    assert state["alarms"] == []
+    assert state["info"] == [
+        "no BMC (ipmitool or /dev/ipmi0 missing): no event log",
+        "no ECC reporting (no DIMMs under EDAC): memory errors are not monitored",
+    ]
+
+
+def test_edac_controller_without_dimms_is_not_monitored(tmp_path: Path) -> None:
+    # bodel: /sys/devices/system/edac/mc exists (edac_mce_amd) but holds no DIMMs.
+    state: dict[str, Any] = collect(
+        tmp_path, {"edac/mc0/dimm0/dimm_label": None, "edac/mc0/ce_count": "0\n"}
+    )[0]
+    assert state["edac"] is None
+    assert state["alarms"] == []
+    assert state["info"] == [
+        "no ECC reporting (no DIMMs under EDAC): memory errors are not monitored"
+    ]
 
 
 def test_drives_health_standby_baseline_and_holds(tmp_path: Path) -> None:

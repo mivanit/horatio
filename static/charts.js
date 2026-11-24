@@ -459,12 +459,14 @@ function getDriveUsageColor(percent) {
   return COLORS.success;
 }
 
-// config.json temp_labels: a display name for a temperature sensor, e.g.
-// {"loc1": "I350 NIC"}. Display only: history records keep the sensor's own
+// config.json temp_labels / sensor_labels (the newer name, any sensor: temperature,
+// fan, power): a display name, e.g. {"loc1": "I350 NIC", "f71889ed fan1": "CPU fan"};
+// sensor_labels wins where both name a sensor. Display only: history records keep the sensor's own
 // name, so a series does not split in two on the day it is renamed.
 function tempDisplayLabel(label) {
-  const alias = dashboardConfig.temp_labels?.[label];
-  return typeof alias === 'string' && alias ? alias : label;
+  const alias = [dashboardConfig.sensor_labels?.[label], dashboardConfig.temp_labels?.[label]]
+    .find(a => typeof a === 'string' && a);
+  return alias ?? label;
 }
 
 // config.json temp_thresholds: a sensor's own limit in °C, by its own name or
