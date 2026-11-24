@@ -95,12 +95,15 @@ class TestGPUSensors:
         basic: dict[str, str | int] | None = None,
         config: dict[str, Any] | None = None,
         files: dict[str, str] | None = None,
+        keep: Path | None = None,
     ) -> tuple[dict[str, Any], list[list[str]]]:
         """`files` are written into the stage after the real GPU capture has run,
-        so a test can supply BMC tables or overwrite a capture's .err sidecar."""
+        so a test can supply BMC tables or overwrite a capture's .err sidecar.
+        `keep` is a stage directory reused between calls, for what one run hands
+        the next (sensors.json and alarms.jsonl stay in it)."""
         folder: str
         with tempfile.TemporaryDirectory(prefix="horatio-sensors-test-") as folder:
-            stage: Path = Path(folder)
+            stage: Path = keep if keep is not None else Path(folder)
             name: str
             for name in ("fan", "temp", "power", "rapl1", "rapl2"):
                 (stage / f"{name}.txt").write_text("")
@@ -116,7 +119,7 @@ class TestGPUSensors:
             }
             (stage / "replies.json").write_text(json.dumps(replies))
             fake_bin: Path = stage / "bin"
-            fake_bin.mkdir()
+            fake_bin.mkdir(exist_ok=True)
             command: Path = fake_bin / "nvidia-smi"
             command.write_text(f"#!{sys.executable}\n{FAKE_SMI}")
             command.chmod(0o755)
@@ -389,7 +392,10 @@ class TestGPUSensors:
             config={"fan_rpm_alarm_above": 15000},
         )
         assert state["schema"] == 1
-        assert state["alarm_items"] == [
+        assert [
+            {k: v for k, v in item.items() if k not in ("since", "initial")}
+            for item in state["alarm_items"]
+        ] == [
             # The label gains "(3.2)" only because two sensors share the name;
             # the key carries the entity whether or not they do.
             {"key": "bmc/temp/Temp@3.2", "text": "Temp (3.2): status cr"},
@@ -450,3 +456,58 @@ class TestGPUSensors:
         # No BMC at all: its alarms are neither raised nor cleared.
         state, _ = self.collect(files={"no-bmc": ""})
         assert not covered(state, "bmc/temp/Temp@3.1")
+
+    def test_an_alarm_is_cleared_only_after_three_absent_runs(
+        self: TestGPUSensors, tmp_path: Path
+    ) -> None:
+        def run(sw: str) -> dict[str, Any]:
+            return self.collect(csv=gpu_csv(sw=sw), keep=tmp_path)[0]
+
+        def log() -> list[str]:
+            path: Path = tmp_path / "alarms.jsonl"
+            return (
+                [json.loads(line)["event"] for line in path.read_text().splitlines()]
+                if path.exists()
+                else []
+            )
+
+        run("Not Active")
+        hot: dict[str, Any] = run("Active")
+        assert hot["alarm_items"][0]["since"] == hot["ts"]
+        assert "initial" not in hot["alarm_items"][0]
+        # Gone for two runs: held, nothing logged. Back on the third: the same alarm.
+        absent: int
+        for absent in (1, 2):
+            cool: dict[str, Any] = run("Not Active")
+            assert cool["alarms"] == []
+            assert [(h["key"], h["absent"]) for h in cool["alarm_held"]] == [
+                ("gpu/0/slowdown", absent)
+            ]
+        again: dict[str, Any] = run("Active")
+        assert again["alarm_items"][0]["since"] == hot["ts"]
+        assert log() == ["raised"]
+        # Gone for three runs in a row: cleared.
+        for absent in (1, 2, 3):
+            cool = run("Not Active")
+        assert cool["alarm_held"] == []
+        assert log() == ["raised", "cleared"]
+        entry: dict[str, Any] = json.loads(
+            (tmp_path / "alarms.jsonl").read_text().splitlines()[-1]
+        )
+        assert (entry["source"], entry["key"]) == ("sensors", "gpu/0/slowdown")
+
+    def test_a_broken_previous_snapshot_costs_only_the_history(
+        self: TestGPUSensors, tmp_path: Path
+    ) -> None:
+        (tmp_path / "sensors.json").write_text("[]")
+        state: dict[str, Any]
+        state, _ = self.collect(csv=gpu_csv(sw="Active"), keep=tmp_path)
+        assert state["alarms"] == ["GPU 0: thermal slowdown active (sw)"]
+        assert state["alarm_items"][0]["initial"] is True
+        (tmp_path / "sensors.json").write_text("{not json")
+        state, _ = self.collect(csv=gpu_csv(sw="Active"), keep=tmp_path)
+        assert state["alarms"] == ["GPU 0: thermal slowdown active (sw)"]
+        assert "since" not in state["alarm_items"][0]
+        assert state["info"] == [
+            "collector: alarm history not kept this run: JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+        ]

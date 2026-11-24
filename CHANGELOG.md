@@ -12,6 +12,16 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
   standby, a BMC that timed out, a section that crashed). Drives are keyed by serial, since
   `sdX` letters move between boots. The alarm strings are unchanged. Also new: `schema`
   and `boot_id`. Keys are listed in `collector/README.md`.
+- Hardware collector: alarms now have a history. Each collector reads its own previous
+  snapshot to carry `since` on every alarm (`initial` when the alarm predates the
+  history), and appends a line to `/var/lib/horatio/alarms.jsonl` when an alarm is
+  `raised`, `changed` in value (`8 -> 9` reallocated sectors) or `cleared`; nothing is
+  written while it just stays. An alarm that could not be re-checked (a failing drive that
+  is asleep) is kept in `alarm_held` instead of being reported as gone, and the 60 s
+  snapshot waits three runs before clearing, so a value on its threshold does not flap.
+  The log also records a `gap` when no snapshot was taken for a while and a `boot`.
+- Hardware collector: `state.json` has `boot`, with how the previous boot ended (`clean`,
+  its last log time and kernel). An unclean end (power cut, hang) is an `info` note for a day.
 
 ## [0.2.1] - 2026-11-18
 
