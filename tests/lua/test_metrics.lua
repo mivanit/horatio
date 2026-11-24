@@ -1,8 +1,8 @@
 -- CPU, rate, sensor, filesystem, ping and public IP fixtures; no native modules,
 -- network, processes or file writes: every file and command is answered here.
--- Usage: lua5.1 tests/openwrt/test_metrics.lua
+-- Usage: lua5.1 tests/lua/test_metrics.lua
 local script_dir = (arg and arg[0] or ""):match("(.*)[/\\][^/\\]*$") or "."
-script_dir = script_dir .. "/../../openwrt"
+script_dir = script_dir .. "/../../lua"
 local metrics = dofile(script_dir .. "/metrics.lua")
 local real_open, real_popen, real_rename, real_remove = io.open, io.popen, os.rename, os.remove
 local files, replies, http_calls = {}, {}, 0

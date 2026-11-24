@@ -1,4 +1,4 @@
-"""Native Lua/Nixio checks, selected explicitly with make test-openwrt."""
+"""Native Lua/Nixio checks, selected explicitly with make test-lua."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ def lua() -> str:
     command: str | None = shutil.which(os.environ.get("LUA", "lua5.1"))
     if command is None:
         pytest.fail(
-            "Native OpenWrt tests need Lua 5.1 and Nixio. "
-            "See README.md's OpenWrt test setup, or use make check for the Linux suite."
+            "Native Lua tests need Lua 5.1 and Nixio. "
+            "See README.md's Lua test setup, or use make check for the Linux suite."
         )
     result: subprocess.CompletedProcess[str] = subprocess.run(
         [

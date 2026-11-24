@@ -17,7 +17,9 @@ def isolated_app(app_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # hwmon first: server imports it, and must get the copy, not the checkout's.
     for name in ("hwmon", "hostcheck", "zfs", "server", "tui"):
         spec: importlib.machinery.ModuleSpec | None = (
-            importlib.util.spec_from_file_location(name, app_dir / f"{name}.py")
+            importlib.util.spec_from_file_location(
+                name, app_dir / "python" / f"{name}.py"
+            )
         )
         assert spec is not None and spec.loader is not None
         module: ModuleType = importlib.util.module_from_spec(spec)

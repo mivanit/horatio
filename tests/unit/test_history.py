@@ -469,7 +469,7 @@ else:
             prior: bytes = hist.read_bytes()
             result: subprocess.CompletedProcess[str] = subprocess.run(
                 [sys.executable, "-c", short_write, tmp],
-                cwd=app_dir,
+                cwd=app_dir / "python",
                 capture_output=True,
                 text=True,
                 timeout=10,

@@ -1,11 +1,11 @@
--- OpenWrt Dashboard API handler for uhttpd
+-- Lua dashboard API handler for uhttpd
 -- Serves system metrics as JSON, matching the Glances-based API contract
 -- so the existing frontend works unchanged.
 
 -- debug.getinfo(1,"S").source returns the source file path prefixed with "@",
--- e.g. "@/root/horatio/openwrt/handler.lua".
+-- e.g. "@/root/horatio/lua/handler.lua".
 -- :match("@(.*/)" strips the "@" prefix and filename, leaving the directory:
---   "/root/horatio/openwrt/"
+--   "/root/horatio/lua/"
 -- We prepend this to package.path so require() finds metrics.lua and
 -- history.lua next to this file, regardless of uhttpd's working directory.
 local script_dir = debug.getinfo(1, "S").source:match("@(.*/)")
@@ -151,7 +151,7 @@ routes["/history/settings"] = function(env)
     if env.REQUEST_METHOD == "POST" then
         send_json({
             error = "Settings update not supported",
-            detail = "The OpenWrt backend does not support runtime settings changes. Edit www/config.json and restart the service."
+            detail = "The Lua backend does not support runtime settings changes. Edit www/config.json and restart the service."
         }, 501)
     else
         send_json(history.get_settings())
@@ -188,7 +188,7 @@ routes["/list-endpoints"] = function()
         endpoint_list[#endpoint_list + 1] = path
     end
     table.sort(endpoint_list)
-    send_json({ endpoints = endpoint_list, backend = "openwrt" })
+    send_json({ endpoints = endpoint_list, backend = "lua" })
 end
 
 -- Main request handler (called by uhttpd for every /api/* request)

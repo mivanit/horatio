@@ -13,16 +13,11 @@ from tests.support import ROOT
 def copy_application(destination: Path) -> Path:
     """Copy application code and example config, never the checkout's live state."""
     destination.mkdir(parents=True)
-    name: str
-    for name in (
-        "server.py",
-        "hwmon.py",
-        "hostcheck.py",
-        "zfs.py",
-        "tui.py",
-        "index.html",
-        "VERSION",
-    ):
+    source: Path = destination / "python"
+    source.mkdir()
+    for path in (ROOT / "python").glob("*.py"):
+        shutil.copy2(path, source / path.name)
+    for name in ("index.html", "VERSION"):
         shutil.copy2(ROOT / name, destination / name)
     shutil.copytree(ROOT / "static", destination / "static")
     shutil.copytree(ROOT / "themes", destination / "themes")

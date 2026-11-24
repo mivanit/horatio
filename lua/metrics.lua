@@ -1,4 +1,4 @@
--- System metrics from /proc and /sys for OpenWrt.
+-- System metrics from Linux /proc and /sys for the Lua backend.
 -- No external dependencies — reads Linux virtual filesystems directly.
 
 local M = {}
@@ -176,7 +176,7 @@ function M.uptime()
 end
 
 function M.system_info()
-    local hostname = (read_line("/proc/sys/kernel/hostname") or "openwrt"):gsub("%s+$", "")
+    local hostname = (read_line("/proc/sys/kernel/hostname") or "localhost"):gsub("%s+$", "")
     -- What `uname -r` prints, without starting a process.
     local uname = (read_line("/proc/sys/kernel/osrelease") or ""):gsub("%s+$", "")
 

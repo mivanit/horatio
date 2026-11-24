@@ -15,7 +15,7 @@
 #
 #      curl -fsS -o tui.py http://<host>:8080/tui.py && python3 tui.py
 #
-#  On the box itself, from the horatio checkout:   python3 tui.py
+#  On the box itself, from the horatio checkout:   python3 python/tui.py
 #  Needs Python 3.8+ on Linux or macOS (on Windows, use WSL). Nothing to install.
 #  Keys are shown at the bottom of the screen; q quits.
 # ============================================================================
@@ -24,8 +24,8 @@
 Standard library only, so it runs with no install:
 
     curl -fsS http://<host>:8080/tui.py | python3 -   # knows its server
-    python3 tui.py http://<host>:8080                 # from a horatio checkout
-    python3 tui.py                                    # this box's horatio
+    python3 python/tui.py http://<host>:8080          # from a horatio checkout
+    python3 python/tui.py                             # this box's horatio
 
 The server renders; this script picks the width, height, colour depth and
 character set for the terminal, polls, and redraws. Keys: q quit, r refresh,

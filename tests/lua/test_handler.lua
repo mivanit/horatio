@@ -1,5 +1,5 @@
 -- CGI response tests; no OpenWrt services or native modules are required.
--- Usage: lua5.1 tests/openwrt/test_handler.lua
+-- Usage: lua5.1 tests/lua/test_handler.lua
 package.preload["luci.jsonc"] = function()
     return {parse = function() return {} end}
 end
@@ -22,7 +22,7 @@ end
 local output = {}
 uhttpd = {send = function(s) output[#output + 1] = s end}
 local script_dir = (arg and arg[0] or ""):match("(.*)[/\\][^/\\]*$") or "."
-script_dir = script_dir .. "/../../openwrt"
+script_dir = script_dir .. "/../../lua"
 dofile(script_dir .. "/handler.lua")
 local version_file = assert(io.open(script_dir .. "/../VERSION", "r"))
 local version = version_file:read("*l")
@@ -42,7 +42,7 @@ for _, case in ipairs({
     {"GET", "/4/fs", 200, "OK", {'"size":8589934592', '"used":4294967296'}},
     -- Same contract as the Python backend; a router checkout has no build.
     {"GET", "/version", 200, "OK", {'"version":"' .. version .. '"', '"build":null'}},
-    {"GET", "/list-endpoints", 200, "OK", {'"/version"'}},
+    {"GET", "/list-endpoints", 200, "OK", {'"/version"', '"backend":"lua"'}},
     {"GET", "/history/tick", 200, "OK", {'"status":"ok"'}},
 }) do
     output = {}

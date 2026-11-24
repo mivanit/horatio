@@ -36,7 +36,7 @@ def live_server(live_app_dir: Path) -> Iterator[str]:
         proc: subprocess.Popen[bytes] = subprocess.Popen(
             [
                 sys.executable,
-                "server.py",
+                "python/server.py",
                 "--host",
                 "127.0.0.1",
                 "--port",

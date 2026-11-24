@@ -11,7 +11,7 @@ Horatio's server: serves the static frontend, spawns Glances as a subprocess and
 proxies /api/4/* to it, adds its own endpoints (GPU, ping, IP info, per-process
 network and disk, local mail, the collector's snapshots) and records history.
 
-Run: uv run python server.py   (config.json must exist; ./install.sh creates it)
+Run: uv run python python/server.py   (config.json must exist; ./install.sh creates it)
 """
 
 from __future__ import annotations
@@ -78,13 +78,16 @@ import hostcheck
 import hwmon
 import zfs
 
-STATIC_DIR: Final[Path] = Path(__file__).parent / "static"
-INDEX_FILE: Final[Path] = Path(__file__).parent / "index.html"
-THEMES_DIR: Final[Path] = Path(__file__).parent / "themes"
-# Theme names as the page's loader (index.html) and openwrt/install.sh accept them;
+SOURCE_DIR: Final[Path] = Path(__file__).resolve().parent
+ROOT_DIR: Final[Path] = SOURCE_DIR.parent
+
+STATIC_DIR: Final[Path] = ROOT_DIR / "static"
+INDEX_FILE: Final[Path] = ROOT_DIR / "index.html"
+THEMES_DIR: Final[Path] = ROOT_DIR / "themes"
+# Theme names as the page's loader (index.html) and lua/install.sh accept them;
 # "default" is the picker's no-theme entry, so a default.css could never be chosen.
 THEME_NAME_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9_-]+")
-LOGS_DIR: Final[Path] = Path(__file__).parent / "logs"
+LOGS_DIR: Final[Path] = ROOT_DIR / "logs"
 HISTORY_FILE: Final[Path] = LOGS_DIR / "history.jsonl"
 # ~1 MiB covers ~3 days of records at the default 600s interval (~2.3 KB/record)
 HISTORY_INITIAL_TAIL_READ: Final[int] = 1024 * 1024
@@ -101,8 +104,8 @@ HISTORY_SIDE_FIELDS: Final[frozenset[str]] = frozenset({"processes", "temps"})
 # run every minute, history records every ten. Never rotated, like history.jsonl;
 # the name must not match scripts/history-merge.sh's history-*.jsonl.gz glob.
 SERVICES_FILE: Final[Path] = LOGS_DIR / "services.jsonl"
-PASSWORD_FILE: Final[Path] = Path(__file__).parent / ".password"
-CONFIG_FILE: Final[Path] = Path(__file__).parent / "config.json"
+PASSWORD_FILE: Final[Path] = ROOT_DIR / ".password"
+CONFIG_FILE: Final[Path] = ROOT_DIR / "config.json"
 
 
 def _read_stamp(path: Path) -> str | None:
@@ -115,8 +118,8 @@ def _read_stamp(path: Path) -> str | None:
 
 # VERSION is the release (README: Versions and updates); .build is the commit
 # install.sh saw (`git describe`), so a box tracking main tells its pulls apart.
-VERSION: Final[str] = _read_stamp(Path(__file__).parent / "VERSION") or "unknown"
-BUILD: Final[str | None] = _read_stamp(Path(__file__).parent / ".build")
+VERSION: Final[str] = _read_stamp(ROOT_DIR / "VERSION") or "unknown"
+BUILD: Final[str | None] = _read_stamp(ROOT_DIR / ".build")
 DEFAULT_PORT: Final[int] = 8080
 DEFAULT_GLANCES_PORT: Final[int] = 61208
 # All interfaces by default (the dashboard is meant to be reached from other
@@ -6927,7 +6930,7 @@ QUICK START
   curl "http://<host>:8080/text?width=$COLUMNS"   # colour report: live snapshot + history
   curl http://<host>:8080/text?style=simple      # plain ASCII, no colour (best for agents/logs)
   curl -fsS http://<host>:8080/tui.py | python3 -   # live, auto-updating view
-  python3 tui.py                                 # the same, from a horatio checkout on the box
+  python3 python/tui.py                          # the same, from a horatio checkout on the box
 
 LIVE VIEW (tui.py)
   Standard library only (Python 3.8+, Linux/macOS). Detects terminal size,
@@ -6937,8 +6940,8 @@ LIVE VIEW (tui.py)
   detection; --once prints a single frame. Piping from curl runs whatever the
   server sends: fine on your own network. Otherwise download, read, then run:
     curl -fsS -o tui.py http://<host>:8080/tui.py && python3 tui.py
-  From a horatio checkout: python3 tui.py on the box itself (finds the local
-  server), or python3 tui.py http://<host>:8080 (or set HORATIO_URL).
+  From a horatio checkout: python3 python/tui.py on the box itself (finds the local
+  server), or python3 python/tui.py http://<host>:8080 (or set HORATIO_URL).
 
 /text  console report built from the history file
   view   both (default) | latest | history
@@ -7264,7 +7267,7 @@ async def tui_script(request: Request) -> Response:
     curl -fsS http://<host>:8080/tui.py | python3 -
     The copy served has SERVED_URL set to the address it was fetched from, so
     it connects back here with no argument."""
-    source: str = (Path(__file__).parent / "tui.py").read_text()
+    source: str = (SOURCE_DIR / "tui.py").read_text()
     base: str = _base_url(request)
     source = source.replace('SERVED_URL: str = ""', f"SERVED_URL: str = {base!r}", 1)
     # The usage comments too, so someone who just curls it sees commands that work.
