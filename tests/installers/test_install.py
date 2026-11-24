@@ -194,6 +194,18 @@ def test_prefix_containing_home_is_refused(box: Box, prefix: str) -> None:
     assert box.events("sudo") == [] and not box.unit.exists()
 
 
+def test_help_prints_the_header_and_changes_nothing(box: Box) -> None:
+    for flag in ("--help", "-h"):
+        result: subprocess.CompletedProcess[str] = box.run("--collector", flag)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.startswith("Horatio installer and updater.")
+        assert "./install.sh --collector" in result.stdout
+        assert "-h | --help" in result.stdout and "set -euo" not in result.stdout
+    assert box.events() == [] and not box.unit.exists()
+    unknown: subprocess.CompletedProcess[str] = box.run("--nope")
+    assert unknown.returncode == 2 and "./install.sh --help" in unknown.stderr
+
+
 def test_bad_characters_refused_before_sudo(tmp_path: Path) -> None:
     bad: Box = Box(tmp_path / "a", checkout="co:x")
     result: subprocess.CompletedProcess[str] = bad.run()

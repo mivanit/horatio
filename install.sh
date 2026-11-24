@@ -13,7 +13,15 @@
 #   ./install.sh --uninstall     remove the service, the collector, their snapshots and the
 #                                nethogs/pidstat capabilities
 #                                (the checkout, its config and history stay)
+#   ./install.sh -h | --help     print this and exit
 set -euo pipefail
+
+# The help is this header, so there is one copy. Checked before anything else, so
+# --help works from any user and changes nothing, wherever it appears.
+usage() { sed -n '2,/^set -euo pipefail$/{/^set /d;s/^# \{0,1\}//;p;}' "${BASH_SOURCE[0]}"; }
+for arg in "$@"; do
+    case "$arg" in -h|--help) usage; exit 0 ;; esac
+done
 
 # nethogs, getcap/setcap and sendmail live in /usr/sbin, which user shells often lack.
 PATH="$PATH:/usr/sbin:/sbin"
@@ -52,7 +60,7 @@ while [ $# -gt 0 ]; do
         --no-optional) OPTIONAL=0 ;;
         --grant-capabilities) GRANT_CAPS=1 ;;
         --uninstall) UNINSTALL=1 ;;
-        *) echo "unknown option: $1 (see the header of this script)" >&2; exit 2 ;;
+        *) echo "unknown option: $1 (see ./install.sh --help)" >&2; exit 2 ;;
     esac
     PASSTHROUGH+=("$1")
     shift

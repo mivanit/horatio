@@ -5,6 +5,8 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- `./install.sh -h` / `--help` prints the installer's options and exits, from any user,
+  without changing anything.
 - Sensors on any Linux box: the dashboard reads Linux hwmon itself (`hwmon.py`, no root,
   no collector) instead of Glances' sensors plugin, which is now switched off. It serves
   `/api/4/sensors` in the same shape, so the cards, the OpenWrt backend and history read
