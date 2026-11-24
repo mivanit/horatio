@@ -206,7 +206,7 @@ each gives in `alarm_items`) and the server's own fan rules and host checks. Eac
 | `expired` | it could not be re-checked for 30 days and at least 3 snapshots (a drive that is gone) | the same, plus `unchecked_since` |
 | `retired` | an authenticated user explicitly retires a held alarm | the same, plus `unchecked_since`; this records retirement, not proof of recovery |
 | `reviewed` | an operator marks journal/BMC evidence as reviewed | occurrence identifiers, reviewed evidence and optional `note` |
-| `reopened` | new evidence arrives after review | occurrence identifiers and new evidence; the alarm needs attention again |
+| `reopened` | new evidence arrives, or complete evidence becomes unavailable after review | occurrence identifiers and reason; the alarm needs attention again |
 | `boot` | the 15-min snapshot shows a new boot | `id`, `kernel`, `previous: {clean, ended, kernel}` |
 | `gap` | a source was not seen for more than three of its intervals (box off, timer stopped), or the server itself was not running | `from`, `to` |
 

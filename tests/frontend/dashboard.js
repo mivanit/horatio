@@ -2031,6 +2031,120 @@ async function testHistoryCapabilities() {
   await context.fetchEndpointList();
   assert(context.historyMetricAvailable('temps'));
   assert(!context.historyMetricAvailable('gpu') && !context.historyMetricAvailable('processes'));
+  context.safeFetch = async () => ({ ok: true, data: { endpoints: [...endpoints, '/alarms/history', '/alarms'] } });
+  await context.fetchEndpointList();
+  assert(context.historyMetricAvailable('alarms'), 'alarm history does not require configured services');
+  assert(!context.historyMetricAvailable('services'));
+}
+
+async function testAlarmHistory() {
+  const context = liveContext([]);
+  context.escapeHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  evaluate(context, between(app, 'function renderHardware', '// Power bar segment colours'));
+  Object.assign(context, { HISTORY_AXIS_WIDTH: 84, HISTORY_PLOT_INSET: 8,
+    historyTicks: () => [{ value: 1000000, label: 'start' }, { value: 2000000, label: 'end' }] });
+  const stamp = epoch => new Date(epoch * 1000).toISOString();
+  const event = (type, at, extra = {}) => ({ source: 'dashboard', key: 'fan/cpu', text: 'CPU fan <stopped>', since: 900,
+    event: type, timestamp: stamp(at), ...extra });
+  const entry = { alarmHistory: { cutoff: 1000, now: 2000, truncated: true, skipped: 2, events: [
+    event('cleared', 1300, { active_for_s: 400 }),
+    event('raised', 1400, { since: 1400 }),
+    event('cleared', 1600, { since: 1400, active_for_s: 200 }),
+    event('retired', 1700, { key: 'fan/old', note: '<script>replaced fan</script>' }),
+    event('expired', 1800, { key: 'fan/expired' }),
+    event('cleared', 1900, { source: 'sensors', after_boot: true }),
+    event('raised', 1950, { key: 'fan/initial', initial: true }),
+    event('reviewed', 1550, { source: 'state', key: 'journal/error', evidence: ['old'], note: 'Investigated' }),
+    event('reopened', 1650, { source: 'state', key: 'journal/error', evidence: ['old', 'new'] }),
+    { source: 'dashboard', event: 'gap', timestamp: stamp(1200), from: stamp(1000), to: stamp(1200) },
+  ] }, alarmCurrent: {
+    sources: { state: { status: 'ok' }, sensors: { status: 'error' } },
+    active: [{ source: 'state', key: 'journal/error', text: 'Journal issue', since: 900, evidence: ['old', 'new'] },
+      { source: 'dashboard', key: 'fan/longstanding', text: 'Longstanding fan fault', since: 500 }],
+    held: [{ source: 'dashboard', key: 'fan/removed', text: 'Removed fan', since: 600, unchecked_since: 800 }],
+    reviewed: [{ source: 'state', key: 'sel/memory', text: 'Reviewed SEL', since: 700, reviewed: { note: 'Replaced DIMM' } }],
+    review: { supported: true, password_configured: true }, retirement: { supported: true, password_configured: true },
+  } };
+  let html = context.alarmHistoryHTML(entry, 800);
+  assert(html.includes('First observed') && html.includes('before this range'));
+  assert(html.includes('Longstanding fan fault') && html.includes('Removed fan'));
+  assert(html.includes('Only part') && html.includes('2 unreadable'));
+  assert(html.includes('Current checks unavailable or stale: sensors'));
+  assert(html.includes('Monitoring gaps and boots (1)'));
+  assert.equal(context.alarmEventLabel({ event: 'changed', reason: 'new_evidence' }), 'New evidence');
+  assert.equal(context.alarmEventLabel({ event: 'reopened', reason: 'evidence_unavailable' }), 'Evidence unavailable; review no longer applies');
+  assert(context.hwEventText(event('reopened', 1600, { reason: 'evidence_unavailable' })).includes('evidence unavailable; review no longer applies'));
+  assert(!context.hwEventText(event('changed', 1600, { reason: 'new_evidence' })).includes('? -> ?'));
+  assert(!html.includes('<stopped>') && !html.includes('<script>'));
+  const group = (source, key) => entry.alarmGroups.find(g => g.source === source && g.key === key);
+  assert.equal(group('dashboard', 'fan/cpu').events.length, 3, 'repeated occurrences stay accessible in one lane');
+  assert.equal(group('sensors', 'fan/cpu').events.length, 1, 'identical keys from separate sources do not merge');
+  entry.alarmSelection = group('dashboard', 'fan/cpu').id;
+  html = context.alarmHistoryHTML(entry, 800);
+  assert.equal((html.match(/<strong>Recovery confirmed<\/strong>/g) || []).length, 2);
+  assert(html.includes('Observed interval: 400 seconds'));
+  assert(html.includes('Historical observations; current state is not established'));
+  const selected = entry.alarmSelection;
+  context.alarmHistoryHTML(entry, 800);
+  assert.equal(entry.alarmSelection, selected, 'refresh preserves selected identity');
+  entry.alarmSelection = group('dashboard', 'fan/old').id;
+  html = context.alarmHistoryHTML(entry, 800);
+  assert(html.includes('<strong>Closed by operator</strong>') && html.includes('&lt;script>replaced fan&lt;/script>'));
+  assert(!html.includes('data-alarm-action='), 'historical closure has no active action');
+  entry.alarmSelection = group('dashboard', 'fan/expired').id;
+  assert(context.alarmHistoryHTML(entry, 800).includes('<strong>Expired without re-check</strong>'));
+  entry.alarmSelection = group('sensors', 'fan/cpu').id;
+  assert(context.alarmHistoryHTML(entry, 800).includes('<strong>Cleared after reboot</strong>'));
+  entry.alarmSelection = group('state', 'journal/error').id;
+  html = context.alarmHistoryHTML(entry, 800);
+  assert(html.includes('data-alarm-action="review"') && html.includes('New evidence'));
+  entry.alarmCurrentStale = true;
+  assert(context.alarmHistoryHTML(entry, 800).includes('data-alarm-action="review" disabled'));
+  entry.alarmCurrentStale = false;
+  entry.alarmSelection = group('dashboard', 'fan/removed').id;
+  assert(context.alarmHistoryHTML(entry, 800).includes('data-alarm-action="retire"'));
+  entry.alarmHistory.events = [];
+  html = context.alarmHistoryHTML(entry, 800);
+  assert(html.includes('No alarm events recorded in this range') && html.includes('Longstanding fan fault'));
+  entry.alarmCurrent = {};
+  context.alarmHistoryHTML(entry, 800);
+  assert.equal(entry.alarmSelection, null, 'selection clears when no longer present');
+
+  let handler, recordings = 0, opened = 0;
+  const clickContext = vm.createContext({ document: { querySelector: () => ({ addEventListener: (_, cb) => { handler = cb; } }) },
+    historyCards: new Map(), fetch: () => { recordings++; return Promise.resolve(); }, createHistoryCard: () => { opened++; } });
+  evaluate(clickContext, between(app, '// Set up history button handlers', '// Set up global history controls'));
+  handler({ target: { closest: () => ({ dataset: { historyMetric: 'alarms' } }) } });
+  assert.equal(recordings, 0); assert.equal(opened, 1);
+}
+
+async function testAlarmHistoryRefresh() {
+  const loads = [], rendered = [];
+  const box = { innerHTML: '', clientWidth: 800 };
+  const entry = { loadSeq: 0, card: { querySelector: () => box } };
+  const context = vm.createContext({ historyCards: new Map([['alarms', entry]]),
+    HISTORY_METRICS: { alarms: { grid: '/api/alarms/history' } },
+    safeFetch: url => new Promise(resolve => loads.push({ url, resolve })),
+    renderAlarmHistory: entry => rendered.push(entry.alarmHistory.now), historyErrorHTML: error => error });
+  evaluate(context, between(app, 'async function loadHistoryData', '// Remove a history card'));
+  const old = context.loadHistoryData('alarms', 24), newer = context.loadHistoryData('alarms', 1);
+  loads[2].resolve({ ok: true, data: { cutoff: 100, now: 200, events: [] } });
+  loads[3].resolve({ ok: true, data: { active: [] } });
+  await newer;
+  loads[0].resolve({ ok: true, data: { cutoff: 0, now: 100, events: [] } });
+  loads[1].resolve({ ok: true, data: { active: [{ text: 'old' }] } });
+  await old;
+  assert.deepEqual(rendered, [200], 'older responses never replace newer history');
+  const failure = context.loadHistoryData('alarms', 1);
+  loads[4].resolve({ ok: false, errorType: 'network' }); loads[5].resolve({ ok: false });
+  await failure;
+  assert.equal(entry.alarmHistory.now, 200);
+  assert(entry.alarmHistoryError && entry.alarmCurrentStale, 'last good history remains with stale current actions disabled');
+  const closed = context.loadHistoryData('alarms', 1);
+  context.historyCards.delete('alarms');
+  loads[6].resolve({ ok: true, data: { now: 300 } }); loads[7].resolve({ ok: true, data: {} });
+  await closed;
+  assert.deepEqual(rendered, [200, 200], 'closed card is not resurrected by its response');
 }
 
 async function testAlarmRetirement() {
@@ -2081,8 +2195,9 @@ async function testAlarmRetirement() {
   assert.equal(current(), null);
 
   h.context.openAlarmRetirement(alarm);
-  popup = current(); field('password').value = 'test';
+  popup = current(); field('password').value = 'test'; field('note').value = 'Replaced the fan';
   pending = h.context.submitAlarmRetirement(popup);
+  assert.equal(h.writes[2].body.note, 'Replaced the fan');
   h.finishWrite(2, { status: 'retired', source: alarm.source, key: alarm.key });
   await new Promise(setImmediate);
   await h.finishRead(3, { held: [], recent: [{ event: 'retired', text: alarm.text }] });
@@ -2094,6 +2209,22 @@ async function testAlarmRetirement() {
   assert.deepEqual(refreshed.slice(-3).map(([key]) => key), ['alarms', 'sensors', 'storageHealth']);
   assert.deepEqual(rendered.at(-1).sensor_alarm_held, []);
   assert.equal(cancelledTimers.length, 3, 'every completed attempt clears its deadline');
+
+  const evidence = { source: 'state', key: 'journal/error', since: 100, text: 'Journal error', evidence: ['one', 'two'] };
+  h.context.openAlarmReview(evidence);
+  popup = current();
+  await h.context.submitAlarmRetirement(popup);
+  assert.equal(h.writes.length, 3, 'review also requires a password');
+  field('password').value = 'test'; field('note').value = 'Investigated <error>';
+  pending = h.context.submitAlarmRetirement(popup);
+  assert.equal(h.writes[3].url, '/api/alarms/review');
+  assert.deepEqual(h.writes[3].body, { source: 'state', key: 'journal/error', since: 100, evidence: ['one', 'two'], password: 'test', note: 'Investigated <error>' });
+  h.finishWrite(3, { status: 'reviewed' });
+  await new Promise(setImmediate);
+  await h.finishRead(6, { active: [], reviewed: [evidence] });
+  await h.finishRead(7, { status: 'ok' }); await h.finishRead(8, { status: 'ok' });
+  await pending;
+  assert.equal(current(), null);
 }
 
 // The Fans header never compares RPM with a GPU fan's percent.
@@ -2106,7 +2237,7 @@ function testFansHeader() {
 }
 
 (async () => {
-  for (const test of [testHardwareMemoryRows, testHardwareErrorKeepsServerFindings, testHardwareIndependentSources, testPowerHistoryPerRecord, testHistoryCapabilities, testAlarmRetirement, testFansHeader, testPowerFromHwmonAndTotals, testHardwareShowsServerSensorAlarms, testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
+  for (const test of [testHardwareMemoryRows, testHardwareErrorKeepsServerFindings, testHardwareIndependentSources, testPowerHistoryPerRecord, testHistoryCapabilities, testAlarmHistory, testAlarmHistoryRefresh, testAlarmRetirement, testFansHeader, testPowerFromHwmonAndTotals, testHardwareShowsServerSensorAlarms, testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testHardwareSince, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testCapturePendingAndHiddenTab, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
     testVersionFooter]) {

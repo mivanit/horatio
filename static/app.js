@@ -712,7 +712,7 @@ function renderHardware(data) {
   const cachedAlarms = getCache('alarms');
   const log = cachedAlarms?.recent;
   const recent = (Array.isArray(log) ? log : [])
-    .filter(e => ['raised', 'cleared', 'retired', 'expired', 'reviewed', 'reopened'].includes(e?.event))
+    .filter(e => ['raised', 'cleared', 'retired', 'expired', 'reviewed', 'reopened'].includes(e?.event) || e?.reason === 'new_evidence')
     .map(hwEventText).filter(Boolean).slice(-1).map(t => hwRow('hw-note', t));
   if (recent.length && !getFreshCache('alarms', 300000)) recent.push(hwRow('hw-note', 'Showing previously fetched alarm history.'));
   if (typeof historyMetricAvailable === 'function' && historyMetricAvailable('alarms')) {
@@ -877,11 +877,11 @@ function hwEventText(e) {
   if (e.event !== 'boot' && typeof e.text !== 'string') return null;
   switch (e.event) {
     case 'raised': return `${when} ${e.initial ? 'first seen' : 'raised'}: ${e.text}`;
-    case 'changed': return `${when} ${e.was ?? '?'} -> ${e.value ?? '?'}: ${e.text}`;
+    case 'changed': return e.reason === 'new_evidence' ? `${when} new evidence: ${e.text}` : `${when} ${e.was ?? '?'} -> ${e.value ?? '?'}: ${e.text}`;
     case 'cleared': return `${when} cleared${span(e.active_for_s)}${e.after_boot ? ' (reboot)' : ''}: ${e.text}`;
     case 'retired': return `${when} retired by operator: ${e.text}`;
     case 'reviewed': return `${when} reviewed by operator: ${e.text}`;
-    case 'reopened': return `${when} new evidence: ${e.text}`;
+    case 'reopened': return `${when} ${e.reason === 'evidence_unavailable' ? 'evidence unavailable; review no longer applies' : 'new evidence'}: ${e.text}`;
     case 'expired': return `${when} dropped, unchecked for 30 days: ${e.text}`;
     case 'boot': return `${when} booted${e.kernel ? ` ${e.kernel}` : ''}` +
       (e.previous?.clean === false ? `; the boot before ended without a shutdown${e.previous.ended ? ` at ${e.previous.ended}` : ''}` : '');
@@ -1031,6 +1031,8 @@ const ALARM_EVENT_LABELS = {
 };
 const alarmIdentity = row => JSON.stringify([row.source, row.key]);
 function alarmEventLabel(event) {
+  if (event.event === 'reopened' && event.reason === 'evidence_unavailable') return 'Evidence unavailable; review no longer applies';
+  if (event.reason === 'new_evidence') return 'New evidence';
   if (event.event === 'raised' && event.initial) return 'First observed';
   if (event.event === 'cleared' && event.after_boot) return 'Cleared after reboot';
   return ALARM_EVENT_LABELS[event.event]?.[1] || event.event;
@@ -1047,7 +1049,7 @@ function alarmHistoryGroups(data, current) {
     if (!groups.has(id)) groups.set(id, { id, source: row.source, key: row.key, text: row.text, events: [], current: null });
     return groups.get(id);
   };
-  const events = (Array.isArray(data?.events) ? data.events : []).filter(e => ALARM_EVENT_LABELS[e?.event] && Number.isFinite(Date.parse(e.timestamp)))
+  const events = (Array.isArray(data?.events) ? data.events : []).filter(e => Array.isArray(ALARM_EVENT_LABELS[e?.event]) && Number.isFinite(Date.parse(e.timestamp)))
     .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
   for (const event of events) {
     const group = add(event);
@@ -1148,7 +1150,12 @@ function renderAlarmHistory(entry) {
   if (reviewed) entry.alarmReviewedOpen = reviewed.open;
   box.innerHTML = alarmHistoryHTML(entry, box.clientWidth - HISTORY_AXIS_WIDTH - HISTORY_PLOT_INSET);
   const lanes = box.querySelector('.alarm-lanes');
-  if (lanes) lanes.scrollTop = scroll;
+  if (lanes) {
+    // Let the scrollbar occupy the card's right padding, not the shared plot.
+    // The timeline and the axis then keep the numeric history charts' width.
+    lanes.style.marginRight = `-${lanes.offsetWidth - lanes.clientWidth}px`;
+    lanes.scrollTop = scroll;
+  }
   if (focused != null) box.querySelector(`.alarm-lane[data-alarm-lane="${focused}"]`)?.focus({ preventScroll: true });
   box.onclick = event => {
     const lane = event.target.closest('[data-alarm-lane]');

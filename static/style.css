@@ -558,7 +558,7 @@ h1 {
 .alarm-current-row small { display: block; color: var(--text-muted); }
 .alarm-current-row:hover { text-decoration: underline; }
 .alarm-legend { color: var(--text-muted); font-size: 11px; margin: 12px 0; }
-.alarm-lanes { max-height: 360px; overflow-y: auto; scrollbar-gutter: stable; }
+.alarm-lanes { max-height: 360px; overflow-y: auto; }
 .alarm-lane {
   display: block; width: 100%; padding: 5px 0; margin: 0; background: transparent;
   border: 0; border-bottom: 1px solid var(--border-color); color: inherit;
@@ -568,7 +568,7 @@ h1 {
 .alarm-lane:focus-visible, .alarm-current-row:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
 .alarm-lane-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alarm-lane-name small { color: var(--text-muted); }
-.alarm-track { position: relative; display: block; height: 28px; margin: 2px 8px 0; }
+.alarm-track { position: relative; display: block; height: 28px; margin: 2px 0 0; }
 .alarm-track::before { content: ''; position: absolute; left: 0; right: 0; top: 14px; border-top: 1px solid var(--border-color); }
 .alarm-marker { position: absolute; top: 2px; transform: translateX(-50%); font-size: 17px; line-height: 24px; }
 .alarm-marker-raised, .alarm-marker-reopened { color: var(--color-error-light); }

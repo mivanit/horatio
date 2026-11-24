@@ -110,11 +110,14 @@ of stale or held findings; [configuration](configuration.md) owns the configurab
 
 Close a held occurrence with a JSON body containing
 `{source, key, since, unchecked_since, password, note?}`. The optional `note` is a
-string of at most 2,000 characters, saved with the `retired` event. Copy the occurrence identifiers
-from `GET /api/alarms`. Returns 409 if that occurrence changed or is no longer held,
+string of at most 2,000 characters, saved with the `retired` event. Copy the
+occurrence identifiers from `GET /api/alarms`. Returns 409 if that occurrence changed or is no longer held,
 and 503 when no password is configured. The GET response's `retirement` metadata
 advertises availability. See [operations](operations.md#alarms) for the UI workflow
 and what retirement means.
+
+Notes are readable through alarm history by anyone with dashboard access; the
+password protects writing them, not reading them.
 
 ### `POST /api/alarms/review`
 
@@ -145,7 +148,9 @@ machine was healthy: an ongoing fault may produce no events in the range.
 
 `cleared` means recovery was confirmed, `retired` means an operator closed an
 unchecked alarm, and `expired` means evidence remained unavailable. `reviewed`
-records an operator review; `reopened` records new evidence after review.
+records an operator review; `reopened` records new evidence after review, or
+review becoming inapplicable because complete evidence is unavailable
+(`reason: "evidence_unavailable"`).
 These are observations, not a continuous health trace. `initial: true` means
 the fault was already present when first observed, and `after_boot: true` on a
 clear event indicates it cleared after a reboot.
