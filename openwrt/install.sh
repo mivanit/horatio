@@ -139,9 +139,21 @@ info "Checking dependencies..."
 # every request (metrics.lua). Optional: the dashboard runs without it.
 NO_TIMEOUT="Could not install coreutils-timeout; a hung command can stall the dashboard."
 if command -v apk >/dev/null 2>&1; then
-    # uhttpd with its Lua plugin, both at the feed's version: a newer plugin in an
-    # older uhttpd gets a garbled handler path and the dashboard never starts.
-    apk add --upgrade uhttpd uhttpd-mod-lua luci-lib-jsonc luci-lib-nixio
+    # apk's package index is in RAM and gone after a reboot: without it the
+    # upgrade below fails or, worse, resolves against a stale index.
+    apk update || warn "apk update failed; the installs below may fail or use an old package index"
+    # uhttpd and its plugins, all at the feed's version and in ONE transaction: a
+    # plugin from another version than the server gets a garbled handler path.
+    # That is the Lua plugin (the dashboard never starts) and equally the ubus
+    # and ucode plugins LuCI needs: an old uhttpd-mod-ubus left beside a new
+    # uhttpd kills LuCI's backend at its first request. Only the ones already
+    # installed are named, so a router without LuCI does not gain them.
+    plugins=""
+    for plugin in uhttpd-mod-ubus uhttpd-mod-ucode; do
+        apk list --installed 2>/dev/null | grep -q "^$plugin-[0-9]" && plugins="$plugins $plugin"
+    done
+    # shellcheck disable=SC2086  # $plugins is a list of words
+    apk add --upgrade uhttpd uhttpd-mod-lua $plugins luci-lib-jsonc luci-lib-nixio
     command -v timeout >/dev/null 2>&1 || apk add coreutils-timeout || warn "$NO_TIMEOUT"
 elif command -v opkg >/dev/null 2>&1; then
     # opkg's package lists are in RAM and gone after a reboot: without them

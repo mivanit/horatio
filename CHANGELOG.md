@@ -18,6 +18,13 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
   one `check:` hint. The Services card shows when an outage began
   (`down (timeout) since …`). All of it appears once the collectors and the server are
   updated; an older one of either simply shows what it showed before.
+- OpenWrt installer (apk): `apk update` runs first (its index is lost at every reboot; a
+  failure is a warning), and `uhttpd` is upgraded in one transaction with every uhttpd
+  plugin the router already has. Until now only `uhttpd-mod-lua` was named, so a router
+  with LuCI kept an old `uhttpd-mod-ubus` beside the new server and LuCI stopped
+  answering until that package was upgraded by hand.
+- OpenWrt: `/api/4/uptime` uses the Linux backend's format, `1 day, 20:14:03` (was
+  `1d 20:14:03`), so a reader of the API needs one parser for both.
 - Hardware collector: every alarm now has a stable identity. Both snapshots carry
   `alarm_items` (a `key` for each alarm string, plus a `value` for fault counters such as
   reallocated sectors and ECC counts) and `checked` (what this run really evaluated, so a

@@ -165,10 +165,14 @@ function M.uptime()
     local hours = math.floor((secs % 86400) / 3600)
     local mins = math.floor((secs % 3600) / 60)
     local s = secs % 60
+    -- The same text as the Linux backend, whose /api/4/uptime is Glances
+    -- printing a Python timedelta: "20:14:03", "1 day, 20:14:03",
+    -- "2 days, 0:05:00". One format, so a reader of the API needs one parser.
+    local clock = string.format("%d:%02d:%02d", hours, mins, s)
     if days > 0 then
-        return string.format("%dd %d:%02d:%02d", days, hours, mins, s)
+        return string.format("%d day%s, %s", days, days == 1 and "" or "s", clock)
     end
-    return string.format("%d:%02d:%02d", hours, mins, s)
+    return clock
 end
 
 function M.system_info()

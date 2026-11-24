@@ -41,6 +41,9 @@ if name == "uci" and args[:2] == ["get", "network.lan.ipaddr"]:
     print(os.environ.get("HORATIO_DETECTED_LAN_IP", "192.168.1.1"))
 elif name == "uci" and args == ["-q", "get", "uhttpd.dashboard"]:
     sys.exit(1 if os.environ.get("HORATIO_SECTION_MISSING") == "1" else 0)
+elif name == "apk" and args == ["list", "--installed"]:
+    for package in os.environ.get("HORATIO_APK_INSTALLED", "uhttpd uhttpd-mod-lua").split():
+        print(package + "-2026.01.02~abcdef12-r1 aarch64_cortex-a53 {feeds/base} (ISC) [installed]")
 elif name == "ip":
     print("    inet 127.0.0.1/8 scope host lo")
     address = os.environ.get("HORATIO_INTERFACE_IP", "192.168.2.1/24")
@@ -177,6 +180,54 @@ class TestOpenWrtInstaller:
 
     def cron_writes(self: TestOpenWrtInstaller) -> list[dict[str, Any]]:
         return [entry for entry in self.events("crontab") if "content" in entry]
+
+    def packages(self: TestOpenWrtInstaller) -> list[list[str]]:
+        """The apk calls that change something, in order."""
+        return [
+            event["args"]
+            for event in self.events("apk")
+            if event["args"] != ["list", "--installed"]
+        ]
+
+    def test_apk_refreshes_its_index_and_upgrades_uhttpd_with_all_its_plugins(
+        self: TestOpenWrtInstaller,
+    ) -> None:
+        wanted: list[str] = ["luci-lib-jsonc", "luci-lib-nixio"]
+        assert self.run_install().returncode == 0
+        assert self.packages() == [
+            ["update"],
+            ["add", "--upgrade", "uhttpd", "uhttpd-mod-lua", *wanted],
+        ]
+        # LuCI's plugins, when the router has them, go into the same transaction:
+        # an old uhttpd-mod-ubus beside a new uhttpd breaks LuCI. A package
+        # that merely starts with the same letters does not.
+        (self.root / "events").unlink()
+        installed: str = (
+            "uhttpd uhttpd-mod-lua uhttpd-mod-ubus uhttpd-mod-ucode uhttpd-mod-ubusx"
+        )
+        assert (
+            self.run_install(extra_env={"HORATIO_APK_INSTALLED": installed}).returncode
+            == 0
+        )
+        assert self.packages()[1] == [
+            "add",
+            "--upgrade",
+            "uhttpd",
+            "uhttpd-mod-lua",
+            "uhttpd-mod-ubus",
+            "uhttpd-mod-ucode",
+            *wanted,
+        ]
+
+    def test_a_failed_apk_update_is_a_warning_not_the_end(
+        self: TestOpenWrtInstaller,
+    ) -> None:
+        result: subprocess.CompletedProcess[str] = self.run_install(
+            extra_env={"HORATIO_FAIL_COMMAND": '["apk", "update"]'}
+        )
+        assert result.returncode == 0, result.stderr
+        assert "apk update failed" in result.stdout + result.stderr
+        assert self.packages()[1][:2] == ["add", "--upgrade"]
 
     def test_download_failure_is_retried_and_config_precedes_restart(
         self: TestOpenWrtInstaller,

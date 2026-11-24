@@ -326,7 +326,11 @@ that is the repair after an update that stopped partway. The installer stamps th
 (`?v=`), as uhttpd sends no cache headers and browsers would keep the old scripts.
 
 Requires `uhttpd-mod-lua`, `luci-lib-jsonc`, and `luci-lib-nixio` (installed by the
-script). uhttpd serves only `www/`, never the checkout: the installer copies
+script). On an apk-based OpenWrt the script refreshes the package index (`apk update`)
+and upgrades `uhttpd` together with every uhttpd plugin the router already has, LuCI's
+`uhttpd-mod-ubus` and `uhttpd-mod-ucode` included: a plugin left at an older version than
+the server breaks whatever uses it (LuCI answers "Bad Gateway" behind nginx). After an
+install, `apk list --installed | grep uhttpd` should show one version. uhttpd serves only `www/`, never the checkout: the installer copies
 `index.html`, `static/` and `themes/` there (and lists the themes in `www/themes/index.json`),
 so rerun it after updating or adding a theme. The config lives at
 `www/config.json` (served as `/config.json`, read by the API; if it is not valid JSON the

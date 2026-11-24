@@ -313,5 +313,14 @@ check(pings.targets["192.0.2.1"].latency_ms == 1.23 and pings.targets["gateway.e
 metrics.init({})
 check(metrics.ping().disabled == true, "no targets configured disables ping")
 
+-- Uptime reads like the Linux backend's (Glances: a Python timedelta), days included.
+for seconds, text in pairs({[0] = "0:00:00", [72843.7] = "20:14:03", [86400] = "1 day, 0:00:00",
+                            [159243] = "1 day, 20:14:03", [173100] = "2 days, 0:05:00"}) do
+    files["/proc/uptime"] = string.format("%.2f 0.00\n", seconds)
+    check(metrics.uptime() == text, "uptime " .. seconds .. " s", metrics.uptime())
+end
+files["/proc/uptime"] = nil
+check(metrics.uptime() == "unknown", "no /proc/uptime")
+
 io.open, io.popen, os.rename, os.remove = real_open, real_popen, real_rename, real_remove
 print("All " .. checks .. " metrics checks passed")
