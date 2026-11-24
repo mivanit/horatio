@@ -278,9 +278,7 @@ def test_round_is_logged_and_reloaded(tmp_path: Path) -> None:
         with patch.object(server, "_services_started", later - 5):
             assert snapshot_at(later)["stale"] is False
             assert (
-                snapshot_at(
-                    later + 4 * server.SERVICES_CHECK_INTERVAL + 60
-                )["stale"]
+                snapshot_at(later + 4 * server.SERVICES_CHECK_INTERVAL + 60)["stale"]
                 is True
             )
         # No round at all: stale counts from the checker's start, so a first
