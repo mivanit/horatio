@@ -1,6 +1,6 @@
 # Changelog
 
-Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
+Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#versions-and-updates)). Add changes under
 `## [Unreleased]`; `make release V=X.Y.Z` turns that section into the release.
 
 ## [Unreleased]
@@ -26,8 +26,10 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 - Mail cache invalidation includes permissions and ownership. Installer test
   timeouts allow for slower hosts without changing production timeouts.
 
-- The Lua backend has a separate Linux/systemd installer, alongside its OpenWrt
-  installer. Native dependencies are built in the checkout, the service runs as
+- The Lua installers are named `lua/install-linux.sh` and `lua/install-openwrt.sh`.
+  The former `lua/install.sh` and `openwrt/install.sh` paths remain compatibility
+  entrypoints for updates across releases. On Linux/systemd, native dependencies
+  are built in the checkout, the service runs as
   the installing user, and a systemd timer records history while the dashboard is closed.
 
 - Source layout: Python modules live in `python/`, and the lightweight Lua backend
