@@ -133,7 +133,7 @@ ago`), so two snapshots cannot be compared by text. Each snapshot therefore also
 | `sensors-snapshot/missing`, `/stale` | the 60 s file, judged by the 15-min run |
 | `bmc/<fan\|temp\|power>/<name>@<entity>` | a BMC sensor whose status is not ok |
 | `fans/ceiling/<name>@<entity>` | `fan_rpm_alarm_above`; one key per fan, so a missing fan cannot be cleared by its neighbors |
-| `gpu/<index>/temp/<memory\|core\|tlimit>`, `/slowdown`, `/ecc`, `/retired_pages` | per GPU, by nvidia-smi index (PCI bus order) |
+| `gpu/pci/<domain:bus:slot.function>/temp/<memory\|core\|tlimit>`, `/slowdown`, `/ecc`, `/retired_pages` | per GPU, by normalized PCI address; indices are display-only. Legacy index alarms remain held until retired, so a surviving GPU cannot clear another GPU's fault |
 | `capture/<name>`, `unparsed/<name>` | a capture that failed, a line that did not parse |
 | `collector/<part>`, `smart/dev:<name>/crash` | a part of the 15-min run that crashed; the check of one drive that crashed |
 

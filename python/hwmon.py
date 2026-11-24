@@ -30,6 +30,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Final
+from urllib.parse import quote
 
 HWMON_ROOT: Final[str] = "/sys/class/hwmon"
 THERMAL_ROOT: Final[str] = "/sys/class/thermal"
@@ -273,6 +274,69 @@ def _device_key(hwmon: Path) -> tuple[str, str]:
     return (device, str(hwmon))
 
 
+def _physical_device_path(device: Path, depth: int = 0) -> str | None:
+    """A sysfs topology path without probe counters, or None if it is ambiguous.
+
+    I2C mux channel links carry physical topology; logical bus numbers do not.
+    USB root hub versions distinguish the USB2/USB3 buses of one controller,
+    while ports and interfaces distinguish their children. HID's final suffix
+    is an allocation counter, not a device identity.
+    """
+    if device.name == "devices":
+        return ""
+    if device.parent == device or depth > 64:
+        return None
+    name: str = device.name
+    parent: Path = device.parent
+    if re.fullmatch(r"i2c-\d+", name):
+        mux_link: Path = device / "mux_device"
+        if mux_link.is_symlink():
+            try:
+                parent = mux_link.resolve(strict=True)
+                channels: list[str] = [
+                    link.name
+                    for link in parent.glob("channel-*")
+                    if re.fullmatch(r"channel-\d+", link.name)
+                    and link.resolve(strict=True) == device
+                ]
+            except (OSError, RuntimeError):
+                return None
+            if len(channels) != 1:
+                return None
+            name = channels[0]
+        else:
+            adapter: str | None = _read(device / "name")
+            if (
+                not adapter
+                or re.search(r"\bi2c-\d+\b", adapter)
+                or any(
+                    sibling != device and _read(sibling / "name") == adapter
+                    for sibling in parent.glob("i2c-*")
+                )
+            ):
+                return None
+            name = "i2c-" + quote(adapter, safe="-_.")
+    elif re.fullmatch(r"\d+-[0-9a-fA-F]{4}", name) and re.fullmatch(
+        r"i2c-\d+", parent.name
+    ):
+        name = "address-" + name.split("-", 1)[1].lower()
+    elif re.fullmatch(r"usb\d+", name):
+        version: str | None = _read(device / "version")
+        if not version:
+            return None
+        name = "usb" + quote(version, safe=".")
+    elif re.fullmatch(r"\d+-\d+(?:\.\d+)*(?::\d+\.\d+)?", name) and any(
+        re.fullmatch(r"usb\d+", ancestor.name) for ancestor in device.parents
+    ):
+        name = "port-" + name.split("-", 1)[1]
+    elif re.fullmatch(
+        r"[0-9a-fA-F]{4}:[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\.[0-9a-fA-F]+", name
+    ):
+        name = name.rsplit(".", 1)[0].lower()
+    prefix: str | None = _physical_device_path(parent, depth + 1)
+    return f"{prefix}/{name}".lstrip("/") if prefix is not None else None
+
+
 def _fan_id(hwmon: Path, chip: str, channel: int) -> str | None:
     """A physical device and channel, independent of the hwmon probe number.
 
@@ -281,14 +345,16 @@ def _fan_id(hwmon: Path, chip: str, channel: int) -> str | None:
     """
     try:
         device: Path = (hwmon / "device").resolve(strict=True)
-    except OSError:
-        device = hwmon.resolve()
+    except (OSError, RuntimeError):
+        try:
+            device = hwmon.resolve()
+        except (OSError, RuntimeError):
+            return None
     path: str = re.sub(r"/hwmon/hwmon\d+(?:/device)?$", "", str(device))
     if re.search(r"/hwmon\d+(?:/device)?$", path):
         return None
-    if "/devices/" not in path:
-        return None
-    return f"@{path.split('/devices/', 1)[1]}/{chip}/fan{channel}"
+    physical: str | None = _physical_device_path(Path(path))
+    return f"@{physical}/{chip}/fan{channel}" if physical else None
 
 
 # amdgpu on an APU reports the whole package (CPU + GPU) as slowPPT / fastPPT: the
@@ -407,11 +473,27 @@ def fan_status(
     """
     rules: dict[str, Any] = config if isinstance(config, dict) else {}
     names: dict[str, str] = aliases or {}
-    # An alias naming several sensors is not a selector for any one of them.
+    # Old history labels may retain the same alias as the new physical id.
+    # Count physical targets, not spelling variants. An alias alone must not
+    # turn a legacy ordinal label into a new device binding.
+    targets: dict[str, set[str]] = {}
+    for raw, alias in names.items():
+        if raw.startswith("@"):
+            targets.setdefault(alias, set()).add(raw)
+    stable_aliases: set[str] = set(targets)
+    for raw, alias in names.items():
+        if raw.startswith("@"):
+            continue
+        if alias in stable_aliases:
+            targets[alias].update(
+                r["id"]
+                for r in rows
+                if r.get("type") == FAN and r["label"] == raw and r.get("id")
+            )
+        else:
+            targets.setdefault(alias, set()).add(raw)
     raw_of: dict[str, str] = {
-        shown: raw
-        for raw, shown in names.items()
-        if list(names.values()).count(shown) == 1
+        alias: next(iter(ids)) for alias, ids in targets.items() if len(ids) == 1
     }
     default: dict[str, Any] = {**FAN_DEFAULT, **_rule(rules.get("default"))}
     alarms: list[dict[str, Any]] = []
@@ -424,6 +506,7 @@ def fan_status(
     shown: list[dict[str, Any]] = list(rows)
     present: dict[str, dict[str, Any]] = {}
     legacy: set[str] = set()
+    unidentified: set[str] = set()
     row: dict[str, Any]
     for row in rows:
         if row.get("type") != FAN:
@@ -432,9 +515,23 @@ def fan_status(
         if "id" in row:
             legacy.add(row["label"])
         if identity is None:
+            label: str = row["label"]
+            unidentified.add(label)
             notes.append(
-                f"fan {row['label']}: no stable device path; fan rules cannot be evaluated"
+                f"fan {label}: no stable device identity; current readings are evaluated, but its alarm history cannot be tracked"
             )
+            rule: dict[str, Any] = {
+                **default,
+                **_rule(rules.get(names.get(label))),
+                **_rule(rules.get(label)),
+            }
+            minimum: float | None = _minimum(rule)
+            if minimum is not None and row["value"] < minimum:
+                text: str = f"fan {names.get(label, label)}: {row['value']:g} RPM, below its {minimum:g} RPM minimum"
+                if rule.get("on_low") == "note":
+                    notes.append(text)
+                else:
+                    alarms.append({"text": text})
         else:
             present[identity] = row
 
@@ -445,6 +542,10 @@ def fan_status(
     selectors.update(dict.fromkeys(sorted(configured | known)))
     selector: str
     for selector in selectors:
+        if selector in unidentified:
+            # No stable key can associate this observation with remembered
+            # evidence. Report the current threshold above, without clearing it.
+            continue
         alias: str | None = names.get(selector)
         rule: dict[str, Any] = {
             **default,
@@ -519,13 +620,13 @@ def fan_findings(
 def _minimum(rule: dict[str, Any]) -> float | None:
     """A rule's ``min_rpm`` when it is a number (not a bool), else None."""
     value: Any = rule.get("min_rpm")
-    if (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    ):
-        return float(value)
-    return None
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        number: float = float(value)
+    except (OverflowError, ValueError, TypeError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def apply_fan_rules(

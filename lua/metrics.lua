@@ -559,6 +559,25 @@ end
 
 function M.sensors()
     local sensors = {}
+    local fs = require("nixio").fs
+
+    -- Class indices are probe order, not device identity. Resolve the physical
+    -- parent and channel instead; NVMe's controller index is probe order too.
+    local function device_key(path)
+        local device = fs.realpath(path .. "/device") or fs.realpath(path)
+        if not device then return nil end
+        device = device:gsub("/hwmon/hwmon%d+$", ""):gsub("/nvme/nvme%d+$", "")
+        if not device:match("^/sys/devices/") or device:match("/thermal_zone%d+")
+            or device:match("/hwmon%d+") then return nil end
+        return device:gsub("^/sys/devices/", "")
+    end
+
+    local function add(label, value, device, channel)
+        sensors[#sensors + 1] = {
+            type = "temperature_core", label = label, value = round(value / 1000, 1),
+            key = device and (label .. " [" .. device .. "/" .. channel .. "]") or label
+        }
+    end
 
     -- Thermal zones
     for _, tz_path in ipairs(glob("/sys/class/thermal/thermal_zone*")) do
@@ -566,13 +585,10 @@ function M.sensors()
         if temp_str then
             local temp = tonumber(temp_str)
             if temp and temp > 0 then
-                local label = read_line(tz_path .. "/type")
-                    or ("zone" .. (tz_path:match("thermal_zone(%d+)") or ""))
-                sensors[#sensors + 1] = {
-                    type = "temperature_core",
-                    label = label,
-                    value = round(temp / 1000, 1)
-                }
+                local kind = read_line(tz_path .. "/type")
+                local label = kind or ("zone" .. (tz_path:match("thermal_zone(%d+)") or ""))
+                add(label, temp, device_key(tz_path), "thermal/" .. label)
+                if not kind then sensors[#sensors].key = false end
             end
         end
     end
@@ -583,22 +599,25 @@ function M.sensors()
         if temp_str then
             local temp = tonumber(temp_str)
             if temp and temp > 0 then
+                local hw_path = temp_file:match("^(.*)/[^/]+$")
+                local idx = temp_file:match("temp(%d+)_input") or ""
                 local label = read_line((temp_file:gsub("_input$", "_label")))
                 if not label then
-                    local hw_path = temp_file:match("^(.*)/[^/]+$")
                     local hwmon_name = read_line(hw_path .. "/name") or "hwmon"
-                    local idx = temp_file:match("temp(%d+)_input") or ""
                     label = hwmon_name .. " " .. idx
                 end
-                sensors[#sensors + 1] = {
-                    type = "temperature_core",
-                    label = label,
-                    value = round(temp / 1000, 1)
-                }
+                add(label, temp, device_key(hw_path), "temp" .. idx)
             end
         end
     end
 
+    -- Keep unidentified duplicates visible, but do not overwrite a history
+    -- series or manufacture an identity from enumeration order.
+    local counts = {}
+    for _, sensor in ipairs(sensors) do counts[sensor.key] = (counts[sensor.key] or 0) + 1 end
+    for _, sensor in ipairs(sensors) do
+        if counts[sensor.key] > 1 then sensor.key = false end
+    end
     return sensors
 end
 

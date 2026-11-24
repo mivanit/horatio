@@ -310,6 +310,13 @@ def short_model(name):
     words = [w for w in name.split() if w not in ("NVIDIA", "Tesla", "GeForce", "Quadro")]
     return " ".join(words).split("-")[0] or name
 
+def pci_bus_id(value):
+    match = re.fullmatch(r"([0-9a-f]{4,8}):([0-9a-f]{2}):([0-9a-f]{2})\.([0-7])", value, re.IGNORECASE)
+    if match is None:
+        return None
+    domain, bus, slot, function = (int(part, 16) for part in match.groups())
+    return f"{domain:04x}:{bus:02x}:{slot:02x}.{function:x}"
+
 def gpu_limits(text):
     # `nvidia-smi -q -d TEMPERATURE`: one block per GPU, headed by its bus id at
     # column 0 ("GPU 00000000:82:00.0"), then indented "Key : value" lines such as
@@ -325,7 +332,8 @@ def gpu_limits(text):
     limits, cur = {}, None
     for line in text.splitlines():
         if line.startswith("GPU "):
-            cur = limits.setdefault(line.split()[1].upper(), dict.fromkeys(keys.values()))
+            identity = pci_bus_id(line.split()[1])
+            cur = limits.setdefault(identity, dict.fromkeys(keys.values())) if identity else None
             continue
         key, _, value = line.partition(":")
         if cur is not None and key.strip() in keys:
@@ -351,6 +359,11 @@ for line in read("gpu.txt").splitlines():
         continue
     f = dict(zip(GPU_FIELDS, parts))
     n = int(num(f["index"]))
+    bus_id = pci_bus_id(f["bus_id"])
+    if bus_id is None:
+        alarm("unparsed/gpu", f"collector: GPU {n}: invalid PCI bus identity {f['bus_id']!r}")
+        continue
+    gpu_key = f"gpu/pci/{bus_id}"
     # "Active" / "Not Active"; an unavailable flag cannot establish recovery.
     # sw is the driver's own
     # capping at max operating temp, hw the board's emergency halving of the clocks.
@@ -358,9 +371,9 @@ for line in read("gpu.txt").splitlines():
     throttle = [r for r in ("sw_thermal", "hw_thermal") if f[r] == "Active"]
     us = lambda k: round(num(f[k]) / 1e6, 1) if num(f[k]) is not None else None
     ecc = num(f["ecc_uncorrected"])
-    row = {"index": n, "name": f["name"], "label": f"GPU {n} ({short_model(f['name'])})",
+    row = {"index": n, "bus_id": bus_id, "name": f["name"], "label": f"GPU {n} ({short_model(f['name'])})",
            "core_c": num(f["core_c"]), "mem_c": num(f["mem_c"]),
-           "limits": limits.get(f["bus_id"].upper(), {"shutdown": None, "slowdown": None, "max_op": None, "mem_max_op": None}),
+           "limits": limits.get(bus_id, {"shutdown": None, "slowdown": None, "max_op": None, "mem_max_op": None}),
            "throttle": throttle, "hw_slowdown": f["hw_slowdown"] == "Active",
            "sw_thermal_s": us("sw_thermal_us"), "hw_thermal_s": us("hw_thermal_us"),
            "ecc_uncorrected": int(ecc) if ecc is not None else None,
@@ -374,34 +387,34 @@ for line in read("gpu.txt").splitlines():
         # while the memory is already past its own.
         for what, temp, top in (("memory", row["mem_c"], lim["mem_max_op"]), ("core", row["core_c"], lim["max_op"])):
             if temp is not None and top is not None and capture_ok("gpu") and capture_ok("gpu-temp"):
-                check(f"gpu/{n}/temp/{what}")
+                check(f"{gpu_key}/temp/{what}")
             if temp is not None and top is not None and temp >= top - margin:
-                alarm(f"gpu/{n}/temp/{what}", f"GPU {n}: {what} {deg(temp)} C >= max operating {deg(top)} C - {deg(margin)}")
+                alarm(f"{gpu_key}/temp/{what}", f"GPU {n}: {what} {deg(temp)} C >= max operating {deg(top)} C - {deg(margin)}")
         current, top = lim.get("current_tlimit"), lim.get("max_op_tlimit")
         if current is not None and top is not None and capture_ok("gpu-temp"):
-            check(f"gpu/{n}/temp/tlimit")
+            check(f"{gpu_key}/temp/tlimit")
         if current is not None and top is not None and current <= top + margin:
-            alarm(f"gpu/{n}/temp/tlimit", f"GPU {n}: T.Limit {deg(current)} C <= max operating {deg(top)} C + {deg(margin)}")
+            alarm(f"{gpu_key}/temp/tlimit", f"GPU {n}: T.Limit {deg(current)} C <= max operating {deg(top)} C + {deg(margin)}")
     if throttle:
-        alarm(f"gpu/{n}/slowdown", f"GPU {n}: thermal slowdown active ({', '.join(r.split('_')[0] for r in throttle)})")
+        alarm(f"{gpu_key}/slowdown", f"GPU {n}: thermal slowdown active ({', '.join(r.split('_')[0] for r in throttle)})")
     if row["ecc_uncorrected"]:
-        alarm(f"gpu/{n}/ecc", f"GPU {n}: {row['ecc_uncorrected']} uncorrected ECC errors since driver load",
+        alarm(f"{gpu_key}/ecc", f"GPU {n}: {row['ecc_uncorrected']} uncorrected ECC errors since driver load",
               row["ecc_uncorrected"])
     if row["retired_pending"]:
-        alarm(f"gpu/{n}/retired_pages", f"GPU {n}: retired pages pending")
-    # The GPU index is nvidia-smi's, which follows PCI bus order: stable for a
-    # given set of cards. The temperature rules need the limits from the second
-    # capture; with the margin off they no longer apply and may clear.
+        alarm(f"{gpu_key}/retired_pages", f"GPU {n}: retired pages pending")
+    # Index is display-only: removing a card can renumber the survivors. Never
+    # check legacy gpu/<index> keys; old evidence remains held until retired.
+    # Temperature rules need the second capture; an explicit disable may clear.
     if capture_ok("gpu"):
         check("gpu/driver-mismatch")
         if all(f[k] in ("Active", "Not Active") for k in ("sw_thermal", "hw_thermal")):
-            check(f"gpu/{n}/slowdown")
+            check(f"{gpu_key}/slowdown")
         if row["ecc_uncorrected"] is not None:
-            check(f"gpu/{n}/ecc")
+            check(f"{gpu_key}/ecc")
         if row["retired_pending"] is not None:
-            check(f"gpu/{n}/retired_pages")
+            check(f"{gpu_key}/retired_pages")
     if margin is None:
-        check(f"gpu/{n}/temp")
+        check(f"{gpu_key}/temp")
 
 # ---- RAPL: CPU and DRAM watts per socket --------------------------------------
 # Emitted in the same row shape as the IPMI power rows, so the dashboard's

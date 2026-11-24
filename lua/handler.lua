@@ -188,7 +188,9 @@ routes["/list-endpoints"] = function()
         endpoint_list[#endpoint_list + 1] = path
     end
     table.sort(endpoint_list)
-    send_json({ endpoints = endpoint_list, backend = "lua" })
+    send_json({ endpoints = endpoint_list, backend = "lua", history_metrics = {
+        "cpu", "cpu_cores", "memory", "network", "temps", "load", "swap", "drive-usage", "ping"
+    } })
 end
 
 -- Main request handler (called by uhttpd for every /api/* request)

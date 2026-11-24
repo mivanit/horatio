@@ -3436,6 +3436,9 @@ async def get_history_settings() -> Response:
     )
 
 
+_history_settings_lock: asyncio.Lock = asyncio.Lock()
+
+
 @APP.post("/api/history/settings")
 async def update_history_settings(request: Request) -> Response:
     """Update history recording settings (requires password)."""
@@ -3531,82 +3534,83 @@ async def update_history_settings(request: Request) -> Response:
             media_type="application/json",
         )
 
-    # Apply changes
-    changed: bool = False
-    interval_changed: bool = (
-        record_interval is not None
-        and record_interval != APP.state.history_record_interval
-    )
-    if interval_changed:
-        APP.state.history_record_interval = record_interval
-        changed = True
-    if (
-        sample_duration is not None
-        and sample_duration != APP.state.history_sample_duration
-    ):
-        APP.state.history_sample_duration = sample_duration
-        changed = True
-    if sample_count is not None and sample_count != APP.state.history_sample_count:
-        APP.state.history_sample_count = sample_count
-        changed = True
-    if (
-        min_record_interval is not None
-        and min_record_interval != APP.state.manual_record_min_interval
-    ):
-        APP.state.manual_record_min_interval = min_record_interval
-        changed = True
-
-    if process_count is not None and process_count != APP.state.history_process_count:
-        APP.state.history_process_count = process_count
-        changed = True
-
-    ping_enabled: Any = body.get("ping_enabled")
-    if ping_enabled is not None and APP.state.ping_enabled != (ping_enabled is True):
-        APP.state.ping_enabled = ping_enabled is True
-        changed = True
-
-    processes_enabled: Any = body.get("processes_enabled")
-    if processes_enabled is not None and APP.state.history_processes_enabled != (
-        processes_enabled is True
-    ):
-        APP.state.history_processes_enabled = processes_enabled is True
-        changed = True
-
-    # Only interval changes reset the timer; other options apply to the next sample.
-    if interval_changed and APP.state.history_task is not None:
-        APP.state.history_task.cancel()
-        try:
-            await APP.state.history_task
-        except asyncio.CancelledError:
-            pass
-        APP.state.history_task = asyncio.create_task(history_recorder())
-    if changed:
-        logger.info(
-            "History settings updated: interval=%ds, duration=%ds, count=%d, min_record=%ds, ping=%s, processes=%s (top %d)",
-            APP.state.history_record_interval,
-            APP.state.history_sample_duration,
-            APP.state.history_sample_count,
-            APP.state.manual_record_min_interval,
-            APP.state.ping_enabled,
-            APP.state.history_processes_enabled,
-            APP.state.history_process_count,
+    async with _history_settings_lock:
+        # Apply changes
+        changed: bool = False
+        interval_changed: bool = (
+            record_interval is not None
+            and record_interval != APP.state.history_record_interval
         )
+        if interval_changed:
+            APP.state.history_record_interval = record_interval
+            changed = True
+        if (
+            sample_duration is not None
+            and sample_duration != APP.state.history_sample_duration
+        ):
+            APP.state.history_sample_duration = sample_duration
+            changed = True
+        if sample_count is not None and sample_count != APP.state.history_sample_count:
+            APP.state.history_sample_count = sample_count
+            changed = True
+        if (
+            min_record_interval is not None
+            and min_record_interval != APP.state.manual_record_min_interval
+        ):
+            APP.state.manual_record_min_interval = min_record_interval
+            changed = True
 
-    return Response(
-        content=json.dumps(
-            {
-                "status": "ok",
-                "record_interval": APP.state.history_record_interval,
-                "sample_duration": APP.state.history_sample_duration,
-                "sample_count": APP.state.history_sample_count,
-                "min_record_interval": APP.state.manual_record_min_interval,
-                "ping_enabled": APP.state.ping_enabled,
-                "processes_enabled": APP.state.history_processes_enabled,
-                "process_count": APP.state.history_process_count,
-            }
-        ),
-        media_type="application/json",
-    )
+        if process_count is not None and process_count != APP.state.history_process_count:
+            APP.state.history_process_count = process_count
+            changed = True
+
+        ping_enabled: Any = body.get("ping_enabled")
+        if ping_enabled is not None and APP.state.ping_enabled != (ping_enabled is True):
+            APP.state.ping_enabled = ping_enabled is True
+            changed = True
+
+        processes_enabled: Any = body.get("processes_enabled")
+        if processes_enabled is not None and APP.state.history_processes_enabled != (
+            processes_enabled is True
+        ):
+            APP.state.history_processes_enabled = processes_enabled is True
+            changed = True
+
+        # Only interval changes reset the timer; other options apply to the next sample.
+        if interval_changed and APP.state.history_task is not None:
+            APP.state.history_task.cancel()
+            try:
+                await APP.state.history_task
+            except asyncio.CancelledError:
+                pass
+            APP.state.history_task = asyncio.create_task(history_recorder())
+        if changed:
+            logger.info(
+                "History settings updated: interval=%ds, duration=%ds, count=%d, min_record=%ds, ping=%s, processes=%s (top %d)",
+                APP.state.history_record_interval,
+                APP.state.history_sample_duration,
+                APP.state.history_sample_count,
+                APP.state.manual_record_min_interval,
+                APP.state.ping_enabled,
+                APP.state.history_processes_enabled,
+                APP.state.history_process_count,
+            )
+
+        return Response(
+            content=json.dumps(
+                {
+                    "status": "ok",
+                    "record_interval": APP.state.history_record_interval,
+                    "sample_duration": APP.state.history_sample_duration,
+                    "sample_count": APP.state.history_sample_count,
+                    "min_record_interval": APP.state.manual_record_min_interval,
+                    "ping_enabled": APP.state.ping_enabled,
+                    "processes_enabled": APP.state.history_processes_enabled,
+                    "process_count": APP.state.history_process_count,
+                }
+            ),
+            media_type="application/json",
+        )
 
 
 @APP.get("/api/ping")
@@ -4125,6 +4129,9 @@ def _get_gpu_processes() -> list[dict[str, Any]]:
         errors="replace",
         timeout=5,
     )
+    if uuid_result.returncode != 0:
+        logger.warning("Cannot map GPU processes to devices: nvidia-smi UUID query failed")
+        return []
     uuid_to_index: dict[str, int] = {}
     line: str
     for line in uuid_result.stdout.strip().split("\n"):
@@ -4150,13 +4157,16 @@ def _get_gpu_processes() -> list[dict[str, Any]]:
             e: ValueError | IndexError
             try:
                 gpu_uuid: str = parts[0]
+                if gpu_uuid not in uuid_to_index:
+                    logger.warning("Skipping process on unmapped GPU %s", gpu_uuid)
+                    continue
                 pid: int = int(parts[1])
                 nvidia_name: str = parts[2]
                 # Get sanitized process info from /proc
                 info: dict[str, str] = get_sanitized_process_info(
                     pid, Path(nvidia_name).name, nvidia_name
                 )
-                gpu_index: int = uuid_to_index.get(gpu_uuid, 0)
+                gpu_index: int = uuid_to_index[gpu_uuid]
                 sm: float | None
                 membw: float | None
                 sm, membw = util.get((gpu_index, pid), (None, None))
@@ -4684,15 +4694,17 @@ _mail_cache: dict[str, Any] = {"key": None, "result": None}
 
 
 def _get_mail_cached() -> dict[str, Any]:
-    """_get_mail for the default spool, re-read only when the spool's size or
-    modification time changes: reading it scans the whole file (sync)."""
+    """Re-read the spool when its contents, identity or access metadata changes."""
     try:
         st: os.stat_result = os.stat(MAIL_SPOOL)
     except OSError:
         return _get_mail()  # missing or unreadable: cheap, and reports why
-    # ctime and inode too: a chmod/chown that fixes an unreadable spool, or a
-    # replaced spool, changes neither mtime nor size.
-    key: tuple[int, ...] = (st.st_mtime_ns, st.st_ctime_ns, st.st_ino, st.st_size)
+    # Access metadata matters even on filesystems whose timestamps are coarse:
+    # fixing an unreadable spool must invalidate a cached permission error.
+    key: tuple[int, ...] = (
+        st.st_mtime_ns, st.st_ctime_ns, st.st_dev, st.st_ino, st.st_size,
+        st.st_mode, st.st_uid, st.st_gid,
+    )
     if _mail_cache["key"] != key:
         _mail_cache["result"] = _get_mail()
         _mail_cache["key"] = key
@@ -4761,6 +4773,43 @@ def _get_storage_health(
     return {**state, **result}
 
 
+COLLECTOR_UNIT_DIRS: Final[tuple[Path, ...]] = tuple(
+    Path(path)
+    for path in (
+        "/etc/systemd/system",
+        "/run/systemd/system",
+        "/usr/local/lib/systemd/system",
+        "/usr/lib/systemd/system",
+        "/lib/systemd/system",
+    )
+)
+_collectors_seen: set[str] = set()
+
+
+def _collector_expected(source: str, snapshot: dict[str, Any]) -> bool:
+    """An optional collector is absent only when there is no evidence of it.
+
+    Once observed (including persisted tracker state), losing its snapshot is an
+    outage. Installed or masked units also remain expected; failed discovery is
+    unknown, never proof that monitoring was deliberately left out.
+    """
+    if snapshot.get("status") != "missing":
+        _collectors_seen.add(source)
+    if source in _collectors_seen or source in _alarm_memory:
+        return True
+    unit: str = "horatio-collect" if source == "state" else "horatio-sensors"
+    for directory in COLLECTOR_UNIT_DIRS:
+        for suffix in (".timer", ".service"):
+            try:
+                (directory / (unit + suffix)).lstat()
+                return True
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return True
+    return False
+
+
 @APP.get("/api/storage-health")
 async def storage_health() -> Response:
     """The collector's hardware health snapshot with alarms. Always 200; ``status`` says
@@ -4770,6 +4819,7 @@ async def storage_health() -> Response:
     result: dict[str, Any] = with_alarm_history(
         "state", await asyncio.to_thread(_get_storage_health), _alarm_memory
     )
+    result["expected"] = await asyncio.to_thread(_collector_expected, "state", result)
     hw: dict[str, Any] = await asyncio.to_thread(server_findings, False)
     result["sensor_alarms"] = hw["alarms"]
     # The same alarms with since when (the server's alarm history).
@@ -4786,7 +4836,7 @@ async def storage_health() -> Response:
     result["sensor_notes"] = hw["notes"]
     result["sensor_status"] = hw.get("status", "ok")
     # ZFS pools as the server read them: {status ok|error|absent, error?, pools}.
-    result["zfs"] = _cached_host_checks()[1]
+    result["zfs"] = hw["zfs"]
     return Response(content=json.dumps(result), media_type="application/json")
 
 
@@ -4798,6 +4848,7 @@ async def sensors_snapshot() -> Response:
         await asyncio.to_thread(_get_storage_health, SENSORS_PATH, SENSORS_STALE_SEC),
         _alarm_memory,
     )
+    result["expected"] = await asyncio.to_thread(_collector_expected, "sensors", result)
     result["power_rows"] = collector_power_rows(result)
     return Response(content=json.dumps(result), media_type="application/json")
 
@@ -4963,19 +5014,21 @@ def get_zfs() -> tuple[hostcheck.Findings, dict[str, Any]]:
 def _cached_host_checks() -> tuple[hostcheck.Findings, dict[str, Any], str]:
     """Read the tracker's latest checks without making HTTP requests wait on tools."""
     now: float = time.monotonic()
-    host: hostcheck.Findings = _host_cache["data"] or hostcheck.Findings(
+    host_cache: dict[str, Any] = _host_cache.copy()
+    zfs_cache: dict[str, Any] = _zfs_cache.copy()
+    host: hostcheck.Findings = host_cache["data"] or hostcheck.Findings(
         notes=["host checks pending"]
     )
-    pools, summary = _zfs_cache["data"] or (
+    pools, summary = zfs_cache["data"] or (
         hostcheck.Findings(notes=["ZFS check pending"]),
         {"status": "pending", "pools": []},
     )
     found: hostcheck.Findings = host.merge(pools)
-    status: str = "ok" if _host_cache["data"] and _zfs_cache["data"] else "pending"
-    if _host_cache["data"] and now - _host_cache["at"] > 3 * HOST_CHECK_CACHE_SEC:
+    status: str = "ok" if host_cache["data"] and zfs_cache["data"] else "pending"
+    if host_cache["data"] and now - host_cache["at"] > 3 * HOST_CHECK_CACHE_SEC:
         found.notes.append("host checks stale: waiting for the alarm tracker")
         status = "stale"
-    if _zfs_cache["data"] and now - _zfs_cache["at"] > 3 * ZFS_CACHE_SEC:
+    if zfs_cache["data"] and now - zfs_cache["at"] > 3 * ZFS_CACHE_SEC:
         found.notes.append("ZFS check stale: waiting for the alarm tracker")
         summary = {**summary, "status": "stale"}
         status = "stale"
@@ -4989,12 +5042,18 @@ def server_findings(refresh: bool = True) -> dict[str, Any]:
     health and scrubs). The same
     shape as get_hw_sensors without ``rows`` (sync)."""
     hw: dict[str, Any] = get_hw_sensors()
-    host: hostcheck.Findings = (
-        _host_findings().merge(get_zfs()[0]) if refresh else _cached_host_checks()[0]
-    )
+    host: hostcheck.Findings
+    if refresh:
+        host = _host_findings()
+        pools, summary = get_zfs()
+        host = host.merge(pools)
+        status = "ok"
+    else:
+        host, summary, status = _cached_host_checks()
     items: list[dict[str, Any]] = [*hw["alarm_items"], *host.alarms]
     return {
-        "status": "ok" if refresh else _cached_host_checks()[2],
+        "status": status,
+        "zfs": summary,
         "alarms": [item["text"] for item in items],
         "alarm_items": items,
         "checked": [*hw["checked"], *host.checked],
@@ -5100,6 +5159,7 @@ _ALARM_FIELDS: Final[tuple[str, ...]] = ("key", "text", "value", "since", "initi
 # ``unchecked_since``. Only the event loop replaces this.
 _alarm_memory: dict[str, Any] = {}
 _alarm_memory_saved: float = -math.inf
+_alarm_update_lock: asyncio.Lock = asyncio.Lock()
 
 
 def _read_boot_id() -> str | None:
@@ -5114,11 +5174,14 @@ _BOOT_ID: Final[str | None] = _read_boot_id()
 
 
 def _number(value: Any) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    try:
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+        )
+    except OverflowError:
+        return False
 
 
 def _epoch(value: Any) -> bool:
@@ -5413,7 +5476,26 @@ def _server_findings_or_none() -> dict[str, Any] | None:
         return None
 
 
+async def _finish_alarm_update(operation: asyncio.Task[_T]) -> _T:
+    """Keep the writer lock until disk work finishes, even during cancellation."""
+    try:
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError:
+        await operation
+        raise
+
+
 async def track_alarms_once() -> None:
+    await _finish_alarm_update(asyncio.create_task(_track_alarms_locked()))
+
+
+async def _track_alarms_locked() -> None:
+    # Retirement and observation must not overwrite each other's memory or files.
+    async with _alarm_update_lock:
+        await _track_alarms_once()
+
+
+async def _track_alarms_once() -> None:
     """One pass: every source that has something new since the last pass.
 
     The memory moves on only once the pass's lines are written (in one write),
@@ -5489,7 +5571,8 @@ async def alarm_tracker() -> None:
     """Background task: follow the alarms of every source for as long as the
     server runs. A pass that fails is logged and the next one tries again."""
     global _alarm_memory
-    _alarm_memory = await asyncio.to_thread(_load_alarm_memory)
+    async with _alarm_update_lock:
+        _alarm_memory = await asyncio.to_thread(_load_alarm_memory)
     while True:
         try:
             await track_alarms_once()
@@ -5703,7 +5786,137 @@ async def alarms() -> Response:
     # running): not alarms, but what a login script or an agent should see too.
     body["notes"] = hw["notes"]
     body["sources"]["dashboard"]["status"] = hw.get("status", "ok")
+    body["retirement"] = {
+        "supported": True,
+        "password_configured": PASSWORD_FILE.exists(),
+    }
     return Response(content=json.dumps(body), media_type="application/json")
+
+
+async def _retire_held_alarm(
+    source: str, key: str, since: float, unchecked_since: float
+) -> Response:
+    """Forget one held occurrence, never suppress future observations of its key."""
+    global _alarm_memory, _alarm_memory_saved
+    async with _alarm_update_lock:
+        entry: dict[str, Any] = _alarm_memory.get(source, {}).get("alarms", {}).get(key, {})
+        if (
+            entry.get("since") != since
+            or entry.get("unchecked_since") != unchecked_since
+        ):
+            return Response(
+                content=json.dumps({"error": "Alarm changed or is no longer held; refresh and try again"}),
+                status_code=409,
+                media_type="application/json",
+            )
+        # Collectors can publish a recurring fault between tracker passes. The
+        # memory lock cannot stop that external write, so also check what the API
+        # currently serves. A later observation is never suppressed by retirement.
+        current: dict[str, Any]
+        try:
+            if source == "dashboard":
+                current = await asyncio.to_thread(server_findings, False)
+            else:
+                current = await asyncio.to_thread(
+                    _get_storage_health,
+                    STATE_PATH if source == "state" else SENSORS_PATH,
+                    STATE_STALE_SEC if source == "state" else SENSORS_STALE_SEC,
+                )
+        except Exception:
+            logger.exception("Cannot check current findings before retirement")
+            return Response(
+                content=json.dumps({"error": "Could not check current alarms; refresh and try again"}),
+                status_code=503,
+                media_type="application/json",
+            )
+        if any(
+            isinstance(item, dict) and item.get("key") == key
+            for item in (current.get("alarm_items") or [])
+        ):
+            return Response(
+                content=json.dumps({"error": "The source currently reports this alarm as active; refresh and review it"}),
+                status_code=409,
+                media_type="application/json",
+            )
+        memory: dict[str, Any] = json.loads(json.dumps(_alarm_memory))
+        del memory[source]["alarms"][key]
+        now: float = time.time()
+        event: dict[str, Any] = {
+            "timestamp": _iso(now),
+            "source": source,
+            "event": "retired",
+            **{field: entry[field] for field in _ALARM_FIELDS if field in entry},
+            "unchecked_since": unchecked_since,
+        }
+
+        def persist() -> None:
+            # Like the tracker, log before replacing memory: a retry can duplicate
+            # an event after a failed save, but cannot silently lose its history.
+            _append_events([event])
+            _save_alarm_memory(memory)
+
+        try:
+            await asyncio.to_thread(persist)
+        except OSError:
+            logger.exception("Alarm retirement could not be saved")
+            return Response(
+                content=json.dumps({"error": "Could not save retirement; the alarm is still held. Retry after checking storage."}),
+                status_code=500,
+                media_type="application/json",
+            )
+        _alarm_memory = memory
+        _alarm_memory_saved = now
+        return Response(
+            content=json.dumps({"status": "retired", "source": source, "key": key}),
+            media_type="application/json",
+        )
+
+
+@APP.post("/api/alarms/retire")
+async def retire_alarm(request: Request) -> Response:
+    """Retire a specific held occurrence with the existing dashboard password."""
+    if not PASSWORD_FILE.exists():
+        return Response(
+            content=json.dumps({"error": "No password configured on server"}),
+            status_code=503,
+            media_type="application/json",
+        )
+    try:
+        body: Any = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict) or not isinstance(body.get("password"), str):
+        return Response(
+            content=json.dumps({"error": "Expected a JSON object with a password string"}),
+            status_code=400,
+            media_type="application/json",
+        )
+    denied: Response | None = await _verify_password_throttled(request, body["password"])
+    if denied is not None:
+        return denied
+    source: Any = body.get("source")
+    key: Any = body.get("key")
+    since: Any = body.get("since")
+    unchecked_since: Any = body.get("unchecked_since")
+    if (
+        not isinstance(source, str)
+        or source not in ALARM_SOURCES
+        or not isinstance(key, str)
+        or not key
+        or not _epoch(since)
+        or not _epoch(unchecked_since)
+    ):
+        return Response(
+            content=json.dumps({"error": "source, key, since and unchecked_since must identify a held alarm"}),
+            status_code=400,
+            media_type="application/json",
+        )
+    # A disconnected caller must not release the update lock while a worker is
+    # still replacing memory on disk. Complete the operation before cancelling.
+    operation: asyncio.Task[Response] = asyncio.create_task(
+        _retire_held_alarm(source, key, since, unchecked_since)
+    )
+    return await _finish_alarm_update(operation)
 
 
 # The Glances plugins the UI reads, the only ones the /api proxy forwards. An
@@ -5758,6 +5971,7 @@ async def list_endpoints() -> Response:
         "/storage-health",
         "/sensors",
         "/alarms",
+        "/alarms/retire",
         "/services",
         "/services/history",
         "/version",

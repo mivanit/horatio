@@ -152,8 +152,16 @@ local function build_record()
     local sensors = metrics.sensors()
     if #sensors > 0 then
         local temps = {}
+        local ambiguous = false
         for _, s in ipairs(sensors) do
-            if s.type == "temperature_core" then temps[s.label] = s.value end
+            if s.type == "temperature_core" then
+                if s.key == false then ambiguous = true
+                else temps[s.key or s.label] = s.value end
+            end
+        end
+        -- Report at recording frequency, not on every live sensor request.
+        if ambiguous then
+            io.stderr:write("[dashboard] temperature history: some sensors lack a unique stable identity; live readings remain available\n")
         end
         if next(temps) then record.temps = temps end
     end
@@ -616,6 +624,8 @@ end
 
 function M.get_settings()
     return {
+        editable = false,
+        detail = "Edit www/config.json and restart the service to change recording settings.",
         record_interval = RECORD_INTERVAL,
         sample_duration = 1,
         sample_count = 1,

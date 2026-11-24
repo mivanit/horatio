@@ -48,7 +48,6 @@ VDEV_GROUPS: Final[tuple[str, ...]] = (
     "special",
     "dedup",
     "l2cache",
-    "spares",
 )
 
 _lock: threading.Lock = threading.Lock()
@@ -161,7 +160,11 @@ def _counter(value: Any) -> int | None:
 
 
 def vdev_errors(pool: dict[str, Any]) -> tuple[int, bool]:
-    """(Known error sum, all counters available) over every vdev group."""
+    """(Known error sum, all active counters available).
+
+    The top-level spares inventory includes idle devices without I/O counters.
+    A spare in use is also in the active vdev tree, where its counters do count.
+    """
     total: int = 0
     complete: bool = isinstance(pool.get("vdevs"), dict) and bool(pool["vdevs"])
 
