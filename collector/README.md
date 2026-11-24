@@ -11,7 +11,7 @@ if you want one, a login MOTD script) only read:
 
 The collectors read only what needs root. Everything world-readable is read by the dashboard
 itself: Linux hwmon temperatures, fans and power (`hwmon.py`, served as `/api/4/sensors`), and
-the fan alarms from config.json `fans`, served as `/api/sensor-alarms` and shown on the
+the fan alarms from config.json `fans`, served in `/api/alarms` and shown on the
 Hardware card next to the collectors' alarms.
 
 ```bash

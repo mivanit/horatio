@@ -486,7 +486,7 @@
     '/4/load', '/4/uptime', '/4/system', '/4/fs',
     '/cpu-info', '/gpu-info', '/ip-info', '/ping', '/gpu-processes', '/disk-processes', '/network-processes',
     '/processlist', '/history', '/history/settings', '/history/record', '/history/field/temps',
-    '/history/field/processes', '/mail', '/storage-health', '/sensors', '/sensor-alarms', '/alarms', '/services',
+    '/history/field/processes', '/mail', '/storage-health', '/sensors', '/alarms', '/services',
     '/services/history', '/version', '/list-endpoints',
   ];
 
@@ -551,7 +551,6 @@
     },
     '/storage-health': (q, t) => storageHealth(t),
     '/sensors': (q, t) => sensorsSnapshot(t),
-    '/sensor-alarms': () => ({ alarms: [], notes: [] }),
     '/alarms': (q, t) => alarmsSnapshot(t),
     '/services': (q, t) => servicesSnapshot(t),
     '/services/history': (q, t) => servicesHistory(q, t),

@@ -4775,16 +4775,43 @@ _hwmon_cache: dict[str, Any] = {"at": -math.inf, "data": None}
 _fans_spun: set[str] = set()
 
 
+def _sensor_hide_patterns() -> list[re.Pattern[str]]:
+    """config.json sensor_hide: regexps matched (from the start, like Glances'
+    ``hide``) against a sensor's own name and its sensor_labels name. Empty by
+    default. A pattern that does not compile is logged and skipped."""
+    raw: Any = _CONFIG.get("sensor_hide")
+    patterns: list[re.Pattern[str]] = []
+    text: Any
+    for text in raw if isinstance(raw, list) else []:
+        if not isinstance(text, str):
+            continue
+        try:
+            patterns.append(re.compile(text))
+        except re.error as e:
+            logger.error("config sensor_hide: %r is not a regexp (%s); ignored", text, e)
+    return patterns
+
+
+_SENSOR_HIDE: list[re.Pattern[str]] = []  # set at startup, below TEMP_LABELS
+
+
+def _sensor_hidden(label: str) -> bool:
+    names: tuple[str, ...] = (label, TEMP_LABELS.get(label, label))
+    return any(p.match(n) for p in _SENSOR_HIDE for n in names)
+
+
 def get_hw_sensors() -> dict[str, Any]:
     """``rows`` (Glances-shaped, fan rules applied), ``alarms`` and ``notes`` (sync).
 
     The fan rules and the setup hints run here, in the one place that reads the
-    sensors, so the dashboard, history and /api/sensor-alarms always agree."""
+    sensors, so the dashboard, history and /api/alarms always agree."""
     with _hwmon_lock:
         now: float = time.monotonic()
         if now - _hwmon_cache["at"] < HWMON_CACHE_SEC and _hwmon_cache["data"]:
             return _hwmon_cache["data"]
-        raw: list[dict[str, Any]] = hwmon.read_sensors()
+        raw: list[dict[str, Any]] = [
+            r for r in hwmon.read_sensors() if not _sensor_hidden(r["label"])
+        ]
         _fans_spun.update(
             r["label"] for r in raw if r.get("type") == hwmon.FAN and r["value"] > 0
         )
@@ -4819,15 +4846,6 @@ async def hw_sensors() -> Response:
     ``total``: true only for a reading of the whole machine."""
     data: dict[str, Any] = await asyncio.to_thread(get_hw_sensors)
     return Response(content=json.dumps(data["rows"]), media_type="application/json")
-
-
-@APP.get("/api/sensor-alarms")
-async def sensor_alarms() -> Response:
-    """The alarms and notes the server itself decides (fan minimums, setup hints,
-    host checks). /api/alarms has every source's alarms, these included, with since."""
-    data: dict[str, Any] = await asyncio.to_thread(server_findings)
-    body: dict[str, Any] = {"alarms": data["alarms"], "notes": data["notes"]}
-    return Response(content=json.dumps(body), media_type="application/json")
 
 
 HOST_CHECK_CACHE_SEC: Final[float] = 30.0  # the tracker's pass; modinfo on a mismatch
@@ -5534,6 +5552,9 @@ async def alarms() -> Response:
         _alarm_memory,
         events,
     )
+    # The server's own notes (setup hints, a reboot pending under a week, a scrub
+    # running): not alarms, but what a login script or an agent should see too.
+    body["notes"] = hw["notes"]
     return Response(content=json.dumps(body), media_type="application/json")
 
 
@@ -5572,7 +5593,6 @@ async def list_endpoints() -> Response:
     endpoints: list[str] = [
         *(f"/4/{plugin}" for plugin in GLANCES_PROXY_PLUGINS),
         "/4/sensors",
-        "/sensor-alarms",
         "/cpu-info",
         "/gpu-info",
         "/ip-info",
@@ -5985,6 +6005,8 @@ TEMP_LABELS: Final[dict[str, str]] = {
 }
 # A sensor's own limit in °C, for sensors that run hot by design.
 TEMP_THRESHOLDS: Final[dict[str, float]] = _str_map("temp_thresholds", (int, float))
+# config.json sensor_hide, read at startup like the other sensor keys.
+_SENSOR_HIDE = _sensor_hide_patterns()
 
 
 def _temp_limit(label: str, default: float) -> float:
@@ -6843,10 +6865,10 @@ JSON API (machine-readable; prefer these for exact values)
   GET /api/services/history?hours=24   [passed, failed] checks per target per time bucket
   GET /api/sensors               fans/temps/power snapshot (root collector, when installed)
   GET /api/alarms                everything wrong now in one list, since when, and the
-                                 newest alarm changes: {sources, active, held, recent}
+                                 newest alarm changes: {sources, active, held, recent,
+                                 notes}
   GET /api/storage-health        drive SMART/RAID/ECC snapshot (root collector)
   GET /api/4/sensors             temperatures, fans, power from hwmon (the server's own)
-  GET /api/sensor-alarms         the server's own fan alarms and setup notes
   GET /api/4/<plugin>            live Glances metrics, raw (rates not capped): cpu,
                                  mem, memswap, load, network, diskio, fs, gpu
   GET /config.json               the config file as written: title, ping targets,

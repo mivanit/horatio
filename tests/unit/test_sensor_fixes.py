@@ -409,3 +409,28 @@ def test_an_unreadable_fan_keeps_its_name(tmp_path: Path) -> None:
     rows = hwmon.read_sensors(tree(tmp_path, files) / "hwmon")
     # The second card's fan stays "amdgpu fan1 2" while the first cannot be read.
     assert [r["label"] for r in rows if r["type"] == hwmon.FAN] == ["amdgpu fan1 2"]
+
+
+def test_sensor_hide_leaves_sensors_out_by_name_or_alias(monkeypatch: Any) -> None:
+    import re
+
+    import server
+
+    monkeypatch.setattr(
+        server.hwmon,
+        "read_sensors",
+        lambda: [fan("unknown fan1", 900), fan("f71889ed fan1", 1200), fan("f71889ed fan2", 800)],
+    )
+    monkeypatch.setattr(server.hwmon, "setup_notes", lambda rows: [])
+    monkeypatch.setattr(server, "TEMP_LABELS", {"f71889ed fan2": "Case fan 2"})
+    monkeypatch.setattr(server, "_SENSOR_HIDE", [re.compile("unknown"), re.compile("Case fan")])
+    monkeypatch.setitem(server._CONFIG, "fans", {})
+    rows = server.get_hw_sensors()["rows"]
+    assert [r["label"] for r in rows] == ["f71889ed fan1"]
+
+
+def test_sensor_hide_skips_patterns_that_do_not_compile(monkeypatch: Any) -> None:
+    import server
+
+    monkeypatch.setitem(server._CONFIG, "sensor_hide", ["(", "nouveau", 3])
+    assert [p.pattern for p in server._sensor_hide_patterns()] == ["nouveau"]
