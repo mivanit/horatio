@@ -1,3 +1,7 @@
+For the project documentation, see the [README](../README.md#documentation),
+[API](api.md), [configuration](configuration.md), [operations](operations.md),
+and [development guide](development.md).
+
 # Demo site
 
 https://mivanit.github.io/horatio/ runs the real dashboard (`index.html` and `static/`

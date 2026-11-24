@@ -19,7 +19,7 @@ def lua() -> str:
     if command is None:
         pytest.fail(
             "Native Lua tests need Lua 5.1 and Nixio. "
-            "See README.md's Lua test setup, or use make check for the Linux suite."
+            "See docs/development.md#lua-tests, or use make check for the Linux suite."
         )
     result: subprocess.CompletedProcess[str] = subprocess.run(
         [

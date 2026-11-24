@@ -142,7 +142,7 @@ ago`), so two snapshots cannot be compared by text. Each snapshot therefore also
 The collectors keep no state: a snapshot says what is wrong now. Since when each alarm has
 been there, and when it went, is tracked by the dashboard server from `alarm_items` and
 `checked`, for these two snapshots and for its own alarms alike, and written to its
-`logs/events.jsonl` (README.md, "What is kept in `logs/`"). `GET /api/alarms` is all of it
+`logs/events.jsonl` (see [logs and alarm history](../docs/operations.md#logs-and-history)). `GET /api/alarms` is all of it
 in one list; `/api/storage-health` and `/api/sensors` serve each `alarm_items` entry with its
 `since`.
 

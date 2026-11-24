@@ -22,7 +22,7 @@ case "${1:-}" in
 Usage: sh lua/install-linux.sh              install or refresh the Lua service
        sh lua/install-linux.sh --uninstall  remove its services; keep config/history
 
-Requires systemd, sudo, wget, and the build dependencies documented in README.md.
+Requires systemd, sudo, wget, and the build dependencies documented in lua/README.md#linux.
 Run as your own user. Native dependencies are built privately in .lua-runtime/.
 Update with git pull, then run this installer again.
 
