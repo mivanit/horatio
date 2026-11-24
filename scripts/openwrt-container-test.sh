@@ -73,12 +73,22 @@ copy_candidate() {
 }
 
 check_luci() {
-    local page
+    local page status
     for _ in $(seq 20); do
-        page="$(on_router 'wget -qO- http://127.0.0.1/cgi-bin/luci/' 2>/dev/null)" \
-            && [[ "$page" == *'<html'* && "$page" == *'/luci-static/resources/'* ]] && return 0
+        # LuCI deliberately returns 403 + X-LuCI-Login-Required for its login
+        # form. wget treats that as failure and discards the rendered page.
+        if status="$(on_router 'curl -sS -L --max-time 5 -D /tmp/horatio-luci-headers -o /tmp/horatio-luci-page -w "%{http_code}" http://127.0.0.1/cgi-bin/luci/')"; then
+            page="$(on_router 'cat /tmp/horatio-luci-page')"
+            if [[ "$page" == *'<html'* && "$page" == *'/luci-static/resources/'* ]]; then
+                [ "$status" = 200 ] && return 0
+                if [ "$status" = 403 ] && on_router "grep -iq '^X-LuCI-Login-Required: yes' /tmp/horatio-luci-headers"; then
+                    return 0
+                fi
+            fi
+        fi
         sleep 1
     done
+    on_router 'cat /tmp/horatio-luci-headers; head -c 4000 /tmp/horatio-luci-page; uci show uhttpd' >&2 || true
     fail "LuCI did not render its page"
 }
 
@@ -86,7 +96,7 @@ on_router "mkdir -p $DIR"
 if [ "$SCENARIO" = migrate ]; then
     echo "== Install LuCI and $BASELINE before migrating into this checkout"
     # Exercise the real uhttpd plugins, not only an empty dashboard-only rootfs.
-    on_router 'if command -v apk >/dev/null; then apk update && apk add luci uhttpd-mod-ubus uhttpd-mod-ucode; else opkg update && opkg install luci uhttpd-mod-ubus; fi'
+    on_router 'if command -v apk >/dev/null; then apk update && apk add curl luci uhttpd-mod-ubus uhttpd-mod-ucode; else opkg update && opkg install curl luci uhttpd-mod-ubus; fi'
     on_router '/etc/init.d/rpcd start && /etc/init.d/uhttpd restart'
     check_luci
     # CI fetches tags. Use the actual published source layout, not a candidate

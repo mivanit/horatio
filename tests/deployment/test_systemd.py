@@ -122,12 +122,13 @@ def installed_host() -> Iterator[Path]:
     assert os.geteuid() != 0, "run as an ordinary user with passwordless sudo"
     assert Path("/run/systemd/system").is_dir(), "requires booted systemd"
     run("sudo", "-n", "true")
-    assert not run("systemctl", "list-unit-files", "--no-legend", "horatio*"), (
-        "refusing existing Horatio units"
-    )
-    assert not run("systemctl", "list-units", "--all", "--no-legend", "horatio*"), (
-        "refusing existing loaded Horatio units"
-    )
+    # A filtered list-unit-files exits 1 when it finds nothing on Ubuntu's
+    # systemd. List everything and filter here, keeping command errors fatal.
+    for command in ("list-unit-files", "list-units"):
+        listing = run("systemctl", command, "--all", "--no-legend", "--no-pager")
+        assert not any(
+            line.lstrip().startswith("horatio") for line in listing.splitlines()
+        ), f"refusing existing Horatio units: {listing}"
     for path in (
         "/etc/horatio",
         "/var/lib/horatio",
