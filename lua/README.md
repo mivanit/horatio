@@ -62,10 +62,12 @@ sh lua/install-openwrt.sh --update    # newest release (or --update vX.Y.Z), the
 sh lua/install-openwrt.sh --uninstall
 ```
 
-The old `lua/install.sh` and `openwrt/install.sh` paths forward to
-`lua/install-openwrt.sh` so existing installations can upgrade. Updates select
-the installer shipped by the target release, including older releases that used
-either old path.
+The old `lua/install.sh` and `openwrt/install.sh` entrypoints have been removed.
+To migrate an older installation, update the source checkout manually (pull with
+git, or copy/extract the new release over it), preserving `www/`, `config.json`,
+and `logs/`, then run `sh lua/install-openwrt.sh`. Older updaters may not recognize
+the renamed installer. The new updater can still install older releases using
+their original installer names.
 
 `--update` needs no git: it reads the newest version from `main`'s `VERSION` on GitHub,
 downloads that release's tarball over HTTPS (needs `libustream-mbedtls` and `ca-bundle`, on

@@ -27,16 +27,17 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
   timeouts allow for slower hosts without changing production timeouts.
 
 - The Lua installers are named `lua/install-linux.sh` and `lua/install-openwrt.sh`.
-  The former `lua/install.sh` and `openwrt/install.sh` paths remain compatibility
-  entrypoints for updates across releases. On Linux/systemd, native dependencies
-  are built in the checkout, the service runs as
+  The former `lua/install.sh` and `openwrt/install.sh` entrypoints are removed;
+  older installations need a manual source update followed by the new installer
+  (see [migration instructions](lua/README.md#openwrt)). On Linux/systemd, native
+  dependencies are built in the checkout, the service runs as
   the installing user, and a systemd timer records history while the dashboard is closed.
 
 - Source layout: Python modules live in `python/`, and the lightweight Lua backend
   lives in `lua/`. Config, credentials, logs and frontend assets stay at the root;
   the served `/tui.py` URL stays the same. The installer updates the Python service
-  entrypoint. `openwrt/install.sh` remains a compatibility entrypoint for existing
-  Lua installations, including upgrades and downgrades across the directory move.
+  entrypoint. The OpenWrt updater can still install older releases using their
+  original installer names.
 - The static demo includes GPU fan percentages alongside chassis RPM, exercising
   both fan-chart axes in the live view and history. Native backend tests are named
   `test-python` and `test-lua`; previous Make target names remain aliases.

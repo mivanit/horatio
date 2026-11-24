@@ -175,7 +175,6 @@ horatio/
 ├── collector/                   # root collectors, their units, config example, alarm table
 ├── nginx/                       # optional reverse proxy with subdomains per service
 ├── lua/                         # Lua backend; install-linux.sh and install-openwrt.sh
-├── openwrt/install.sh            # compatibility entrypoint for older installations
 ├── logs/                        # runtime: history.jsonl, server.log, glances.log
 └── pyproject.toml, uv.lock
 ```

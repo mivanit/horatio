@@ -58,11 +58,6 @@ class Router:
             for path, text in (
                 ("VERSION", version + "\n"),
                 (installer, STUB),
-                *[
-                    (legacy, "#!/bin/sh\nexit 99\n")
-                    for legacy in ("lua/install.sh", "openwrt/install.sh")
-                    if installer == "lua/install-openwrt.sh"
-                ],
             ):
                 data: bytes = text.encode()
                 info: tarfile.TarInfo = tarfile.TarInfo(f"horatio-{version}/{path}")
@@ -142,21 +137,6 @@ def test_missing_release_installer_does_not_modify_checkout(tmp_path: Path) -> N
     )
     assert (router.box / "VERSION").read_text() == "0.1.0\n"
     assert not (router.box / "unrelated.sh").exists()
-
-
-@pytest.mark.parametrize("entrypoint", ["lua/install.sh", "openwrt/install.sh"])
-def test_legacy_install_path_delegates_to_new_backend(
-    tmp_path: Path, entrypoint: str
-) -> None:
-    # Older deployed updaters re-exec these paths after copying a new release.
-    old = tmp_path / entrypoint
-    new = tmp_path / "lua/install-openwrt.sh"
-    old.parent.mkdir(parents=True, exist_ok=True)
-    new.parent.mkdir(parents=True, exist_ok=True)
-    old.write_text((ROOT / entrypoint).read_text())
-    new.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$(dirname "$0")/../args"\n')
-    subprocess.run(["sh", str(old), "--update", "v0.2.0"], check=True)
-    assert (tmp_path / "args").read_text().splitlines() == ["--update", "v0.2.0"]
 
 
 @pytest.fixture
