@@ -34,22 +34,25 @@ def transition(
     unknown: dict[str, Any],
     healthy: dict[str, Any],
     key: str,
+    clear_after: int = 3,
 ) -> None:
-    known, _ = tracker.track_alarms({}, fault["alarm_items"], fault["checked"], 1000, 3)
+    known, _ = tracker.track_alarms(
+        {}, fault["alarm_items"], fault["checked"], 1000, clear_after
+    )
     assert key in known
     for now in (1060, 1120, 1180):
         known, events = tracker.track_alarms(
-            known, unknown["alarm_items"], unknown["checked"], now, 3
+            known, unknown["alarm_items"], unknown["checked"], now, clear_after
         )
         assert not any(e["event"] == "cleared" and e["key"] == key for e in events)
         assert known[key]["since"] == 1000
     known, _ = tracker.track_alarms(
-        known, fault["alarm_items"], fault["checked"], 1240, 3
+        known, fault["alarm_items"], fault["checked"], 1240, clear_after
     )
     assert known[key]["since"] == 1000
-    for now in (1300, 1360, 1420):
+    for now in range(1300, 1300 + 60 * clear_after, 60):
         known, events = tracker.track_alarms(
-            known, healthy["alarm_items"], healthy["checked"], now, 3
+            known, healthy["alarm_items"], healthy["checked"], now, clear_after
         )
     assert key not in known
     assert any(e["event"] == "cleared" and e["key"] == key for e in events)
@@ -183,7 +186,7 @@ def test_corrected_ecc_retains_sum_and_inventory_dependencies(
 def test_unreadable_selftest_log_holds_previous_failure(
     tracker: ModuleType, tmp_path: Path, fault_rc: int
 ) -> None:
-    report = {
+    report: dict[str, Any] = {
         "serial_number": "S1",
         "smart_status": {"passed": True},
         "ata_smart_attributes": {"table": [{"id": 5, "raw": {"value": 0}}]},
@@ -196,7 +199,7 @@ def test_unreadable_selftest_log_holds_previous_failure(
             data["ata_smart_self_test_log"] = {
                 "standard": {"count": 1, "error_count_total": errors}
             }
-        return collect(stage, smart(stage, "sda", rc, data))[0]
+        return collect(stage, {**smart(stage, "sda", rc, data)})[0]
 
     fault = capture("fault", fault_rc, 1)
     unknown = capture("unknown", 4, None)
@@ -205,7 +208,7 @@ def test_unreadable_selftest_log_holds_previous_failure(
     assert not covered(unknown, "smart/S1/selftest")
     assert covered(unknown, "smart/S1/health")
     assert covered(unknown, "smart/S1/reallocated")
-    transition(tracker, fault, unknown, healthy, "smart/S1/selftest")
+    transition(tracker, fault, unknown, healthy, "smart/S1/selftest", clear_after=1)
 
 
 def test_missing_scalar_fields_are_unknown_not_zero(tmp_path: Path) -> None:

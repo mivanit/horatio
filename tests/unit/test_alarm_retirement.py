@@ -130,19 +130,59 @@ def test_retirement_requires_password_and_uses_throttle(
     assert [event["event"] for event in server._read_events()] == ["raised"]
 
 
+def test_hidden_fault_resets_held_and_absence_bookkeeping() -> None:
+    import server
+
+    key = "journal/abcdef01"
+    known, _ = server.track_alarms(
+        None, [{"key": key, "text": "disk read failed"}], ["journal"], STAMP, 2
+    )
+    original = dict(known[key])
+    known, _ = server.track_alarms(known, [], ["journal"], STAMP + 60, 2)
+    known, _ = server.track_alarms(known, [], [], STAMP + 120, 2)
+    assert known[key]["absent"] == 1
+    assert known[key]["unchecked_since"] == STAMP + 120
+
+    # The collector still sees this message, beyond its eight displayed rows.
+    known, events = server.track_alarms(
+        known, [], ["journal"], STAMP + 180, 2, hidden=[key]
+    )
+    assert known[key] == original
+    assert events == []
+    assert server.held_rows("state", None, {"state": {"alarms": known}}) == []
+
+    # Confirmation of presence restarts the consecutive-absence requirement.
+    known, events = server.track_alarms(known, [], ["journal"], STAMP + 240, 2)
+    assert key in known
+    assert events == []
+    known, events = server.track_alarms(known, [], ["journal"], STAMP + 300, 2)
+    assert key not in known
+    assert [event["event"] for event in events] == ["cleared"]
+    assert events[0]["since"] == STAMP
+
+
 @pytest.mark.parametrize("source", ["state", "sensors", "dashboard"])
+@pytest.mark.parametrize("field", ["alarm_items", "alarm_hidden"])
 def test_new_active_observation_blocks_stale_retirement(
-    payload: dict[str, Any], monkeypatch: pytest.MonkeyPatch, source: str
+    payload: dict[str, Any], monkeypatch: pytest.MonkeyPatch, source: str, field: str
 ) -> None:
     import server
 
     server._alarm_memory[source] = server._alarm_memory["dashboard"]
-    active = {"alarm_items": [{"key": KEY, "text": "fault returned"}]}
+    # The source has confirmed recurrence, but the tracker has not run yet.
+    active = {
+        field: (
+            [KEY]
+            if field == "alarm_hidden"
+            else [{"key": KEY, "text": "fault returned"}]
+        )
+    }
     monkeypatch.setattr(server, "server_findings", lambda refresh=False: active)
     monkeypatch.setattr(server, "_get_storage_health", lambda *args: active)
     result = asyncio.run(server.retire_alarm(request(payload | {"source": source})))
     assert result.status_code == 409
     assert KEY in server._alarm_memory[source]["alarms"]
+    assert [event["event"] for event in server._read_events()] == ["raised"]
 
 
 @pytest.mark.parametrize(

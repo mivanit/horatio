@@ -115,9 +115,10 @@ For the power bar:
 `sensor_labels` gives display names to temperature, fan, and power sensors, for
 example `{"loc1": "I350 NIC"}`. For Python's Linux hwmon fans, use the stable `id`
 returned by `/api/4/sensors` as the key. New fan history uses that physical identity;
-old name-based history remains readable. Other history records keep the sensor's
-own name. `temp_labels` is the older setting and is still read; `sensor_labels`
-wins where both name a sensor.
+old name-based history remains readable. Lua temperature history adds physical
+identity to the sensor name where available; display aliases still use the name.
+Other history records keep the sensor's own name. `temp_labels` is the older
+setting and is still read; `sensor_labels` wins where both name a sensor.
 
 `temp_thresholds` sets individual limits in °C for sensors that run hot by design,
 for example `{"I350 NIC": 95}`. Use the sensor's own name or its

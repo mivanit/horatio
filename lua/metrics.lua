@@ -561,6 +561,57 @@ function M.sensors()
     local sensors = {}
     local fs = require("nixio").fs
 
+    local function escape_component(value)
+        return (value:gsub("([^%w_.~-])", function(c) return string.format("%%%02X", c:byte()) end))
+    end
+
+    -- Follow physical topology rather than Linux's allocated bus numbers.
+    -- A mux channel belongs to its upstream device; USB ports and interfaces
+    -- belong to their controller's root hub (distinguished by USB version).
+    local function physical_path(device, depth)
+        if device == "/sys/devices" then return "" end
+        if depth > 64 then return nil end
+        local parent, name = device:match("^(.*)/([^/]+)$")
+        if not parent or not device:match("^/sys/devices/") then return nil end
+        if name:match("^i2c%-%d+$") then
+            if fs.readlink(device .. "/mux_device") then
+                parent = fs.realpath(device .. "/mux_device")
+                if not parent then return nil end
+                local channel
+                for _, link in ipairs(glob(parent .. "/channel-*")) do
+                    local candidate = link:match("/(channel%-%d+)$")
+                    if candidate and fs.realpath(link) == device then
+                        if channel then return nil end
+                        channel = candidate
+                    end
+                end
+                if not channel then return nil end
+                name = channel
+            else
+                local adapter = read_line(device .. "/name")
+                if not adapter or adapter == "" or adapter:match("i2c%-%d+") then return nil end
+                for _, sibling in ipairs(glob(parent .. "/i2c-*")) do
+                    if sibling ~= device and read_line(sibling .. "/name") == adapter then return nil end
+                end
+                name = "i2c-" .. escape_component(adapter)
+            end
+        elseif name:match("^%d+%-%x%x%x%x$") and parent:match("/i2c%-%d+$") then
+            name = "address-" .. name:match("%-(.*)$"):lower()
+        elseif name:match("^usb%d+$") then
+            local version = read_line(device .. "/version")
+            if not version or version == "" then return nil end
+            name = "usb" .. escape_component(version)
+        elseif device:match("/usb%d+/") and (name:match("^%d+%-%d[%d%.]*$")
+            or name:match("^%d+%-%d[%d%.]*:%d+%.%d+$")) then
+            name = "port-" .. name:match("%-(.*)$")
+        elseif name:match("^%x%x%x%x:%x%x%x%x:%x%x%x%x%.%x+$") then
+            name = name:match("^(.*)%."):lower()
+        end
+        local prefix = physical_path(parent, depth + 1)
+        if not prefix then return nil end
+        return prefix == "" and name or (prefix .. "/" .. name)
+    end
+
     -- Class indices are probe order, not device identity. Resolve the physical
     -- parent and channel instead; NVMe's controller index is probe order too.
     local function device_key(path)
@@ -569,13 +620,17 @@ function M.sensors()
         device = device:gsub("/hwmon/hwmon%d+$", ""):gsub("/nvme/nvme%d+$", "")
         if not device:match("^/sys/devices/") or device:match("/thermal_zone%d+")
             or device:match("/hwmon%d+") then return nil end
-        return device:gsub("^/sys/devices/", "")
+        -- false prevents a unique label from disguising an unstable identity.
+        return physical_path(device, 0) or false
     end
 
     local function add(label, value, device, channel)
+        local key = label
+        if device == false then key = false
+        elseif device then key = label .. " [" .. device .. "/" .. channel .. "]" end
         sensors[#sensors + 1] = {
             type = "temperature_core", label = label, value = round(value / 1000, 1),
-            key = device and (label .. " [" .. device .. "/" .. channel .. "]") or label
+            key = key
         }
     end
 

@@ -209,6 +209,9 @@ for installation, configuration paths, and service behavior.
   version `build` is always `null`.
 - `/api/list-endpoints` returns the Lua routes as `endpoints`, plus `backend: "lua"`
   and `history_metrics`, rather than the Python file-backed endpoint list.
+- Temperature readings include a history `key` derived from physical topology
+  where available. Readings without a reliable, unique identity remain visible
+  live but have `key: false` and are omitted from history with a log diagnostic.
 - History reads accept `hours` but do not implement `since`, `cutoff`, or `now`.
   They read at most the newest 4 MiB and report `truncated` when the range does not
   fit. The only `/api/history/field/{name}` route is `temps`. Lua history does not

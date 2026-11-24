@@ -36,7 +36,8 @@ io.open = function(path, mode)
             close = function() return true end,
         }
     end
-    assert(readable[path] or path:match("^/sys/class/thermal/") or path:match("^/sys/class/hwmon/"),
+    assert(readable[path] or path:match("^/sys/class/thermal/") or path:match("^/sys/class/hwmon/")
+        or path:match("^/sys/devices/"),
         "unexpected file: " .. path)
     return files[path] and reader(files[path]) or nil
 end
@@ -180,6 +181,7 @@ check(public.ipv4 == nil and public.ipv6 == nil and public.error == "lookup fail
 local sleeps, on_sleep = 0, nil
 local globbed = {}
 local realpaths = {}
+local symlinks = {}
 package.loaded.nixio = {
     nanosleep = function(seconds)
         assert(seconds == 1, "window length")
@@ -191,7 +193,8 @@ package.loaded.nixio = {
         local list, i = globbed[pattern], 0
         assert(list, "unexpected glob: " .. pattern)
         return function() i = i + 1; return list[i] end, #list
-    end, realpath = function(path) return realpaths[path] end},
+    end, realpath = function(path) return realpaths[path] end,
+    readlink = function(path) return symlinks[path] end},
 }
 local function counters(uptime, busy, idle, rx, tx)
     files["/proc/uptime"] = string.format("%.2f 0.00\n", uptime)
@@ -306,6 +309,91 @@ realpaths = {}
 sensors = metrics.sensors()
 check(#sensors == 2 and sensors[1].key == false and sensors[2].key == false,
     "unidentified duplicates stay visible without inventing history identities")
+
+-- Other bus counters change independently of hwmon. Exercise the collected
+-- reading, including its history key, through the same sysfs interface.
+local function sensor_key(device)
+    globbed["/sys/class/hwmon/hwmon*/temp*_input"] = {drive_sensor(42, device, 43000)}
+    local reading = metrics.sensors()[1]
+    check(reading.label == "Composite" and reading.value == 43,
+        "physical identity changes retain the live reading")
+    return reading.key
+end
+local usb_controller = "/sys/devices/pci0000:00/0000:00:14.0"
+local function usb_sensor(bus, port, interface, hid, version)
+    local hub = usb_controller .. "/usb" .. bus
+    files[hub .. "/version"] = version and (version .. "\n") or nil
+    return hub .. "/" .. bus .. "-" .. port .. "/" .. bus .. "-" .. port
+        .. ":1." .. interface .. "/0003:1B1C:0C20." .. hid
+end
+local usb_key = sensor_key(usb_sensor(1, "2.3", 0, "0001", "2.00"))
+check(type(usb_key) == "string" and usb_key:find("usb2.00/port-2.3/port-2.3:1.0/0003:1b1c:0c20/temp1", 1, true),
+    "USB identities retain hub version, physical ports, interface and HID model")
+check(sensor_key(usb_sensor(7, "2.3", 0, "001F", "2.00")) == usb_key,
+    "USB bus and HID allocation changes preserve temperature history")
+check(sensor_key(usb_sensor(7, "2.4", 0, "0020", "2.00")) ~= usb_key,
+    "different USB ports remain distinct")
+check(sensor_key(usb_sensor(7, "2.3", 1, "0021", "2.00")) ~= usb_key,
+    "different USB interfaces remain distinct")
+check(sensor_key(usb_sensor(8, "2.3", 0, "0022", "3.00")) ~= usb_key,
+    "USB2 and USB3 root hubs remain distinct")
+check(sensor_key(usb_sensor(8, "2.3", 0, "0022", nil)) == false,
+    "a missing USB hub identity omits history even for a unique label")
+
+local i2c_controller = "/sys/devices/platform/i2c-controller"
+local function i2c_bus(bus, adapter)
+    local path = i2c_controller .. "/i2c-" .. bus
+    files[path .. "/name"] = adapter and (adapter .. "\n") or nil
+    globbed[i2c_controller .. "/i2c-*"] = {path}
+    return path
+end
+local bus = i2c_bus(2, "SMBus controller")
+local i2c_key = sensor_key(bus .. "/2-004c")
+check(type(i2c_key) == "string" and i2c_key:find("i2c-SMBus%20controller/address-004c/temp1", 1, true),
+    "I2C identities use the adapter name and device address")
+bus = i2c_bus(9, "SMBus controller")
+check(sensor_key(bus .. "/9-004c") == i2c_key, "I2C bus renumbering preserves temperature history")
+check(sensor_key(bus .. "/9-004d") ~= i2c_key, "I2C device addresses remain distinct")
+check(sensor_key(i2c_bus(9, "Another controller") .. "/9-004c") ~= i2c_key,
+    "different I2C adapters remain distinct")
+check(sensor_key(i2c_bus(9, nil) .. "/9-004c") == false,
+    "an unreadable I2C adapter identity never falls back to a unique label")
+check(sensor_key(i2c_bus(9, "i2c-9-mux (chan_id 0)") .. "/9-004c") == false,
+    "an I2C adapter name containing a probe counter is not a history identity")
+bus = i2c_bus(9, "SMBus controller")
+local sibling = i2c_controller .. "/i2c-10"
+files[sibling .. "/name"] = "SMBus controller\n"
+globbed[i2c_controller .. "/i2c-*"] = {bus, sibling}
+check(sensor_key(bus .. "/9-004c") == false,
+    "same-name sibling I2C adapters are ambiguous even with one readable sensor")
+
+local function mux_sensor(upstream, downstream, channel)
+    local mux = i2c_bus(upstream, "SMBus controller") .. "/" .. upstream .. "-0070"
+    local child = mux .. "/i2c-" .. downstream
+    symlinks[child .. "/mux_device"] = ".."
+    realpaths[child .. "/mux_device"] = mux
+    local link = mux .. "/channel-" .. channel
+    realpaths[link] = child
+    globbed[mux .. "/channel-*"] = {link}
+    return child .. "/" .. downstream .. "-004c", child, mux
+end
+local mux_device = mux_sensor(2, 17, 0)
+local mux_key = sensor_key(mux_device)
+check(type(mux_key) == "string" and mux_key:find("address-0070/channel-0/address-004c/temp1", 1, true),
+    "I2C mux identity follows the upstream device and channel")
+check(sensor_key(mux_sensor(9, 28, 0)) == mux_key,
+    "both upstream and downstream I2C buses may renumber without splitting history")
+check(sensor_key(mux_sensor(9, 29, 1)) ~= mux_key,
+    "identical addresses on different mux channels remain distinct")
+local device, child, mux = mux_sensor(9, 28, 0)
+globbed[mux .. "/channel-*"] = {}
+check(sensor_key(device) == false, "a missing mux channel mapping omits only history")
+globbed[mux .. "/channel-*"] = {mux .. "/channel-0", mux .. "/channel-1"}
+realpaths[mux .. "/channel-1"] = child
+check(sensor_key(device) == false, "duplicate mux channel mappings are not guessed")
+realpaths[child .. "/mux_device"] = nil
+check(sensor_key(device) == false, "a broken mux link does not fall back to its adapter label")
+
 globbed = {["/sys/class/thermal/thermal_zone*"] = {}, ["/sys/class/hwmon/hwmon*/temp*_input"] = {}}
 check(#metrics.sensors() == 0, "a router with no sensors reports none")
 package.loaded.nixio = nil
