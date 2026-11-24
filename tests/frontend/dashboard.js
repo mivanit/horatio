@@ -1977,8 +1977,8 @@ function testPowerHistoryPerRecord() {
   const current = { timestamp: old.timestamp, temps: { [physical]: 43 } };
   assert.equal(temperatures([current]).data.datasets[0].label, 'Composite', 'a lone physical series has a short legend');
   const mixedTemps = temperatures([{ timestamp: old.timestamp, temps: { Composite: 40 } }, current]);
-  assert.deepEqual(plain(mixedTemps.data.datasets.map(d => d.label)), ['Composite', physical]);
-  assert.deepEqual(plain(mixedTemps.data.datasets.map(d => d.data)), [[40, null], [null, 43]], 'display polish never joins old and new identities');
+  assert.deepEqual(plain(mixedTemps.data.datasets.map(d => d.label)), ['Composite', 'Max', physical]);
+  assert.deepEqual(plain(mixedTemps.data.datasets.map(d => d.data)), [[40, null], [40, 43], [null, 43]], 'display polish never joins old and new identities');
 }
 
 async function testHistoryCapabilities() {

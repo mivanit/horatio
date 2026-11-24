@@ -339,4 +339,6 @@ def test_unreadable_gpu_bus_identity_does_not_check_index_alarms() -> None:
     state = SensorCapture().collect(csv=gpu_csv(bus="[N/A]", ecc=5))[0]
     assert state["gpus"] == []
     assert any("invalid PCI bus identity" in text for text in state["alarms"])
-    assert not any(prefix.startswith("gpu/") for prefix in state["checked"])
+    assert [prefix for prefix in state["checked"] if prefix.startswith("gpu/")] == [
+        "gpu/driver-mismatch"
+    ], "a successful query proves driver recovery, but cannot identify this GPU"
