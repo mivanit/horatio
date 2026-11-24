@@ -570,7 +570,7 @@ function testHardwareSince() {
   const context = liveContext(['hardware-content', 'hardware-value', 'snapshot-age']);
   const now = Date.UTC(2026, 10, 24, 8, 0, 0);
   context.Date = class extends Date { static now() { return now; } };
-  context.escapeHtml = String;
+  context.escapeHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
   context.hwHint = text => text.startsWith('journal:') ? 'journalctl' : text.startsWith('sd') ? 'smartctl' : '';
   context.updateCardCritical = (id, bad) => { context.statuses.critical = bad; };
   context.updateCardWarning = (id, value) => { context.statuses.warning = value > 0; };
@@ -598,6 +598,13 @@ function testHardwareSince() {
 
   context.renderHardware(state);
   assert.equal(header(), '4 issues');
+  // The date as the card must print it, worked out here and not by the code under test.
+  const stamp = seconds => { const d = new Date(seconds * 1000), p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+  assert.equal(context.sinceText(t - 2 * 86400 - 3600), `${stamp(t - 2 * 86400 - 3600)} (2 d)`);
+  assert.match(context.sinceText(t), /^2026-11-2[345] \d\d:\d\d \(0 min\)$/);
+  assert.equal(context.sinceText(t + 3600), `${stamp(t + 3600)} (0 min)`, 'a time in the future is not a negative age');
+  for (const bad of [null, undefined, NaN, Infinity, 1e18, '5']) assert.equal(context.sinceText(bad), '', `no date from ${bad}`);
   assert(html().includes(`seen since ${context.sinceText(t - 2 * 86400 - 3600)}`) && html().includes('(2 d)'), 'an alarm older than the history says so');
   assert(html().includes(`>since ${context.sinceText(t - 5 * 3600)}<`) && html().includes('(5 h)') && html().includes('(2 min)') && html().includes('(0 min)'));
   assert.equal(html().split('check: journalctl').length - 1, 1, 'two journal lines in a row share one hint');
@@ -622,6 +629,12 @@ function testHardwareSince() {
 
   // The newest five lines of the alarm log, newest first; gaps and junk are left out.
   const at = seconds => new Date((t - seconds) * 1000).toISOString();
+  // Text from the box is escaped wherever it is shown.
+  const markup = 'journal: app: <b>&"x"';
+  context.renderHardware({ status: 'ok', age_sec: 30, alarms: [markup], alarm_items: [item('journal/m', markup, t - 60)],
+    alarm_held: [item('h', '<i>held', t - 60, { unchecked_since: t })] });
+  assert(html().includes('journal: app: &lt;b>&amp;&quot;x&quot;') && html().includes('&lt;i>held') && !html().includes('<b>') && !html().includes('<i>'));
+
   context.dataCache.alarms = { lastUpdate: now, data: { recent: [
     { timestamp: at(9000), event: 'raised', text: 'too old to show' },
     { timestamp: at(8000), event: 'raised', text: 'sde: reallocated=8', initial: true },
@@ -638,6 +651,23 @@ function testHardwareSince() {
     '8 -> 9: sde: reallocated=9', 'first seen: sde: reallocated=8'].map(text => recent.indexOf(text));
   assert(order.every(i => i > 0) && order.every((i, n) => n === 0 || i > order[n - 1]), `newest first: ${order}`);
   assert(!recent.includes('too old') && !recent.includes('unreadable') && !recent.includes('gap'));
+  // Lines that lack what they should have are shown without the missing part, or not at all.
+  context.dataCache.alarms.data.recent = [
+    { timestamp: at(500), event: 'changed', text: '<s>sde', value: 9 },
+    { timestamp: at(400), event: 'raised' },
+    { timestamp: at(300), event: 'boot', previous: { clean: false } },
+    { timestamp: at(200), event: 'cleared', text: 'x', active_for_s: -6000 },
+    { timestamp: 4e22, event: 'raised', text: 'no such date' },
+  ];
+  context.renderHardware({ status: 'ok', age_sec: 30, alarms: [] });
+  const odd = html().slice(html().indexOf('Recent changes'), html().indexOf('alarm rules'));
+  assert(odd.includes('? -> 9: &lt;s>sde') && odd.includes('booted; the boot before ended without a shutdown<') && odd.includes(' cleared: x'));
+  assert(!odd.includes('undefined') && !odd.includes('NaN') && !odd.includes('after -') && !odd.includes('no such date'), odd);
+  assert.equal(odd.split('hw-row hw-note').length - 1, 3, 'the raise that names no alarm is left out');
+  // The list was fetched too long ago to be called recent.
+  context.dataCache.alarms.lastUpdate = now - 6 * 60 * 1000;
+  context.renderHardware({ status: 'ok', age_sec: 30, alarms: [] });
+  assert(!html().includes('Recent changes'));
   assert.deepEqual(context.errors, []);
 }
 

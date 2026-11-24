@@ -148,9 +148,15 @@ if command -v apk >/dev/null 2>&1; then
     # and ucode plugins LuCI needs: an old uhttpd-mod-ubus left beside a new
     # uhttpd kills LuCI's backend at its first request. Only the ones already
     # installed are named, so a router without LuCI does not gain them.
+    # Asked two ways, so that a change in what either prints cannot silently
+    # bring back the breakage: apk's own "is it installed" and its list.
+    installed=$(apk list --installed 2>/dev/null) || installed=""
     plugins=""
     for plugin in uhttpd-mod-ubus uhttpd-mod-ucode; do
-        apk list --installed 2>/dev/null | grep -q "^$plugin-[0-9]" && plugins="$plugins $plugin"
+        if apk info -e "$plugin" >/dev/null 2>&1 ||
+            printf '%s\n' "$installed" | grep -q "^$plugin-[0-9]"; then
+            plugins="$plugins $plugin"
+        fi
     done
     # shellcheck disable=SC2086  # $plugins is a list of words
     apk add --upgrade uhttpd uhttpd-mod-lua $plugins luci-lib-jsonc luci-lib-nixio

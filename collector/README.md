@@ -85,9 +85,11 @@ ago`), so two snapshots cannot be compared by text. Each snapshot therefore also
 (`schema: 1`):
 
 - `alarm_items`: one `{"key", "text"}` per alarm, in the same order as `alarms` and with the
-  same text. The key is the alarm's identity and never contains a count, an age or a device
-  letter: drives go by serial (`sdX` letters move between boots), BMC sensors by name and
-  entity. A fault counter that never falls on its own (reallocated sectors, grown defects, ECC
+  same text. The key is the alarm's identity and never contains a count or an age. Drives go
+  by serial, because `sdX` letters move between boots; BMC sensors by name and entity. Three
+  kinds of key do carry a device name, for want of anything better, and so start afresh if
+  the letters move: a drive that gave no serial or no report at all (`smart/dev:<name>/…`)
+  and an md array's members (`md/<array>/member/<dev>/…`). A fault counter that never falls on its own (reallocated sectors, grown defects, ECC
   counts) also has `"value"`, so a reader can report `8 -> 9`; temperatures and ages have none.
   A key raised twice in one run gets `#2`, `#3`.
 - `checked`: the key prefixes this run really evaluated, with a clean capture. A prefix `P`
@@ -95,7 +97,12 @@ ago`), so two snapshots cannot be compared by text. Each snapshot therefore also
   prefix is not listed is unknown, not cleared**: a section that crashed, a tool that timed
   out, a drive left in standby or gone from `/dev`, a box whose BMC stopped answering, a rule
   that is not judged right now (`mismatch_cnt` during a resync, the correctable ECC count
-  while an uncorrectable one shows) list nothing.
+  while an uncorrectable one shows) list nothing. A drive is listed rule by rule, for what
+  its report really contained: one that answered with its health but not its attribute
+  table is checked for `…/health`, not for `…/reallocated`.
+- `alarm_hidden` (15-min snapshot): keys of alarms that exist but are not printed, which is
+  the journal messages past the eight shown. Everything else under a checked prefix that is
+  absent is gone; these are not.
 - `boot_id`: the kernel's boot id. Counters that reset at boot (ECC, failed units, GPU ECC
   since driver load) make their alarms disappear at a reboot; a reader that sees the id
   change knows why.
@@ -111,13 +118,13 @@ ago`), so two snapshots cannot be compared by text. Each snapshot therefore also
 | `backup/never`, `backup/overdue` | the backup timer |
 | `unit/<unit>` | a failed systemd unit |
 | `journal/<8 hex>` | one error-level journal message: a hash of who said what, with digit runs (pids, counts) ignored |
-| `journal-more` | more distinct messages than the 8 shown |
+| `journal-more` | more distinct messages than the 8 shown (their keys are in `alarm_hidden`) |
 | `sensors-snapshot/missing`, `/stale` | the 60 s file, judged by the 15-min run |
 | `bmc/<fan\|temp\|power>/<name>@<entity>` | a BMC sensor whose status is not ok |
 | `fans/ceiling` | `fan_rpm_alarm_above` |
 | `gpu/<index>/temp/<memory\|core\|tlimit>`, `/slowdown`, `/ecc`, `/retired_pages` | per GPU, by nvidia-smi index (PCI bus order) |
 | `capture/<name>`, `unparsed/<name>` | a capture that failed, a line that did not parse |
-| `collector/<part>`, `collector/smart/dev:<name>` | a part of the 15-min run that crashed |
+| `collector/<part>`, `smart/dev:<name>/crash` | a part of the 15-min run that crashed; the check of one drive that crashed |
 
 ## Since when: the dashboard server keeps the history
 

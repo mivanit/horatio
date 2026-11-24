@@ -663,7 +663,7 @@ function renderHardware(data) {
   }
   rows.forEach(({ text, item }, i) => {
     issues.push(hwRow('text-error', text));
-    // `initial`: already there when the collector's history began, so it may be older.
+    // `initial`: already there when the server's alarm history began, so it may be older.
     const since = sinceText(item?.since);
     if (since) issues.push(hwRow('hw-note', `${item.initial ? 'seen since' : 'since'} ${since}`));
     // Several lines of one kind in a row (journal messages) share one hint, after the last.
@@ -698,7 +698,9 @@ function renderHardware(data) {
 
   // The newest lines of the event log (/api/alarms), newest first; nothing on a
   // backend without it.
-  const recent = (Array.isArray(dataCache.alarms?.data?.recent) ? dataCache.alarms.data.recent : [])
+  // Only from a fetch of the last five minutes: older ones are not "recent".
+  const log = getFreshCache('alarms', 300000)?.recent;
+  const recent = (Array.isArray(log) ? log : [])
     .map(hwEventText).filter(Boolean).slice(-5).reverse().map(t => hwRow('hw-note', t));
 
   content.innerHTML = hwSection('Issues', issues) + hwSection('Recent changes', recent) +
@@ -715,17 +717,18 @@ function renderHardware(data) {
 // One line of the event log (README: "What is kept in logs/") as text, or null for a kind
 // not shown here (a gap in the snapshots) or a line that cannot be read.
 function hwEventText(e) {
-  const at = Date.parse(e?.timestamp);
-  if (!Number.isFinite(at)) return null;
-  const when = sinceText(at / 1000);
-  const span = s => !Number.isFinite(s) ? '' : s < 7200 ? ` after ${Math.round(s / 60)} min` : s < 172800 ? ` after ${Math.round(s / 3600)} h` : ` after ${Math.round(s / 86400)} d`;
+  const when = sinceText(Date.parse(e?.timestamp) / 1000);
+  if (!when) return null;
+  const span = s => !Number.isFinite(s) || s < 0 ? '' : s < 7200 ? ` after ${Math.round(s / 60)} min` : s < 172800 ? ` after ${Math.round(s / 3600)} h` : ` after ${Math.round(s / 86400)} d`;
+  // A line about an alarm says which one; one that does not is not shown.
+  if (e.event !== 'boot' && typeof e.text !== 'string') return null;
   switch (e.event) {
     case 'raised': return `${when} ${e.initial ? 'first seen' : 'raised'}: ${e.text}`;
-    case 'changed': return `${when} ${e.was} -> ${e.value}: ${e.text}`;
+    case 'changed': return `${when} ${e.was ?? '?'} -> ${e.value ?? '?'}: ${e.text}`;
     case 'cleared': return `${when} cleared${span(e.active_for_s)}${e.after_boot ? ' (reboot)' : ''}: ${e.text}`;
     case 'expired': return `${when} dropped, unchecked for 30 days: ${e.text}`;
     case 'boot': return `${when} booted${e.kernel ? ` ${e.kernel}` : ''}` +
-      (e.previous?.clean === false ? `; the boot before ended without a shutdown at ${e.previous.ended}` : '');
+      (e.previous?.clean === false ? `; the boot before ended without a shutdown${e.previous.ended ? ` at ${e.previous.ended}` : ''}` : '');
     default: return null;
   }
 }
@@ -793,6 +796,7 @@ function resetServicesHeader() {
 function sinceText(epoch) {
   if (!Number.isFinite(epoch)) return '';
   const d = new Date(epoch * 1000), p = n => String(n).padStart(2, '0');
+  if (!Number.isFinite(d.getTime())) return '';   // a number no date can hold
   const secs = Math.max(0, Math.floor(Date.now() / 1000 - epoch));
   const age = secs < 3600 ? `${Math.floor(secs / 60)} min` : secs < 172800 ? `${Math.floor(secs / 3600)} h` : `${Math.floor(secs / 86400)} d`;
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())} (${age})`;

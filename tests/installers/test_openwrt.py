@@ -42,8 +42,18 @@ if name == "uci" and args[:2] == ["get", "network.lan.ipaddr"]:
 elif name == "uci" and args == ["-q", "get", "uhttpd.dashboard"]:
     sys.exit(1 if os.environ.get("HORATIO_SECTION_MISSING") == "1" else 0)
 elif name == "apk" and args == ["list", "--installed"]:
+    # HORATIO_APK_LIST: "plain" prints name-version lines, "other" a format the
+    # installer does not know, "fail" nothing and a failure.
+    mode = os.environ.get("HORATIO_APK_LIST", "plain")
+    if mode == "fail":
+        sys.exit(1)
     for package in os.environ.get("HORATIO_APK_INSTALLED", "uhttpd uhttpd-mod-lua").split():
-        print(package + "-2026.01.02~abcdef12-r1 aarch64_cortex-a53 {feeds/base} (ISC) [installed]")
+        version = "-2026.01.02~abcdef12-r1 aarch64_cortex-a53 {feeds/base} (ISC) [installed]"
+        print(package + version if mode == "plain" else "[installed] " + package)
+elif name == "apk" and args[:2] == ["info", "-e"]:
+    # HORATIO_APK_INFO=no: an apk without this query.
+    known = os.environ.get("HORATIO_APK_INSTALLED", "uhttpd uhttpd-mod-lua").split()
+    sys.exit(0 if os.environ.get("HORATIO_APK_INFO") != "no" and args[2] in known else 1)
 elif name == "ip":
     print("    inet 127.0.0.1/8 scope host lo")
     address = os.environ.get("HORATIO_INTERFACE_IP", "192.168.2.1/24")
@@ -186,7 +196,7 @@ class TestOpenWrtInstaller:
         return [
             event["args"]
             for event in self.events("apk")
-            if event["args"] != ["list", "--installed"]
+            if event["args"][0] not in ("list", "info")
         ]
 
     def test_apk_refreshes_its_index_and_upgrades_uhttpd_with_all_its_plugins(
@@ -209,7 +219,7 @@ class TestOpenWrtInstaller:
             self.run_install(extra_env={"HORATIO_APK_INSTALLED": installed}).returncode
             == 0
         )
-        assert self.packages()[1] == [
+        upgrade: list[str] = [
             "add",
             "--upgrade",
             "uhttpd",
@@ -218,6 +228,22 @@ class TestOpenWrtInstaller:
             "uhttpd-mod-ucode",
             *wanted,
         ]
+        assert self.packages()[1] == upgrade
+        # The plugins are found whichever of apk's two answers still works: an apk
+        # without `info -e`, or a list that fails or prints another format, must
+        # not silently bring the breakage back.
+        odd: dict[str, str]
+        for odd in (
+            {"HORATIO_APK_INFO": "no"},
+            {"HORATIO_APK_LIST": "other"},
+            {"HORATIO_APK_LIST": "fail"},
+        ):
+            (self.root / "events").unlink()
+            result: subprocess.CompletedProcess[str] = self.run_install(
+                extra_env={"HORATIO_APK_INSTALLED": installed, **odd}
+            )
+            assert result.returncode == 0, (odd, result.stderr)
+            assert self.packages()[1] == upgrade, odd
 
     def test_a_failed_apk_update_is_a_warning_not_the_end(
         self: TestOpenWrtInstaller,

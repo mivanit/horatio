@@ -11,7 +11,7 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
   list and a reader of one missed the other. `GET /api/services` gains `down_since` per
   target: when its current outage began.
 - Dashboard: the Hardware health card says since when each issue has been there
-  (`since 2026-11-21 17:50 (2 d)`, or `seen since …` when it predates the collector's
+  (`since 2026-11-21 17:50 (2 d)`, or `seen since …` when it predates the alarm
   history), keeps showing an alarm that could not be re-checked (`not re-checked since
   …`; the header then reads `N unchecked` instead of `all clear`), and lists the last
   five alarm changes under "Recent changes". Several lines of one kind in a row share
@@ -19,8 +19,8 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
   (`down (timeout) since …`). All of it appears once the collectors and the server are
   updated; an older one of either simply shows what it showed before.
 - OpenWrt installer (apk): `apk update` runs first (its index is lost at every reboot; a
-  failure is a warning), and `uhttpd` is upgraded in one transaction with every uhttpd
-  plugin the router already has. Until now only `uhttpd-mod-lua` was named, so a router
+  failure is a warning), and `uhttpd` is upgraded in one transaction with LuCI's uhttpd
+  plugins (`uhttpd-mod-ubus`, `uhttpd-mod-ucode`) when the router has them. Until now only `uhttpd-mod-lua` was named, so a router
   with LuCI kept an old `uhttpd-mod-ubus` beside the new server and LuCI stopped
   answering until that package was upgraded by hand.
 - OpenWrt: `/api/4/uptime` uses the Linux backend's format, `1 day, 20:14:03` (was

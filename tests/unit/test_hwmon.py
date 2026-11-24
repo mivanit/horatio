@@ -324,3 +324,25 @@ def test_collector_power_rows_read_new_and_old_snapshots() -> None:
     ]
     assert server.collector_power_rows(new) == expected
     assert server.collector_power_rows(old) == expected
+
+
+def test_fan_alarms_are_keyed_by_the_fan_not_by_its_reading() -> None:
+    import hwmon
+
+    rules: dict[str, Any] = {
+        "cpu": {"min_rpm": 300},
+        "case": {"min_rpm": 300, "on_low": "note"},
+    }
+    items: list[dict[str, Any]]
+    slow: list[dict[str, Any]]
+    notes: list[str]
+    _, items, notes = hwmon.fan_findings([fan("cpu", 0), fan("case", 0)], rules)
+    _, slow, _ = hwmon.fan_findings([fan("cpu", 120)], rules)
+    assert items == [
+        {"key": "fan/cpu", "text": "fan cpu: 0 RPM, below its 300 RPM minimum"}
+    ]
+    assert [i["key"] for i in slow] == ["fan/cpu"]
+    assert slow[0]["text"] != items[0]["text"]
+    assert notes[0].startswith("fan case: 0 RPM")
+    # apply_fan_rules is the same findings with the alarms as plain text.
+    assert hwmon.apply_fan_rules([fan("cpu", 0)], rules)[1] == [items[0]["text"]]

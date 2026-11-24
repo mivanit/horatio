@@ -482,8 +482,10 @@ def test_only_what_was_really_evaluated_is_checked(tmp_path: Path) -> None:
         "sel/memory",
         "sel/hardware",
         "ecc/correctable",
-        "smart/S1/attrs",
+        "smart/S1/health",
+        "smart/S1/selftest",
         "smart/dev:sda/unreadable",
+        "smart/dev:sda/crash",
         "backup/overdue",
         "unit/x.service",
         "journal",
@@ -658,10 +660,21 @@ def test_journal_shows_at_most_eight_messages_and_then_a_count(tmp_path: Path) -
     assert state["alarms"][0].startswith("journal: app: error a (1 in 24h")
     assert state["alarms"][-1] == "journal: 3 more distinct error-level messages in 24h"
     assert keys(state)[-1] == "journal-more"
-    # A message that is not shown is not known to be gone.
-    assert not covered(state, keys(state)[0])
+    # The three that are not printed are still there, and say so by key: a reader
+    # that knew one of them must not take it for gone. Anything else under
+    # journal/ that is absent really is gone.
+    assert len(state["alarm_hidden"]) == 3
+    assert all(
+        k.startswith("journal/") and k not in keys(state) for k in state["alarm_hidden"]
+    )
+    assert covered(state, keys(state)[0]) and covered(state, "journal-more")
     fewer: dict[str, Any] = collect(tmp_path, {"tmp/journal-err.txt": journal[:200]})[0]
-    assert covered(fewer, keys(state)[0]) and covered(fewer, "journal-more")
+    assert fewer["alarm_hidden"] == [] and "journal-more" not in keys(fewer)
+    # The journal could not be read: nothing about it is known, the count included.
+    failed: dict[str, Any] = collect(
+        tmp_path, {"tmp/journal-err.txt": "", "tmp/journal-err.err": "exit 1\n"}
+    )[0]
+    assert not covered(failed, keys(state)[0]) and not covered(failed, "journal-more")
 
 
 def ata(reallocated: int, pending: int = 0) -> dict[str, Any]:
@@ -718,3 +731,74 @@ def test_each_ata_attribute_is_its_own_alarm_with_its_own_baseline(
         "sde: reallocated=8"
     ]
     assert with_baseline(ata(8), {"S1": 8})["alarms"] == ["sde: reallocated=8"]
+
+
+def test_a_drive_is_checked_only_for_what_its_report_contained(tmp_path: Path) -> None:
+    # The drive answered with its health but, this once, not its attribute table
+    # (an optional SMART command failed): the reallocated-sectors alarm from the
+    # run before is not known to be gone.
+    partial: dict[str, Any] = {"serial_number": "S1", "smart_status": {"passed": True}}
+    state: dict[str, Any] = collect(tmp_path, {**smart(tmp_path, "sde", 4, partial)})[0]
+    assert state["alarms"] == []
+    assert covered(state, "smart/S1/health") and covered(state, "smart/S1/selftest")
+    for key in ("smart/S1/reallocated", "smart/S1/pending", "smart/S1/grown_defects"):
+        assert not covered(state, key), key
+    full: dict[str, Any] = collect(tmp_path, {**smart(tmp_path, "sde", 0, ata(8))})[0]
+    assert covered(full, "smart/S1/reallocated") and covered(full, "smart/S1/pending")
+    # A SAS drive is checked for its defect list, an NVMe one for its health log.
+    sas: dict[str, Any] = collect(
+        tmp_path / "sas",
+        {**smart(tmp_path, "sdb", 0, {**partial, "scsi_grown_defect_list": 0})},
+    )[0]
+    assert covered(sas, "smart/S1/grown_defects") and not covered(
+        sas, "smart/S1/media_errors"
+    )
+    nvme: dict[str, Any] = collect(
+        tmp_path / "nvme",
+        {
+            **smart(
+                tmp_path,
+                "nvme0n1",
+                0,
+                {**partial, "nvme_smart_health_information_log": {"media_errors": 0}},
+            )
+        },
+    )[0]
+    assert covered(nvme, "smart/S1/media_errors") and not covered(
+        nvme, "smart/S1/reallocated"
+    )
+
+
+def test_a_drive_that_crashes_the_check_is_keyed_and_cleared_by_its_letter(
+    tmp_path: Path,
+) -> None:
+    ok: dict[str, Any] = {"serial_number": "S", "smart_status": {"passed": True}}
+    state: dict[str, Any] = collect(
+        tmp_path,
+        {
+            **smart(tmp_path, "sda", 0, ok),
+            **smart(tmp_path, "sdb", 0, {**ok, "scsi_grown_defect_list": "many"}),
+        },
+    )[0]
+    assert keys(state) == ["smart/dev:sdb/crash"]
+    # sda answered, sdb did not: only sda's earlier crash may count as gone.
+    assert covered(state, "smart/dev:sda/crash") and not covered(
+        state, "smart/dev:sdb/crash"
+    )
+
+
+def test_a_baseline_of_the_wrong_type_accepts_nothing_and_crashes_nothing(
+    tmp_path: Path,
+) -> None:
+    bad: Any
+    for bad in (None, [], "x", 8):
+        state: dict[str, Any]
+        rc: int
+        state, rc, _ = collect(
+            tmp_path,
+            {
+                **smart(tmp_path, "sde", 0, ata(8)),
+                "config.json": json.dumps({"smart_baseline": bad}),
+            },
+        )
+        assert (rc, state["alarms"]) == (0, ["sde: reallocated=8"]), bad

@@ -176,7 +176,7 @@ are different things: one is a bulky sample on a schedule, the other a rare, sma
 |---|---|---|
 | `history.jsonl` | sample of the machine: CPU, memory, temperatures, fans, power, drives, GPUs, ping, processes | every `history.record_interval` |
 | `services.jsonl` | round of `http_targets` checks | every `services.check_interval` |
-| `events.jsonl` | thing that happened: an alarm `raised`, `changed` in value or `cleared`, a `boot`, a `gap` | when it happens; nothing while an alarm just stays |
+| `events.jsonl` | thing that happened: an alarm `raised`, `changed` in value, `cleared` or `expired`, a `boot`, a `gap` | when it happens; nothing while an alarm just stays |
 | `alarms-state.json` | (not a log) what the alarm history currently holds, so a restart continues it | in place, about once a minute |
 | `server.log`, `glances.log` | the server's own messages | rotated at 5 MiB |
 
@@ -197,12 +197,20 @@ each gives in `alarm_items`) and the server's own fan rules. Each line has `time
 | `gap` | a source was not seen for more than three of its intervals (box off, timer stopped), or the server itself was not running | `from`, `to` |
 
 An alarm that is absent only because it could not be looked at (a failing drive that is
-asleep, a BMC that timed out) is kept, not cleared; the Hardware card shows it as "not
-re-checked". The 60 s snapshot's alarms and the fan rules must be absent three times in a row
-to clear, so a value sitting on its threshold does not write two lines a minute. While the
-server is not running nothing is recorded: an alarm that both came and went in that time is
-missed, and the next line is a `gap`. Service outages are not repeated here;
+asleep, a BMC that timed out, a fan that stopped answering) is kept, not cleared; the
+Hardware card shows it as "not re-checked". The 60 s snapshot's alarms and the fan rules
+must be absent three times in a row to clear, so a value sitting on its threshold does not
+write two lines a minute. While the server is not running nothing is recorded: an alarm that
+both came and went in that time is missed, and the next line is a `gap` with
+`source: "dashboard"`. A `gap` on `state` or `sensors` means that collector's snapshots
+stopped while the server was running. Service outages are not repeated here;
 `services.jsonl` has every check.
+
+Each line's `timestamp` is when the thing was observed: for a collector's alarm, the time of
+the snapshot that showed it, which can be up to 30 s before the line was written. So lines
+from different sources are close to, but not strictly in, time order. A pass is written in
+one piece; the one way to see a line twice is the server dying between writing it and
+saving `alarms-state.json`.
 
 ```bash
 tail logs/events.jsonl                                   # what changed lately
@@ -374,8 +382,8 @@ that is the repair after an update that stopped partway. The installer stamps th
 
 Requires `uhttpd-mod-lua`, `luci-lib-jsonc`, and `luci-lib-nixio` (installed by the
 script). On an apk-based OpenWrt the script refreshes the package index (`apk update`)
-and upgrades `uhttpd` together with every uhttpd plugin the router already has, LuCI's
-`uhttpd-mod-ubus` and `uhttpd-mod-ucode` included: a plugin left at an older version than
+and upgrades `uhttpd` together with LuCI's uhttpd plugins, `uhttpd-mod-ubus` and
+`uhttpd-mod-ucode`, when the router has them: a plugin left at an older version than
 the server breaks whatever uses it (LuCI answers "Bad Gateway" behind nginx). After an
 install, `apk list --installed | grep uhttpd` should show one version. uhttpd serves only `www/`, never the checkout: the installer copies
 `index.html`, `static/` and `themes/` there (and lists the themes in `www/themes/index.json`),

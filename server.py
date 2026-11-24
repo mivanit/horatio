@@ -44,6 +44,7 @@ from collections.abc import (
     AsyncIterator,
     Awaitable,
     Callable,
+    Collection,
     Iterable,
     Reversible,
     Sequence,
@@ -4751,8 +4752,11 @@ def get_hw_sensors() -> dict[str, Any]:
         data: dict[str, Any] = {
             "rows": rows,
             "alarms": [item["text"] for item in items],
-            # The same alarms with their keys, for the alarm history.
+            # The same alarms with their keys, for the alarm history, and which
+            # fans were really read: a fan that has stopped answering is not a fan
+            # that is fine again.
             "alarm_items": items,
+            "checked": [f"fan/{r['label']}" for r in raw if r.get("type") == hwmon.FAN],
             "notes": notes,
         }
         _hwmon_cache.update(at=now, data=data)
@@ -4840,11 +4844,22 @@ EVENTS_TAIL_BYTES: Final[int] = 256 * 1024
 _ALARM_FIELDS: Final[tuple[str, ...]] = ("key", "text", "value", "since", "initial")
 
 # Source -> {"ts": its newest snapshot seen, "boot_id", "alarms": {key: entry}}.
-# An entry is {key, text, value?, since, initial?}; one that is absent but not
-# known to be gone also has ``absent`` (a count of snapshots) or
+# An entry is {key, text, value?, since, initial?, boot?}; one that is absent but
+# not known to be gone also has ``absent`` (a count of snapshots) and/or
 # ``unchecked_since``. Only the event loop replaces this.
 _alarm_memory: dict[str, Any] = {}
 _alarm_memory_saved: float = -math.inf
+
+
+def _read_boot_id() -> str | None:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip() or None
+    except OSError:
+        return None
+
+
+# The boot this server runs on, for the alarms it decides itself.
+_BOOT_ID: Final[str | None] = _read_boot_id()
 
 
 def _number(value: Any) -> bool:
@@ -4853,6 +4868,12 @@ def _number(value: Any) -> bool:
         and not isinstance(value, bool)
         and math.isfinite(value)
     )
+
+
+def _epoch(value: Any) -> bool:
+    """A number that can be a time: after 1970 and before 2100, so it can always
+    be printed as a date and compared."""
+    return _number(value) and 0 < value < 4102444800
 
 
 def _covered(key: str, checked: Sequence[str] | None) -> bool:
@@ -4869,7 +4890,8 @@ def track_alarms(
     checked: Sequence[str] | None,
     now: float,
     clear_after: int,
-    rebooted: bool = False,
+    boot_id: str | None = None,
+    hidden: Collection[str] = (),
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     """One source's alarms as of ``now`` against what was known of them: the new
     knowledge and the events between the two. Pure; ``known`` is not changed.
@@ -4878,9 +4900,11 @@ def track_alarms(
     there, so they are ``initial`` (the real start is unknown). An alarm that is
     gone is ``cleared`` only if the snapshot ``checked`` it, and only after
     ``clear_after`` snapshots in a row without it; until then, and for as long as
-    it is not checked, it stays known. ``rebooted`` marks clears that follow a
-    reboot, where counters that reset at boot (ECC, failed units) take their
-    alarms with them."""
+    it is not checked, it stays known. ``hidden`` are keys the source says still
+    exist though it does not list them (journal messages past the ones it
+    prints): they stay as they are. Each entry remembers the boot it was last
+    seen on, so a clear that follows a reboot says so: counters that reset at
+    boot (ECC, failed units) take their alarms with them."""
     before: dict[str, dict[str, Any]] = dict(known or {})
     after: dict[str, dict[str, Any]] = {}
     events: list[dict[str, Any]] = []
@@ -4896,10 +4920,15 @@ def track_alarms(
 
     item: Any
     for item in items:
-        if not isinstance(item, dict) or not isinstance(item.get("key"), str):
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("key"), str)
+            or item["key"] in after  # the same key twice: the first one counts
+        ):
             continue
         entry: dict[str, Any] = {"key": item["key"], "text": str(item.get("text", ""))}
-        if item.get("value") is not None:
+        # A value is a count or a short word; anything else (NaN, a list) is dropped.
+        if _number(item.get("value")) or isinstance(item.get("value"), str):
             entry["value"] = item["value"]
         old: dict[str, Any] | None = before.pop(entry["key"], None)
         if old is None:
@@ -4913,18 +4942,25 @@ def track_alarms(
                 entry["initial"] = True
             if "value" in entry and "value" in old and entry["value"] != old["value"]:
                 event("changed", entry, was=old["value"])
+        if boot_id:
+            entry["boot"] = boot_id
         after[entry["key"]] = entry
 
     key: str
     for key, old in before.items():
-        gone: dict[str, Any] = {k: old[k] for k in _ALARM_FIELDS if k in old}
+        if key in hidden:
+            after[key] = old
+            continue
+        gone: dict[str, Any] = {k: old[k] for k in (*_ALARM_FIELDS, "boot") if k in old}
+        absent: int = int(old.get("absent", 0))
         if _covered(key, checked):
-            absent: int = int(old.get("absent", 0)) + 1
+            absent += 1
             if absent < clear_after:
                 after[key] = {**gone, "absent": absent}
                 continue
-            more: dict[str, Any] = {"active_for_s": int(now - gone["since"])}
-            if rebooted:
+            # A clock that stepped back must not give a negative duration.
+            more: dict[str, Any] = {"active_for_s": max(0, int(now - gone["since"]))}
+            if boot_id and gone.get("boot") and gone["boot"] != boot_id:
                 more["after_boot"] = True
             event("cleared", gone, **more)
         else:
@@ -4932,7 +4968,13 @@ def track_alarms(
             if now - unchecked_since > ALARM_HELD_EXPIRE_SEC:
                 event("expired", gone, unchecked_since=unchecked_since)
             else:
-                after[key] = {**gone, "unchecked_since": unchecked_since}
+                # The absences counted so far are kept: a source that checks a key
+                # only every other time must still be able to clear it.
+                after[key] = {
+                    **gone,
+                    "unchecked_since": unchecked_since,
+                    **({"absent": absent} if absent else {}),
+                }
     return after, events
 
 
@@ -4948,9 +4990,13 @@ def observe_alarms(
     ts: float,
     boot_id: str | None = None,
     boot: Any = None,
+    hidden: Collection[str] = (),
+    log_gap: bool = True,
 ) -> list[dict[str, Any]]:
     """Take in one new snapshot of one source (``ts`` is when it was taken):
-    update ``memory[source]`` and return the log lines for what changed."""
+    update ``memory[source]`` and return the log lines for what changed.
+    ``log_gap`` is False when the tracker itself was away: that a collector's
+    snapshots were not seen then says nothing about the collector."""
     cadence: float | None
     clear_after: int
     cadence, clear_after = ALARM_SOURCES[source]
@@ -4959,9 +5005,9 @@ def observe_alarms(
     rebooted: bool = False
     if seen is not None:
         gap: float = ts - seen["ts"]
-        if gap > (3 * cadence if cadence else ALARM_TRACKER_GAP_SEC):
-            # Nothing looked for this long: the box was off, a timer stopped, or
-            # (the server's own source) this tracker was not running.
+        if log_gap and gap > (3 * cadence if cadence else ALARM_TRACKER_GAP_SEC):
+            # Nothing looked for this long: the box was off or a timer stopped; on
+            # the server's own source, this tracker was not running.
             events.append({"event": "gap", "from": _iso(seen["ts"]), "to": _iso(ts)})
         rebooted = bool(seen.get("boot_id") and boot_id and seen["boot_id"] != boot_id)
         if rebooted and isinstance(boot, dict):
@@ -4974,7 +5020,8 @@ def observe_alarms(
         checked,
         ts,
         clear_after,
-        rebooted,
+        boot_id,
+        hidden,
     )
     memory[source] = {"ts": ts, "boot_id": boot_id, "alarms": alarms}
     stamp: str = _iso(ts)
@@ -4992,25 +5039,48 @@ def _load_alarm_memory(path: Path = ALARM_MEMORY_FILE) -> dict[str, Any]:
     except (OSError, ValueError) as e:
         logger.error("Alarm history: cannot read %s (%s); starting over", path, e)
         return {}
-    return {
-        source: seen
-        for source, seen in (memory if isinstance(memory, dict) else {}).items()
-        if source in ALARM_SOURCES
-        and isinstance(seen, dict)
-        and _number(seen.get("ts"))
-        and isinstance(seen.get("alarms"), dict)
-        and all(
-            isinstance(a, dict) and _number(a.get("since"))
-            for a in seen["alarms"].values()
+
+    # Only what the tracker itself could have written is taken back, entry by
+    # entry: one bad value must not stop every later pass.
+    def sound(key: Any, entry: Any) -> bool:
+        return (
+            isinstance(entry, dict)
+            and entry.get("key") == key
+            and isinstance(entry.get("text"), str)
+            and _epoch(entry.get("since"))
+            and ("absent" not in entry or isinstance(entry["absent"], int))
+            and ("unchecked_since" not in entry or _epoch(entry["unchecked_since"]))
         )
-    }
+
+    out: dict[str, Any] = {}
+    source: Any
+    seen: Any
+    for source, seen in (memory if isinstance(memory, dict) else {}).items():
+        if (
+            source in ALARM_SOURCES
+            and isinstance(seen, dict)
+            and _epoch(seen.get("ts"))
+            and isinstance(seen.get("alarms"), dict)
+        ):
+            out[source] = {
+                "ts": seen["ts"],
+                "boot_id": seen["boot_id"]
+                if isinstance(seen.get("boot_id"), str)
+                else None,
+                "alarms": {k: a for k, a in seen["alarms"].items() if sound(k, a)},
+            }
+    return out
 
 
 def _save_alarm_memory(memory: dict[str, Any], path: Path = ALARM_MEMORY_FILE) -> None:
     """Replace the memory file (sync): written beside it, then renamed."""
     path.parent.mkdir(exist_ok=True)
     tmp: Path = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(memory))
+    f: BinaryIO
+    with open(tmp, "wb") as f:
+        f.write(json.dumps(memory).encode())
+        f.flush()
+        os.fsync(f.fileno())  # an empty file after a power cut would forget every start
     os.replace(tmp, path)
 
 
@@ -5023,7 +5093,7 @@ def _collector_alarms(snapshot: dict[str, Any]) -> tuple[list[Any], list[str]] |
     if (
         snapshot.get("schema") != 1
         or not isinstance(items, list)
-        or not _number(snapshot.get("ts"))
+        or not _epoch(snapshot.get("ts"))
     ):
         return None
     return items, [p for p in checked if isinstance(p, str)] if isinstance(
@@ -5031,10 +5101,32 @@ def _collector_alarms(snapshot: dict[str, Any]) -> tuple[list[Any], list[str]] |
     ) else []
 
 
+def _append_events(events: list[dict[str, Any]], path: Path = EVENTS_FILE) -> None:
+    """Append the lines of one pass in a single write (sync), so a pass is in the
+    log whole or not at all."""
+    if not events:
+        return
+    lines: bytes = b"".join(json.dumps(e).encode("utf-8") + b"\n" for e in events)
+    path.parent.mkdir(exist_ok=True)
+    f: BinaryIO
+    with _history_write_lock, open(path, "a+b") as f:
+        if f.seek(0, os.SEEK_END):
+            f.seek(-1, os.SEEK_END)
+            if f.read(1) != b"\n":  # a torn line from an earlier failed write
+                lines = b"\n" + lines
+        f.seek(0, os.SEEK_END)
+        f.write(lines)
+        f.flush()
+
+
 async def track_alarms_once() -> None:
-    """One pass: every source that has something new since the last pass. The
-    memory moves on only once the log lines are written, so a full disk repeats
-    them later instead of losing them."""
+    """One pass: every source that has something new since the last pass.
+
+    The memory moves on only once the pass's lines are written (in one write),
+    so a log that cannot be written repeats them later instead of losing them.
+    The one way to get a line twice is the server dying between that write and
+    saving the memory. A source that cannot be read or makes no sense is skipped
+    for this pass; the others are still followed."""
     global _alarm_memory, _alarm_memory_saved
     state: dict[str, Any]
     sensors: dict[str, Any]
@@ -5045,6 +5137,12 @@ async def track_alarms_once() -> None:
         asyncio.to_thread(get_hw_sensors),
     )
     memory: dict[str, Any] = json.loads(json.dumps(_alarm_memory))
+    now: float = time.time()
+    # Was this tracker itself away (a restart, the server down)? Then a collector
+    # whose snapshots went unseen was not necessarily away too: only the tracker's
+    # own gap is logged, on its own source.
+    own: dict[str, Any] | None = memory.get("dashboard")
+    away: bool = own is None or now - own["ts"] > ALARM_TRACKER_GAP_SEC
     events: list[dict[str, Any]] = []
     source: str
     snapshot: dict[str, Any]
@@ -5052,20 +5150,29 @@ async def track_alarms_once() -> None:
         tracked: tuple[list[Any], list[str]] | None = _collector_alarms(snapshot)
         if tracked is None or memory.get(source, {}).get("ts") == snapshot["ts"]:
             continue
-        events += observe_alarms(
-            memory,
-            source,
-            tracked[0],
-            tracked[1],
-            snapshot["ts"],
-            snapshot.get("boot_id"),
-            snapshot.get("boot"),
-        )
-    now: float = time.time()
-    events += observe_alarms(memory, "dashboard", hw["alarm_items"], None, now)
-    event: dict[str, Any]
-    for event in events:
-        await asyncio.to_thread(_append_jsonl, EVENTS_FILE, event)
+        hidden: Any = snapshot.get("alarm_hidden")
+        try:
+            events += observe_alarms(
+                memory,
+                source,
+                tracked[0],
+                tracked[1],
+                snapshot["ts"],
+                snapshot.get("boot_id")
+                if isinstance(snapshot.get("boot_id"), str)
+                else None,
+                snapshot.get("boot"),
+                [k for k in hidden if isinstance(k, str)]
+                if isinstance(hidden, list)
+                else (),
+                log_gap=not away,
+            )
+        except Exception:
+            logger.exception("alarm history: cannot follow the %s snapshot", source)
+    events += observe_alarms(
+        memory, "dashboard", hw["alarm_items"], hw["checked"], now, _BOOT_ID
+    )
+    await asyncio.to_thread(_append_events, events)
     collectors_moved: bool = any(
         memory.get(s, {}).get("ts") != _alarm_memory.get(s, {}).get("ts")
         for s in ("state", "sensors")
@@ -5128,22 +5235,28 @@ def alarm_rows(
     """A source's current alarms as ``{source, key, text, value, since, initial}``
     rows: what it says now, with since when from the tracker's memory. ``texts``
     is the plain ``alarms`` list of a collector that gives no keys: the text is
-    then all there is."""
+    then all there is. Whatever is not what it should be is left out."""
     if not isinstance(items, list):
-        items = [{"text": t} for t in texts or [] if isinstance(t, str)]
+        items = [
+            {"text": t}
+            for t in (texts if isinstance(texts, list) else [])
+            if isinstance(t, str)
+        ]
     known: dict[str, Any] = memory.get(source, {}).get("alarms", {})
     rows: list[dict[str, Any]] = []
     item: Any
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get("text"), str):
             continue
-        entry: dict[str, Any] = known.get(item.get("key"), {})
+        key: str | None = item["key"] if isinstance(item.get("key"), str) else None
+        entry: dict[str, Any] = known.get(key, {}) if key is not None else {}
+        value: Any = item.get("value")
         rows.append(
             {
                 "source": source,
-                "key": item.get("key"),
+                "key": key,
                 "text": item["text"],
-                "value": item.get("value"),
+                "value": value if _number(value) or isinstance(value, str) else None,
                 "since": entry.get("since"),
                 "initial": entry.get("initial"),
             }
@@ -5151,9 +5264,15 @@ def alarm_rows(
     return rows
 
 
-def held_rows(source: str, memory: dict[str, Any]) -> list[dict[str, Any]]:
+def held_rows(
+    source: str, snapshot: dict[str, Any], memory: dict[str, Any]
+) -> list[dict[str, Any]]:
     """The alarms of a source that are absent from its newest snapshot only
-    because it could not check them: still alarms as far as anyone knows."""
+    because it could not check them: still alarms as far as anyone knows. None
+    when the snapshot is one the tracker does not follow (missing, or from a
+    collector whose alarms it cannot read): what it remembers is then old."""
+    if _collector_alarms(snapshot) is None:
+        return []
     return [
         {"source": source, **{k: entry.get(k) for k in _ALARM_FIELDS}}
         | {"unchecked_since": entry["unchecked_since"]}
@@ -5167,8 +5286,8 @@ def with_alarm_history(
 ) -> dict[str, Any]:
     """A collector snapshot as the API serves it: each ``alarm_items`` entry gains
     ``since`` and ``initial``, and ``alarm_held`` lists what could not be
-    re-checked. A snapshot without ``alarm_items`` is returned as it is."""
-    if not isinstance(snapshot.get("alarm_items"), list):
+    re-checked. A snapshot the tracker does not follow is returned as it is."""
+    if _collector_alarms(snapshot) is None:
         return snapshot
     return {
         **snapshot,
@@ -5178,7 +5297,7 @@ def with_alarm_history(
         ],
         "alarm_held": [
             {k: v for k, v in row.items() if k != "source" and v is not None}
-            for row in held_rows(source, memory)
+            for row in held_rows(source, snapshot, memory)
         ],
     }
 
@@ -5204,12 +5323,12 @@ def alarms_snapshot(
     active: list[dict[str, Any]] = alarm_rows(
         "state", state.get("alarm_items"), memory, state.get("alarms")
     )
-    held: list[dict[str, Any]] = held_rows("state", memory)
+    held: list[dict[str, Any]] = held_rows("state", state, memory)
     if sensors.get("status") == "ok":
         active += alarm_rows(
             "sensors", sensors.get("alarm_items"), memory, sensors.get("alarms")
         )
-        held += held_rows("sensors", memory)
+        held += held_rows("sensors", sensors, memory)
     active += alarm_rows("dashboard", dashboard, memory)
     target: dict[str, Any]
     for target in [] if services["stale"] else services["targets"]:

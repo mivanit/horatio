@@ -198,6 +198,8 @@ alarm_items = []
 # a timed-out tool, a drive left in standby or gone from /dev lists nothing.
 # A prefix P covers key K when K == P or K starts with P + "/".
 checked = []
+# Keys of alarms that exist but are not printed (journal messages past the limit).
+alarm_hidden = []
 
 def alarm(key, text, value=None):
     """Raise one alarm. `text` is what readers print and is all `alarms` holds.
@@ -483,6 +485,11 @@ def smart():
             "kind": "SSD" if s.get("rotation_rate") == 0 else "HDD" if s.get("rotation_rate") else None,
             "size_bytes": (s.get("user_capacity") or {}).get("bytes"),
         }
+        # Each rule is `checked` only when what it reads was really in the report:
+        # a drive that answered with its health but not its attribute table has
+        # not been cleared of anything the table would show.
+        if entry["passed"] is not None:
+            check(f"{did}/health")
         if entry["passed"] is False:
             alarm(f"{did}/health", f"{name}: SMART health FAILED")
         # NVMe has no attribute table; its health log is the whole story. `passed`
@@ -492,6 +499,7 @@ def smart():
         if nvme:
             entry["media_errors"] = nvme.get("media_errors")
             entry["percentage_used"] = nvme.get("percentage_used")
+            check(f"{did}/media_errors", f"{did}/percentage_used")
             if (nvme.get("media_errors") or 0) > 0:
                 alarm(f"{did}/media_errors", f"{name}: media_errors={nvme['media_errors']}", nvme["media_errors"])
             if (nvme.get("percentage_used") or 0) >= 100:
@@ -500,6 +508,7 @@ def smart():
                         # a later successful extended test; SCSI alarms while any failed
                         # entry is in its 20-entry log.
             alarm(f"{did}/selftest", f"{name}: self-test log has errors")
+        check(f"{did}/selftest")      # the exit status always says
         # smartd's `-n standby` skips scheduled tests on a sleeping drive, so one that
         # is never awake at test time is never tested. Info, not alarm: nothing is
         # wrong with the drive, it is just unexercised. ATA keeps a count in the
@@ -519,6 +528,8 @@ def smart():
             entry["drive_trip_c"] = trip
             if entry["temperature_c"] is not None and entry["temperature_c"] >= trip - 5:
                 alarm(f"{did}/temperature", f"{name}: {entry['temperature_c']}C, trip point {trip}C")
+        if trip is None or entry["temperature_c"] is not None:    # no trip point: no rule
+            check(f"{did}/temperature")
 
         # SAS: the grown defect list is the signal that matters. A SAS drive can
         # fail with every error counter at zero to the end; only this number and
@@ -528,6 +539,7 @@ def smart():
             entry["grown_defect_list"] = grown
             base = grown_defect_baseline.get(serial, 0)
             entry["grown_defect_baseline"] = base
+            check(f"{did}/grown_defects")
             if grown > base:
                 alarm(f"{did}/grown_defects", f"{name} ({serial}): grown defects {grown} > baseline {base}", grown)
 
@@ -539,9 +551,10 @@ def smart():
         if got:
             entry["attrs"] = got
             # One alarm per attribute: each has its own count and its own history.
-            accepted = smart_baseline.get(serial)
+            accepted = smart_baseline.get(serial) if isinstance(smart_baseline, dict) else None
             accepted = accepted if isinstance(accepted, dict) else {}
             for k, v in got.items():
+                check(f"{did}/{k}")
                 base = accepted.get(k)
                 base = base if isinstance(base, int) and not isinstance(base, bool) and base > 0 else 0
                 if k in ATA_ALARM and (v or 0) > base:
@@ -550,9 +563,9 @@ def smart():
                 entry["attrs_baseline"] = {k: accepted[k] for k in got if k in accepted}
 
         drives.append(entry)
-        # Everything about this drive was judged: its own alarms, and any earlier
-        # "unreadable" or crash under this device letter, may now count as gone.
-        check(did, f"smart/dev:{name}", f"collector/smart/dev:{name}")
+        # The drive answered: an earlier "unreadable" or crash under this device
+        # letter may now count as gone.
+        check(f"smart/dev:{name}/unreadable", f"smart/dev:{name}/crash")
 
     # One drive at a time: a crash on one must not leave the drives after it
     # unchecked, so it is that drive's alarm and error row and the loop goes on.
@@ -563,7 +576,7 @@ def smart():
         except Exception as e:
             why = f"{type(e).__name__}: {e}"
             crashed.append("smart")
-            alarm(f"collector/smart/dev:{name}", f"collector: smart crashed: {name}: {why}")
+            alarm(f"smart/dev:{name}/crash", f"collector: smart crashed: {name}: {why}")
             drives.append({"device": name, "error": f"collector crashed ({why})"})
             traceback.print_exc()
 part(smart)
@@ -734,10 +747,11 @@ def journal():
         alarm(f"journal/{digest}", f"journal: {g['said']} ({g['n']} in 24h, {when})")
     if len(shown) > JOURNAL_MAX:
         alarm("journal-more", f"journal: {len(shown) - JOURNAL_MAX} more distinct error-level messages in 24h")
-    check("journal-more")
-    # With more messages than are shown, one that is not shown is not gone.
-    if capture_ok("journal-err") and len(shown) <= JOURNAL_MAX:
-        check("journal")
+    # The messages past the ones printed are still there: a reader that knew one
+    # of them from an earlier run must not take it for gone.
+    alarm_hidden.extend(f"journal/{digest}" for digest, g in shown[JOURNAL_MAX:])
+    if capture_ok("journal-err"):
+        check("journal", "journal-more")
 part(journal)
 
 # ---- collection failures (any non-empty .err sidecar) ------------------------
@@ -778,6 +792,7 @@ part(boot)
 
 state["alarms"] = alarms
 state["alarm_items"] = alarm_items
+state["alarm_hidden"] = alarm_hidden
 state["checked"] = checked
 state["info"] = info
 
