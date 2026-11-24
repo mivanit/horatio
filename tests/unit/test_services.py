@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -216,6 +218,9 @@ def test_round_is_logged_and_reloaded(tmp_path: Path) -> None:
     and a restart reads the rounds back from the file."""
     import server
 
+    def snapshot_at(now: float) -> dict[str, Any]:
+        return asyncio.run(server.services_snapshot(now))
+
     log: Path = tmp_path / "services.jsonl"
     targets: list[Any] = [
         server.HttpTarget("up", "http://up/", None, False),
@@ -252,7 +257,7 @@ def test_round_is_logged_and_reloaded(tmp_path: Path) -> None:
         datetime.fromisoformat(lines[0]["timestamp"])
 
         now: float = datetime.now(timezone.utc).timestamp()
-        snapshot: dict[str, Any] = server.services_snapshot(now)
+        snapshot: dict[str, Any] = snapshot_at(now)
         assert [t["name"] for t in snapshot["targets"]] == ["up", "down"]
         assert snapshot["targets"][0]["ok"] is True
         assert snapshot["targets"][0]["uptime"]["1"] == {"up": 2, "checks": 2}
@@ -261,19 +266,19 @@ def test_round_is_logged_and_reloaded(tmp_path: Path) -> None:
         assert snapshot["targets"][1]["checked"] == lines[1]["timestamp"]
         assert snapshot["stale"] is False
         slow: float = 3 * server.SERVICES_CHECK_INTERVAL + 3 * server.SERVICES_TIMEOUT
-        assert server.services_snapshot(now + slow)["stale"] is False, (
+        assert snapshot_at(now + slow)["stale"] is False, (
             "a round with a hanging target lasts two timeouts, and is stamped at its start"
         )
         later: float = now + 4 * server.SERVICES_CHECK_INTERVAL + 60
-        assert server.services_snapshot(later)["stale"] is True, (
+        assert snapshot_at(later)["stale"] is True, (
             "no round for several intervals: the checker has stopped"
         )
         # A restart after downtime: the rounds read back are old, the checker
         # is new. Not stale until the new checker itself falls behind.
         with patch.object(server, "_services_started", later - 5):
-            assert server.services_snapshot(later)["stale"] is False
+            assert snapshot_at(later)["stale"] is False
             assert (
-                server.services_snapshot(
+                snapshot_at(
                     later + 4 * server.SERVICES_CHECK_INTERVAL + 60
                 )["stale"]
                 is True
@@ -284,10 +289,10 @@ def test_round_is_logged_and_reloaded(tmp_path: Path) -> None:
             patch.object(server, "_services_rounds", deque()),
             patch.object(server, "_services_latest", {}),
         ):
-            assert server.services_snapshot(later)["stale"] is False, "not running"
+            assert snapshot_at(later)["stale"] is False, "not running"
             with patch.object(server, "_services_started", now):
-                assert server.services_snapshot(now + 5)["stale"] is False
-                assert server.services_snapshot(later)["stale"] is True
+                assert snapshot_at(now + 5)["stale"] is False
+                assert snapshot_at(later)["stale"] is True
 
         # A line that is not a round is skipped, not fatal.
         with open(log, "a") as f:
@@ -363,3 +368,79 @@ def test_text_report_services_line() -> None:
     assert (
         sum("UP" in line or "DOWN" in line or " ?" in line for line in narrow) == 3
     ), "the line wraps instead of overflowing"
+
+
+def test_services_snapshot_does_not_block_or_mix_rounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker counts the captured checks while new checks arrive on the loop."""
+    import server
+
+    now = time.time()
+    target = server.HttpTarget("site", "http://site/", None, False)
+    monkeypatch.setattr(server, "HTTP_TARGETS", [target])
+    server._note_service_round(
+        {"timestamp": "first", "targets": {"site": {"ok": True}}}, now - 30
+    )
+    server._note_service_round(
+        {"timestamp": "second", "targets": {"site": {"ok": False}}}, now - 10
+    )
+    original = server.services_uptime
+    release = threading.Event()
+
+    async def run() -> None:
+        entered = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def blocked_count(*args: Any) -> dict[str, dict[str, dict[str, int]]]:
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5), "counting blocked the event loop"
+            return original(*args)
+
+        monkeypatch.setattr(server, "services_uptime", blocked_count)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=server.APP), base_url="http://dashboard"
+        ) as client:
+            pending = asyncio.create_task(client.get("/api/services"))
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                # This must finish before the counting worker is released.
+                response = await asyncio.wait_for(client.get("/api/version"), 2)
+                assert response.status_code == 200
+                assert not pending.done()
+                # Even an in-place edit of the latest result cannot change the
+                # captured snapshot. Published round dictionaries stay immutable.
+                server._services_latest["site"]["ok"] = True
+                # A distant round prunes the earlier rounds from the live deque.
+                server._note_service_round(
+                    {"timestamp": "third", "targets": {"site": {"ok": True}}},
+                    now + 200 * 3600,
+                )
+                assert len(server._services_rounds) == 1
+            finally:
+                release.set()
+                response = await asyncio.wait_for(pending, 5)
+        snapshot = response.json()
+        row = snapshot["targets"][0]
+        assert row["ok"] is False and row["checked"] == "second"
+        assert row["down_since"] == now - 10
+        assert row["uptime"]["1"] == {"up": 1, "checks": 2}
+        assert snapshot["stale"] is False
+
+    asyncio.run(run())
+
+
+def test_uptime_is_fraction_of_checks_at_window_boundaries() -> None:
+    import server
+
+    now = 1_000_000.0
+    rounds = [
+        (now - 3600 - 0.01, {"site": False}),
+        (now - 3600, {"site": True}),
+        (now - 1, {"site": False}),
+        (now, {"other": True}),
+        (now + 0.01, {"site": True}),
+    ]
+    result = server.services_uptime(rounds, ["site", "never"], now, (1,))
+    assert result["site"]["1"] == {"up": 1, "checks": 2}
+    assert result["never"]["1"] == {"up": 0, "checks": 0}
