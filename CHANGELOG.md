@@ -5,6 +5,14 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- Source layout: Python modules live in `python/`, and the lightweight Lua backend
+  lives in `lua/`. Config, credentials, logs and frontend assets stay at the root;
+  the served `/tui.py` URL stays the same. The installer updates the Python service
+  entrypoint. `openwrt/install.sh` remains a compatibility entrypoint for existing
+  Lua installations, including upgrades and downgrades across the directory move.
+- The static demo includes GPU fan percentages alongside chassis RPM, exercising
+  both fan-chart axes in the live view and history. Native backend tests are named
+  `test-python` and `test-lua`; previous Make target names remain aliases.
 - Alarm recovery requires readable evidence for each rule. Missing BMC/GPU,
   SMART, RAID and memory readings retain earlier alarms; per-device fan and ECC
   alarms survive partial device inventories. NVIDIA driver mismatches remain

@@ -125,7 +125,9 @@ def test_missing_release_installer_does_not_modify_checkout(tmp_path: Path) -> N
     router = Router(tmp_path)
     router.release("0.2.0", installer="unrelated.sh")
     result = router.update("v0.2.0")
-    assert result.returncode != 0 and "no Lua installer" in result.stderr
+    assert (
+        result.returncode != 0 and "no Lua installer" in result.stdout + result.stderr
+    )
     assert (router.box / "VERSION").read_text() == "0.1.0\n"
     assert not (router.box / "unrelated.sh").exists()
 

@@ -18,7 +18,9 @@ from tests.collector.test_sensors import gpu_csv
 @pytest.fixture
 def tracker(app_dir: Path, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     for name in ("hwmon", "hostcheck", "zfs", "server"):
-        spec = importlib.util.spec_from_file_location(name, app_dir / f"{name}.py")
+        spec = importlib.util.spec_from_file_location(
+            name, app_dir / "python" / f"{name}.py"
+        )
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         monkeypatch.setitem(sys.modules, spec.name, module)

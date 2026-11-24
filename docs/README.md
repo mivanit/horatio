@@ -7,6 +7,8 @@ talks to a server: `demo/fake-api.js` replaces `fetch()` and answers every
 `/api/*` and `/config.json` request. The values are smooth noise over wall-clock
 time, so live charts move and the history charts show the last 30 days of the same
 series (a training job on GPU 0 in multi-hour stretches, a nightly backup at 02:00).
+The Fans card includes chassis RPM and GPU percentages on separate axes, in both
+the live view and history.
 The settings dialog loads but refuses to save.
 
 - `demo/fake-api.js`: the fake backend. Its responses follow the shapes in
