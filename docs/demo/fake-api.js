@@ -65,7 +65,11 @@
   ];
   // diskio rows include the md members, which the frontend must not double count.
   const DISKIO = ['nvme0n1', 'nvme0n1p1', 'nvme0n1p2', 'sda', 'sdb', 'md0', 'sdc', 'sdc1'];
-  const BOOT = Math.floor(Date.now() / 1000) - (23 * 86400 + 4 * 3600 + 17 * 60);
+  // Historical events are anchored once per page load: refreshing a chart must
+  // not move an old incident along the timeline or give it a new occurrence ID.
+  const ALARM_ANCHOR = Math.floor(Date.now() / 1000);
+  const FAN_INCIDENTS = [{ offset: -12 * 3600, duration: 600 }, { offset: -45 * 60, duration: 90 }];
+  const BOOT = ALARM_ANCHOR - (23 * 86400 + 4 * 3600 + 17 * 60);
   const PROCS = [
     { pid: 48211, name: 'python3', path: '/home/alice/venvs/ml/bin/python3 train.py --config runs/vit-b16.yaml', user: 'alice', cpu: 6.1, rss: 9.2, thr: 38, gpu: [0, 18800], gpuWork: true },
     { pid: 1873, name: 'jellyfin', path: '/usr/lib/jellyfin/bin/jellyfin', user: 'jellyfin', cpu: 1.4, rss: 1.1, thr: 42, gpu: [1, 640] },
@@ -136,6 +140,9 @@
       'FAN2': Math.round((850 + 12 * pkg + 200 * noise('fan2', t, 40)) / 75) * 75,
       'FAN3': Math.round((1100 + 10 * Math.max(...gpus.map(g => g.temp)) + 150 * noise('fan3', t, 40)) / 75) * 75,
     };
+    // Match the two recorded fan incidents and the GPU temperature incident.
+    if (FAN_INCIDENTS.some(({ offset, duration }) => t >= ALARM_ANCHOR + offset && t < ALARM_ANCHOR + offset + duration)) fans.FAN1 = 250;
+    if (t >= ALARM_ANCHOR - 7 * 3600 && t < ALARM_ANCHOR - 7 * 3600 + 1080) gpus[0].temp = 88;
     const cpuW = 28 + 1.6 * cpu * (0.9 + 0.2 * noise('cpuw', t, 10));
     const dramW = 7 + 0.04 * cpu + 2 * noise('dramw', t, 30);
     const totalW = cpuW + dramW + gpus.reduce((s, g) => s + g.power, 0) + 68 + 6 * noise('otherw', t, 60);
@@ -190,9 +197,13 @@
 
   function storageHealth(t) {
     const s = state(t);
+    const alarms = demoAlarmState();
     return {
       status: 'ok', age_sec: Math.round(t % 900), detail: null,
-      alarms: [],
+      alarms: alarms.active.map(a => a.text), alarm_items: alarms.active,
+      alarm_reviewed: alarms.reviewed,
+      sensor_alarms: [], sensor_alarm_items: [], sensor_alarm_held: alarms.held,
+      sensor_status: 'ok',
       info: ['sdc: last extended self-test 9 days ago'],
       drives: [
         { device: 'nvme0n1', kind: 'SSD', model: 'Samsung SSD 980 PRO 2TB', size_bytes: 2.0e12, serial: 'S6B0NX0T000000', passed: true,
@@ -430,26 +441,85 @@
                error: ok ? null : 'ConnectError', checked: new Date(last * 1000).toISOString(), down_since: downSince, uptime };
     }) };
   }
-  // The server's merged list (server.py alarms_snapshot). The demo box's collectors
-  // report no alarms, so what is active is whichever demo service is down; `recent`
-  // is one GPU that ran hot for twenty minutes yesterday.
+  // One coherent fixture supplies the current concerns, recorded history and
+  // review notes. Service outages remain in services history, as on the server.
+  const alarmTime = offset => ALARM_ANCHOR + offset;
+  const alarmISO = at => new Date(at * 1000).toISOString();
+  const fanAlarm = offset => ({ source: 'dashboard', key: 'fan/@platform/nct6775/fan1',
+    text: 'CPU fan: 250 RPM below minimum 500 RPM', since: alarmTime(offset) });
+  const gpuAlarm = { source: 'sensors', key: 'gpu/pci/0000:01:00.0/temp/core',
+    text: 'GPU 0: core 88 C >= max operating 90 C - 3', since: alarmTime(-7 * 3600) };
+  const replacedDisk = { source: 'state', key: 'smart/WD-OLD0001/health',
+    text: 'Removed disk WD-OLD0001: SMART health FAILED', since: alarmTime(-3 * 86400), initial: true };
+  const uncheckedFan = { source: 'dashboard', key: 'fan/@platform/nct6775/fan4',
+    text: 'Rear fan: 0 RPM below minimum 400 RPM', since: alarmTime(-2 * 86400),
+    unchecked_since: alarmTime(-26 * 3600) };
+  const expiredGpu = { source: 'sensors', key: 'gpu/legacy/2/temp/core',
+    text: 'Removed GPU: core temperature above limit', since: alarmTime(-40 * 86400), initial: true };
+  const journalAlarm = { source: 'state', key: 'journal/demo-restic',
+    text: 'journal: restic: repository temporarily unavailable (2 in 24h)',
+    since: alarmTime(-9 * 3600), evidence: ['demo-journal-first', 'demo-journal-new'] };
+  const selAlarm = { source: 'state', key: 'sel/hardware',
+    text: 'SEL: power supply input lost during planned UPS maintenance',
+    since: alarmTime(-2 * 86400), evidence: ['demo-sel-psu'] };
+  const selReview = { timestamp: alarmTime(-11 * 3600), evidence: [...selAlarm.evidence],
+    note: 'Planned UPS maintenance. Both power supplies are online again.' };
+  const ALARM_EVENTS = (() => {
+    const events = [];
+    const add = (event, alarm, at, extra = {}) => events.push({ ...alarm, ...extra, event, timestamp: alarmISO(at) });
+    for (const { offset, duration } of FAN_INCIDENTS) {
+      const fan = fanAlarm(offset);
+      add('raised', fan, fan.since);
+      add('cleared', fan, fan.since + duration + 90, { active_for_s: duration + 90 });
+    }
+    add('raised', gpuAlarm, gpuAlarm.since);
+    add('cleared', gpuAlarm, gpuAlarm.since + 1200, { active_for_s: 1200 });
+    add('raised', replacedDisk, replacedDisk.since);
+    add('retired', replacedDisk, alarmTime(-10 * 3600), {
+      unchecked_since: alarmTime(-2 * 86400), note: 'Replaced the failed disk and verified the mirror rebuilt.' });
+    const { unchecked_since, ...fan } = uncheckedFan;
+    add('raised', fan, fan.since);
+    add('raised', expiredGpu, expiredGpu.since);
+    add('expired', expiredGpu, alarmTime(-18 * 3600), { unchecked_since: alarmTime(-31 * 86400) });
+    const originalJournal = { ...journalAlarm, evidence: ['demo-journal-first'],
+      text: 'journal: restic: repository temporarily unavailable (1 in 24h)' };
+    add('raised', originalJournal, originalJournal.since);
+    add('reviewed', originalJournal, alarmTime(-8 * 3600), {
+      note: 'Repository maintenance finished; the backup retry succeeded.' });
+    add('reopened', journalAlarm, alarmTime(-30 * 60), { reason: 'new_evidence' });
+    add('raised', selAlarm, selAlarm.since);
+    add('reviewed', selAlarm, selReview.timestamp, { note: selReview.note });
+    events.push({ source: 'dashboard', event: 'gap', timestamp: alarmISO(alarmTime(-15 * 3600)),
+      from: alarmISO(alarmTime(-15 * 3600 - 600)), to: alarmISO(alarmTime(-15 * 3600)) });
+    return events.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+  })();
+
+  function demoAlarmState() {
+    return { active: [{ ...journalAlarm }], held: [{ ...uncheckedFan }],
+      reviewed: [{ ...selAlarm, reviewed: { ...selReview } }] };
+  }
+
+  function alarmsHistory(q, t) {
+    const hours = clamp(Number(q.get('hours')) || 24, 0.1, 24 * HISTORY_DAYS);
+    const cutoff = t - hours * 3600;
+    return { cutoff, now: t, truncated: false, skipped: 0,
+      events: ALARM_EVENTS.filter(e => Date.parse(e.timestamp) / 1000 >= cutoff && Date.parse(e.timestamp) / 1000 <= t) };
+  }
+
   function alarmsSnapshot(t) {
     const services = servicesSnapshot(t).targets;
-    const iso = at => new Date(at * 1000).toISOString().replace('.000Z', '+00:00');
-    const day = Math.floor(t / 86400) * 86400;
-    const hot = { source: 'sensors', key: 'gpu/1/temp/memory', text: 'GPU 1: memory 83 C >= max operating 85 C - 3', since: day - 9 * 3600 };
+    const alarms = demoAlarmState();
     return {
       now: t,
       sources: { state: { status: 'ok', age_sec: Math.round(t % 900) }, sensors: { status: 'ok', age_sec: Math.round(t % 60) },
                  dashboard: { status: 'ok' }, services: { status: 'ok', targets: services.length } },
-      active: services.filter(s => s.ok === false).map(s => ({
-        source: 'services', key: 'service/' + s.name, text: `${s.name}: down (${s.error})`, value: null, since: s.down_since, initial: null })),
-      held: [],
+      active: [...alarms.active, ...services.filter(s => s.ok === false).map(s => ({
+        source: 'services', key: 'service/' + s.name, text: `${s.name}: down (${s.error})`, value: null, since: s.down_since, initial: null }))],
+      held: alarms.held,
+      reviewed: alarms.reviewed,
       retirement: { supported: false, password_configured: false },
-      recent: [
-        { timestamp: iso(hot.since), event: 'raised', ...hot },
-        { timestamp: iso(hot.since + 1200), event: 'cleared', ...hot, active_for_s: 1200 },
-      ],
+      review: { supported: false, password_configured: false },
+      recent: ALARM_EVENTS.filter(e => Date.parse(e.timestamp) / 1000 <= t).slice(-50),
     };
   }
   // The server's bucket plan (server.py services_bucket_plan): at most 300 buckets.
@@ -489,7 +559,7 @@
     '/4/load', '/4/uptime', '/4/system', '/4/fs',
     '/cpu-info', '/gpu-info', '/ip-info', '/ping', '/gpu-processes', '/disk-processes', '/network-processes',
     '/processlist', '/history', '/history/settings', '/history/record', '/history/field/temps',
-    '/history/field/processes', '/mail', '/storage-health', '/sensors', '/alarms', '/alarms/retire', '/services',
+    '/history/field/processes', '/mail', '/storage-health', '/sensors', '/alarms', '/alarms/history', '/alarms/retire', '/alarms/review', '/services',
     '/services/history', '/version', '/list-endpoints',
   ];
 
@@ -555,6 +625,7 @@
     '/storage-health': (q, t) => storageHealth(t),
     '/sensors': (q, t) => sensorsSnapshot(t),
     '/alarms': (q, t) => alarmsSnapshot(t),
+    '/alarms/history': (q, t) => alarmsHistory(q, t),
     '/services': (q, t) => servicesSnapshot(t),
     '/services/history': (q, t) => servicesHistory(q, t),
     '/history': q => history(q, null),
@@ -567,6 +638,7 @@
     '/history/record': () => [200, { status: 'skipped', reason: 'demo' }],
     '/history/settings': () => [403, { error: 'This is a read-only demo: settings cannot be saved.' }],
     '/alarms/retire': () => [403, { error: 'This is a read-only demo: alarms cannot be retired.' }],
+    '/alarms/review': () => [403, { error: 'This is a read-only demo: alarms cannot be reviewed.' }],
   };
 
   // Capture endpoints take as long as the capture would on a real box.

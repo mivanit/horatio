@@ -536,6 +536,7 @@ const HISTORY_METRICS = {
   // grid: not a chart. The card draws passed / failed checks per time bucket from this
   // endpoint (app.js servicesGridHTML); the data is not in the history records.
   services: { name: 'Services', color: getCssColor('--color-success'), unit: '', grid: '/api/services/history' },
+  alarms: { name: 'Alarm', color: getCssColor('--color-warning'), unit: '', grid: '/api/alarms/history' },
   // Needs per-process logging on (History Settings); one line per process name.
   // fieldSelect: a dropdown picks which stat is drawn (the card's unitType holds its key);
   // an entry's optional decimals sets the tooltip precision (default 1).
@@ -626,7 +627,7 @@ function servicesConfigured() {
 function historyMetricAvailable(metric) {
   const info = HISTORY_METRICS[metric];
   if (!info || (availableHistoryMetrics !== null && !availableHistoryMetrics.has(metric))) return false;
-  if (info.grid && !servicesConfigured()) return false;
+  if (metric === 'services' && !servicesConfigured()) return false;
   if (availableEndpoints === null) return true;
   const endpoint = info.grid ? info.grid.slice(4) : info.sideField ? '/history/field/' + info.sideField : '/history';
   if (!availableEndpoints.has(endpoint)) return false;

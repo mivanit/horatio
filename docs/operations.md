@@ -31,7 +31,7 @@ Open `http://<host>:8080`, or from a terminal `curl http://<host>:8080/text` (`/
 whitespace or `: % \ | &` in the path); the service file is rendered from `horatio.service` with that path and user.
 
 After install, `uv run python python/server.py --set-password` sets the password for the raw history
-download, settings changes, and alarm retirement (stored hashed in `.password`).
+download, settings changes, and alarm closure/review (stored hashed in `.password`).
 
 ## Optional tools
 
@@ -113,7 +113,7 @@ capabilities on `nethogs` and `pidstat` (see [Process permissions](#process-perm
 
 Use a trusted LAN, not public interfaces. The Python dashboard binds to all
 interfaces and is unauthenticated except for the raw history download, settings
-changes, and alarm retirement. Unauthenticated data includes local IP
+changes, and alarm closure/review. Unauthenticated data includes local IP
 addresses, mail subjects, drive models and serials, and the Glances metrics; the Glances
 proxy forwards only the plugins the UI reads (cpu, percpu, mem, memswap, gpu, network, diskio,
 load, uptime, system, fs; sensors come from the server's own hwmon reader), so Glances' process views with full command lines are
@@ -168,8 +168,9 @@ are different things: one is a bulky sample on a schedule, the other a rare, sma
 |---|---|---|
 | `history.jsonl` | sample of the machine: CPU, memory, temperatures, fans, power, drives, GPUs, ping, processes | every `history.record_interval` |
 | `services.jsonl` | round of `http_targets` checks | every `services.check_interval` |
-| `events.jsonl` | thing that happened: an alarm `raised`, `changed` in value, `cleared`, `retired` or `expired`, a `boot`, a `gap` | when it happens; nothing while an alarm just stays |
+| `events.jsonl` | alarm observations, recovery, closure/review (with optional notes), new evidence, boots and gaps | when it happens; nothing while an alarm just stays |
 | `alarms-state.json` | (not a log) what the alarm history currently holds, so a restart continues it | in place, about once a minute |
+| `alarm-actions/` | local agent action requests and result receipts; see [file interface](alarm-actions.md) | requests submitted by agents; results written by the server |
 | `server.log`, `glances.log` | the server's own messages | rotated at 5 MiB |
 
 The Python backend does not rotate these JSON-lines files. The Lua backend
@@ -204,6 +205,8 @@ each gives in `alarm_items`) and the server's own fan rules and host checks. Eac
 | `cleared` | it is gone, and the snapshot says it `checked` for it | the same, plus `active_for_s`; `after_boot: true` when the box rebooted in between (counters that reset at boot) |
 | `expired` | it could not be re-checked for 30 days and at least 3 snapshots (a drive that is gone) | the same, plus `unchecked_since` |
 | `retired` | an authenticated user explicitly retires a held alarm | the same, plus `unchecked_since`; this records retirement, not proof of recovery |
+| `reviewed` | an operator marks journal/BMC evidence as reviewed | occurrence identifiers, reviewed evidence and optional `note` |
+| `reopened` | new evidence arrives after review | occurrence identifiers and new evidence; the alarm needs attention again |
 | `boot` | the 15-min snapshot shows a new boot | `id`, `kernel`, `previous: {clean, ended, kernel}` |
 | `gap` | a source was not seen for more than three of its intervals (box off, timer stopped), or the server itself was not running | `from`, `to` |
 
@@ -228,7 +231,7 @@ both came and went in that time is missed, and the next line is a `gap` with
 stopped while the server was running. Service outages are not repeated here;
 `services.jsonl` has every check.
 
-After deliberately removing or replacing hardware, use **Retire** beside its
+After deliberately removing, replacing or repairing hardware, use **Close unchecked alarm** beside its
 held alarm on the Hardware card. It requires the dashboard password set with
 `uv run python python/server.py --set-password`. Retirement removes that occurrence
 from current concerns and preserves its event history; a new observation of the
@@ -243,7 +246,28 @@ unchecked snapshots. Expiry records missing evidence, not recovery.
 This is intentional even when a repair removes the original evidence. Removing
 a faulty disk or DIMM, or uninstalling a GPU driver, does not by itself tell the
 tracker that the fault was fixed. Confirm the repair before retiring the old
-alarm; a missing reading alone is not a healthy reading.
+alarm; a missing reading alone is not a healthy reading. An optional closure
+note records what you did, such as "replaced fan"; it stays in the event history.
+
+Use **Mark reviewed** for journal or BMC event evidence you have investigated.
+This moves it out of the current concerns into reviewed evidence; it does not
+declare the machine healthy. A new underlying log entry brings the alarm back,
+even if its display name and alarm key are unchanged. Old entries simply aging
+out of the collector's window do not require another review. Incomplete captures
+or evidence groups larger than 256 entries cannot be reviewed; their alarms
+remain visible. Review and closure through the dashboard require its password.
+
+The **H** button on Hardware health opens the full-width **Alarm history** card.
+It shares time-range controls with the other history cards. Select an alarm lane
+to read its dated events, outcomes and notes. Markers show recorded events, not
+continuous healthy/unhealthy intervals. Current concerns are shown separately,
+including those first observed before the selected range. Recovery, operator
+closure, expiry without a check, and review have different meanings.
+
+The card reports incomplete reads and keeps previously loaded history when a
+refresh fails. It does not promise a complete archive for a selected time range.
+Agents can read the JSON logs and submit actions through the
+[file interface](alarm-actions.md), using the same occurrence/evidence checks.
 
 Each line's `timestamp` is when the thing was observed: for a collector's alarm, the time of
 the snapshot that showed it, which can be up to 30 s before the line was written. So lines

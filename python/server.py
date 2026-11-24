@@ -5236,6 +5236,10 @@ ALARM_TRACKER_GAP_SEC: Final[float] = 10 * ALARM_TRACK_INTERVAL
 EVENTS_RECENT: Final[int] = 50
 # Read from the end of the log: 50 events are a few KiB, so this is generous.
 EVENTS_TAIL_BYTES: Final[int] = 256 * 1024
+ALARM_HISTORY_MAX_BYTES: Final[int] = 4 * 1024 * 1024
+ALARM_ACTIONS_DIR: Final[Path] = LOGS_DIR / "alarm-actions"
+ALARM_NOTE_LIMIT: Final[int] = 2000
+ALARM_ACTION_MAX_BYTES: Final[int] = 64 * 1024
 _ALARM_FIELDS: Final[tuple[str, ...]] = ("key", "text", "value", "since", "initial")
 
 # Source -> {"ts": its newest snapshot seen, "boot_id", "alarms": {key: entry}}.
@@ -5289,6 +5293,36 @@ def _covered(key: str, checked: Sequence[str] | None) -> bool:
     )
 
 
+def _alarm_evidence(value: Any) -> list[str] | None:
+    """Bounded collector identities of the underlying journal/SEL records."""
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= 256
+        or not all(isinstance(token, str) and 1 <= len(token) <= 128 for token in value)
+    ):
+        return None
+    return sorted({token for token in value if isinstance(token, str)})
+
+
+def _reviewable_alarm(source: str, key: str) -> bool:
+    return source == "state" and (
+        key.startswith("journal/") or key in {"sel/memory", "sel/hardware"}
+    )
+
+
+def _review_still_applies(entry: dict[str, Any], evidence: list[str] | None) -> bool:
+    review = entry.get("reviewed")
+    return bool(
+        evidence
+        and isinstance(review, dict)
+        and _alarm_evidence(review.get("evidence"))
+        and _epoch(review.get("timestamp"))
+        and isinstance(review.get("note", ""), str)
+        and len(review.get("note", "")) <= ALARM_NOTE_LIMIT
+        and set(evidence).issubset(review["evidence"])
+    )
+
+
 def track_alarms(
     known: dict[str, dict[str, Any]] | None,
     items: Sequence[Any],
@@ -5319,6 +5353,7 @@ def track_alarms(
             {
                 "event": kind,
                 **{k: entry[k] for k in _ALARM_FIELDS if k in entry},
+                **({"evidence": entry["evidence"]} if "evidence" in entry else {}),
                 **more,
             }
         )
@@ -5335,6 +5370,9 @@ def track_alarms(
         # A value is a count or a short word; anything else (NaN, a list) is dropped.
         if _number(item.get("value")) or isinstance(item.get("value"), str):
             entry["value"] = item["value"]
+        evidence = _alarm_evidence(item.get("evidence"))
+        if evidence:
+            entry["evidence"] = evidence
         old: dict[str, Any] | None = before.pop(entry["key"], None)
         requires: Any = item.get("requires")
         if (
@@ -5357,7 +5395,19 @@ def track_alarms(
             entry["since"] = old["since"]
             if old.get("initial"):
                 entry["initial"] = True
-            if "value" in entry and "value" in old and entry["value"] != old["value"]:
+            if _review_still_applies(old, evidence):
+                entry["reviewed"] = old["reviewed"]
+            elif "reviewed" in old:
+                event(
+                    "reopened",
+                    entry,
+                    reason="new_evidence" if evidence else "evidence_unavailable",
+                )
+            elif evidence and set(evidence) - set(
+                _alarm_evidence(old.get("evidence")) or []
+            ):
+                event("changed", entry, reason="new_evidence")
+            elif "value" in entry and "value" in old and entry["value"] != old["value"]:
                 event("changed", entry, was=old["value"])
         if boot_id:
             entry["boot"] = boot_id
@@ -5676,6 +5726,7 @@ async def alarm_tracker() -> None:
     while True:
         try:
             await track_alarms_once()
+            await process_alarm_actions()
         except Exception:
             logger.exception("alarm history: a pass failed")
         await asyncio.sleep(ALARM_TRACK_INTERVAL)
@@ -5712,6 +5763,95 @@ def _read_events(
     return events[-limit:]
 
 
+def _read_alarm_history(
+    cutoff: float,
+    now: float,
+    path: Path = EVENTS_FILE,
+    max_bytes: int = ALARM_HISTORY_MAX_BYTES,
+) -> dict[str, Any]:
+    """Read a bounded, complete-line snapshot; source clocks need not be ordered."""
+    result: dict[str, Any] = {
+        "cutoff": cutoff,
+        "now": now,
+        "events": [],
+        "truncated": False,
+        "skipped": 0,
+    }
+    try:
+        with path.open("rb") as log:
+            size = os.fstat(log.fileno()).st_size
+            start = max(0, size - max_bytes)
+            log.seek(start)
+            data = log.read(size - start)
+    except FileNotFoundError:
+        return result
+    result["truncated"] = start > 0
+    if start:
+        # The first bytes may be the tail of a line, never a complete event.
+        _, _, data = data.partition(b"\n")
+    lines = data.split(b"\n")
+    if lines[-1]:
+        result["skipped"] += 1  # interrupted or currently appending last line
+    parsed: list[tuple[float, dict[str, Any]]] = []
+    kinds = {
+        "raised",
+        "changed",
+        "cleared",
+        "retired",
+        "expired",
+        "reviewed",
+        "reopened",
+        "boot",
+        "gap",
+    }
+    for line in lines[:-1]:
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+            if not isinstance(event, dict) or event.get("event") not in kinds:
+                raise ValueError("not an alarm event")
+            stamp = event.get("timestamp")
+            timestamp = _parse_since(stamp) if isinstance(stamp, str) else None
+            if (
+                not isinstance(timestamp, (int, float))
+                or not _epoch(timestamp)
+                or event.get("source") not in ALARM_SOURCES
+            ):
+                raise ValueError("invalid event timestamp or source")
+            if event["event"] not in {"boot", "gap"} and not (
+                isinstance(event.get("key"), str)
+                and event["key"]
+                and isinstance(event.get("text"), str)
+            ):
+                raise ValueError("invalid alarm identity")
+            if cutoff <= timestamp <= now:
+                parsed.append((timestamp, event))
+        except (ValueError, TypeError, UnicodeError):
+            result["skipped"] += 1
+    # Python's stable sort keeps file order for equal observation times.
+    parsed.sort(key=lambda pair: pair[0])
+    result["events"] = [event for _, event in parsed]
+    return result
+
+
+@APP.get("/api/alarms/history")
+async def alarm_history(hours: float = 24) -> Response:
+    """Recorded hardware/host events, not a reconstructed continuous health state."""
+    now = time.time()
+    cutoff = now - _clamp_hours(hours) * 3600
+
+    def encode() -> str:
+        return json.dumps(_read_alarm_history(cutoff, now))
+
+    try:
+        body = await asyncio.to_thread(encode)
+    except OSError:
+        logger.exception("Cannot read alarm history")
+        return _alarm_response(503, error="Alarm history could not be read")
+    return Response(content=body, media_type="application/json")
+
+
 def alarm_rows(
     source: str, items: Any, memory: dict[str, Any], texts: Any = None
 ) -> list[dict[str, Any]]:
@@ -5734,6 +5874,11 @@ def alarm_rows(
         key: str | None = item["key"] if isinstance(item.get("key"), str) else None
         entry: dict[str, Any] = known.get(key, {}) if key is not None else {}
         value: Any = item.get("value")
+        evidence = (
+            _alarm_evidence(item.get("evidence"))
+            if key and _reviewable_alarm(source, key)
+            else None
+        )
         rows.append(
             {
                 "source": source,
@@ -5742,6 +5887,12 @@ def alarm_rows(
                 "value": value if _number(value) or isinstance(value, str) else None,
                 "since": entry.get("since"),
                 "initial": entry.get("initial"),
+                **({"evidence": evidence} if evidence else {}),
+                **(
+                    {"reviewed": entry["reviewed"]}
+                    if _review_still_applies(entry, evidence)
+                    else {}
+                ),
             }
         )
     return rows
@@ -5773,11 +5924,16 @@ def with_alarm_history(
     re-checked. A snapshot the tracker does not follow is returned as it is."""
     if _collector_alarms(snapshot) is None:
         return snapshot
+    rows = alarm_rows(source, snapshot["alarm_items"], memory)
+    reviewed = [row for row in rows if "reviewed" in row]
+    active = [row for row in rows if "reviewed" not in row]
     return {
         **snapshot,
+        **({"alarms": [row["text"] for row in active]} if reviewed else {}),
+        "alarm_reviewed": reviewed,
         "alarm_items": [
             {k: v for k, v in row.items() if k != "source" and v is not None}
-            for row in alarm_rows(source, snapshot["alarm_items"], memory)
+            for row in active
         ],
         "alarm_held": [
             {k: v for k, v in row.items() if k != "source" and v is not None}
@@ -5851,7 +6007,8 @@ def alarms_snapshot(
                 "targets": len(services["targets"]),
             },
         },
-        "active": active,
+        "active": [row for row in active if "reviewed" not in row],
+        "reviewed": [row for row in active if "reviewed" in row],
         "held": held,
         "recent": events,
     }
@@ -5890,11 +6047,17 @@ async def alarms() -> Response:
         "supported": True,
         "password_configured": PASSWORD_FILE.exists(),
     }
+    body["review"] = dict(body["retirement"])
     return Response(content=json.dumps(body), media_type="application/json")
 
 
 async def _retire_held_alarm(
-    source: str, key: str, since: float, unchecked_since: float
+    source: str,
+    key: str,
+    since: float,
+    unchecked_since: float,
+    note: str = "",
+    action_id: str | None = None,
 ) -> Response:
     """Forget one held occurrence, never suppress future observations of its key."""
     global _alarm_memory, _alarm_memory_saved
@@ -5960,6 +6123,8 @@ async def _retire_held_alarm(
             "event": "retired",
             **{field: entry[field] for field in _ALARM_FIELDS if field in entry},
             "unchecked_since": unchecked_since,
+            **({"note": note} if note else {}),
+            **({"action_id": action_id} if action_id else {}),
         }
 
         def persist() -> None:
@@ -5991,59 +6156,222 @@ async def _retire_held_alarm(
         )
 
 
-@APP.post("/api/alarms/retire")
-async def retire_alarm(request: Request) -> Response:
-    """Retire a specific held occurrence with the existing dashboard password."""
-    if not PASSWORD_FILE.exists():
-        return Response(
-            content=json.dumps({"error": "No password configured on server"}),
-            status_code=503,
-            media_type="application/json",
-        )
-    try:
-        body: Any = await request.json()
-    except Exception:
-        body = None
-    if not isinstance(body, dict) or not isinstance(body.get("password"), str):
-        return Response(
-            content=json.dumps(
-                {"error": "Expected a JSON object with a password string"}
-            ),
-            status_code=400,
-            media_type="application/json",
-        )
-    denied: Response | None = await _verify_password_throttled(
-        request, body["password"]
+def _alarm_response(code: int = 200, **body: Any) -> Response:
+    return Response(
+        content=json.dumps(body), status_code=code, media_type="application/json"
     )
-    if denied is not None:
-        return denied
-    source: Any = body.get("source")
-    key: Any = body.get("key")
-    since: Any = body.get("since")
-    unchecked_since: Any = body.get("unchecked_since")
+
+
+async def _review_alarm(
+    source: str,
+    key: str,
+    since: float,
+    evidence: list[str],
+    note: str = "",
+    action_id: str | None = None,
+) -> Response:
+    """Review one exact set of historical evidence, never suppress a live fault."""
+    global _alarm_memory, _alarm_memory_saved
+    async with _alarm_update_lock:
+        entry = _alarm_memory.get(source, {}).get("alarms", {}).get(key, {})
+        if entry.get("since") != since or "unchecked_since" in entry:
+            return _alarm_response(
+                409,
+                error="Alarm changed or is no longer current; refresh and try again",
+            )
+        try:
+            current = await asyncio.to_thread(_get_storage_health)
+        except Exception:
+            logger.exception("Cannot check current evidence before review")
+            return _alarm_response(503, error="Could not check current evidence")
+        if current.get("status") != "ok":
+            return _alarm_response(
+                409, error="Current evidence is unavailable or stale"
+            )
+        item = next(
+            (
+                item
+                for item in current.get("alarm_items", [])
+                if isinstance(item, dict) and item.get("key") == key
+            ),
+            {},
+        )
+        actual = _alarm_evidence(item.get("evidence"))
+        if actual != evidence or _alarm_evidence(entry.get("evidence")) != evidence:
+            return _alarm_response(
+                409, error="Alarm evidence changed; refresh and review it again"
+            )
+        if _review_still_applies(entry, evidence):
+            return _alarm_response(409, error="This evidence is already reviewed")
+        now = time.time()
+        memory = json.loads(json.dumps(_alarm_memory))
+        updated = memory[source]["alarms"][key]
+        updated["reviewed"] = {"timestamp": now, "note": note, "evidence": evidence}
+        event = {
+            "timestamp": _iso(now),
+            "source": source,
+            "event": "reviewed",
+            **{field: entry[field] for field in _ALARM_FIELDS if field in entry},
+            "evidence": evidence,
+            **({"note": note} if note else {}),
+            **({"action_id": action_id} if action_id else {}),
+        }
+
+        def persist() -> None:
+            _append_events([event])
+            with EVENTS_FILE.open("rb") as log:
+                os.fsync(log.fileno())
+            _save_alarm_memory(memory)
+
+        try:
+            await asyncio.to_thread(persist)
+        except OSError:
+            logger.exception("Alarm review could not be saved")
+            return _alarm_response(
+                500, error="Could not save review; the alarm remains unreviewed"
+            )
+        _alarm_memory = memory
+        _alarm_memory_saved = now
+        return _alarm_response(status="reviewed", source=source, key=key)
+
+
+async def _apply_alarm_action(
+    action: str, body: Any, action_id: str | None = None
+) -> Response:
+    """Shared validation and actions for authenticated HTTP and trusted local files."""
+    if not isinstance(body, dict):
+        return _alarm_response(400, error="Expected a JSON object")
+    source, key, since = body.get("source"), body.get("key"), body.get("since")
+    note = body.get("note", "")
+    if not isinstance(note, str) or len(note) > ALARM_NOTE_LIMIT:
+        return _alarm_response(
+            400, error=f"note must be a string of at most {ALARM_NOTE_LIMIT} characters"
+        )
     if (
         not isinstance(source, str)
         or source not in ALARM_SOURCES
         or not isinstance(key, str)
         or not key
         or not _epoch(since)
-        or not _epoch(unchecked_since)
     ):
-        return Response(
-            content=json.dumps(
-                {
-                    "error": "source, key, since and unchecked_since must identify a held alarm"
-                }
-            ),
-            status_code=400,
-            media_type="application/json",
+        return _alarm_response(
+            400, error="source, key and since must identify an alarm occurrence"
         )
-    # A disconnected caller must not release the update lock while a worker is
-    # still replacing memory on disk. Complete the operation before cancelling.
-    operation: asyncio.Task[Response] = asyncio.create_task(
-        _retire_held_alarm(source, key, since, unchecked_since)
-    )
+    note = note.strip()
+    if action == "retire":
+        unchecked_since = body.get("unchecked_since")
+        if not _epoch(unchecked_since):
+            return _alarm_response(
+                400, error="unchecked_since must identify a held alarm"
+            )
+        return await _retire_held_alarm(
+            source, key, since, unchecked_since, note, action_id
+        )
+    if action == "review":
+        evidence = _alarm_evidence(body.get("evidence"))
+        if not _reviewable_alarm(source, key) or evidence is None:
+            return _alarm_response(
+                400,
+                error="Only journal or SEL alarms with complete evidence can be reviewed",
+            )
+        return await _review_alarm(source, key, since, evidence, note, action_id)
+    return _alarm_response(400, error="action must be retire or review")
+
+
+async def _web_alarm_action(request: Request, action: str) -> Response:
+    if not PASSWORD_FILE.exists():
+        return _alarm_response(503, error="No password configured on server")
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict) or not isinstance(body.get("password"), str):
+        return _alarm_response(
+            400, error="Expected a JSON object with a password string"
+        )
+    denied = await _verify_password_throttled(request, body["password"])
+    if denied is not None:
+        return denied
+    operation = asyncio.create_task(_apply_alarm_action(action, body))
     return await _finish_alarm_update(operation)
+
+
+@APP.post("/api/alarms/retire")
+async def retire_alarm(request: Request) -> Response:
+    """Close an unchecked occurrence, with an optional explanation in its history."""
+    return await _web_alarm_action(request, "retire")
+
+
+@APP.post("/api/alarms/review")
+async def review_alarm(request: Request) -> Response:
+    """Mark this exact journal/SEL evidence reviewed using the dashboard password."""
+    return await _web_alarm_action(request, "review")
+
+
+def _pending_alarm_actions(directory: Path) -> list[Path]:
+    if not directory.exists():
+        return []
+    return [
+        path
+        for path in sorted(directory.glob("*.json"))
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", path.stem)
+        and not path.with_name(path.stem + ".result.json").exists()
+    ][:32]
+
+
+def _read_alarm_action(path: Path) -> Any:
+    # Producers write a temporary file then rename it into the inbox. Never
+    # follow a command symlink or block on a pipe supplied in the directory.
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as request_file:
+        info = os.fstat(request_file.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > ALARM_ACTION_MAX_BYTES:
+            raise ValueError("Action must be a regular JSON file no larger than 64 KiB")
+        return json.loads(request_file.read(ALARM_ACTION_MAX_BYTES + 1))
+
+
+def _write_alarm_action_result(path: Path, response: Response) -> None:
+    result = {
+        "action_id": path.stem,
+        "status_code": response.status_code,
+        **json.loads(bytes(response.body)),
+    }
+    destination = path.with_name(path.stem + ".result.json")
+    temporary = path.with_name(f".{path.stem}.{secrets.token_hex(8)}.tmp")
+    try:
+        with temporary.open("x") as output:
+            json.dump(result, output)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+async def process_alarm_actions(directory: Path = ALARM_ACTIONS_DIR) -> None:
+    """Apply up to 32 local requests per tracker pass; receipts prevent replay.
+
+    Local write access is authorization. Never place passwords in these files.
+    A crash between persistence and receipt can require checking the event's
+    action_id before submitting a new request; this is not an exactly-once queue.
+    """
+    paths = await asyncio.to_thread(_pending_alarm_actions, directory)
+    for path in paths:
+        try:
+            body = await asyncio.to_thread(_read_alarm_action, path)
+        except (OSError, ValueError, UnicodeError) as error:
+            response = _alarm_response(400, error=f"Invalid action file: {error}")
+        else:
+            action = body.get("action") if isinstance(body, dict) else None
+            response = await _finish_alarm_update(
+                asyncio.create_task(
+                    _apply_alarm_action(
+                        action if isinstance(action, str) else "", body, path.stem
+                    )
+                )
+            )
+        await asyncio.to_thread(_write_alarm_action_result, path, response)
 
 
 # The Glances plugins the UI reads, the only ones the /api proxy forwards. An
@@ -6098,7 +6426,9 @@ async def list_endpoints() -> Response:
         "/storage-health",
         "/sensors",
         "/alarms",
+        "/alarms/history",
         "/alarms/retire",
+        "/alarms/review",
         "/services",
         "/services/history",
         "/version",
@@ -7353,6 +7683,9 @@ JSON API (machine-readable; prefer these for exact values)
                                  uptime {up, checks} over the last 1 / 24 / 168 h
   GET /api/services/history?hours=24   [passed, failed] checks per target per time bucket
   GET /api/sensors               fans/temps/power snapshot (root collector, when installed)
+  GET /api/alarms/history?hours=24 recorded hardware/host alarm events in a time range
+  POST /api/alarms/retire        close an unchecked alarm, password and optional note
+  POST /api/alarms/review        review exact journal/SEL evidence, password and optional note
   GET /api/alarms                everything wrong now in one list, since when, and the
                                  newest alarm changes: {sources, active, held, recent,
                                  notes}

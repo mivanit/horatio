@@ -621,7 +621,8 @@ function renderHardware(data) {
   const hostMismatch = serverRows.some(r => r.item?.key === 'gpu/driver-mismatch');
   const keepDiagnosis = row => !hostMismatch || row.item?.key !== 'gpu/driver-mismatch';
   const snapshots = [...(stateKnown ? [data] : []), ...(sen ? [sen] : [])];
-  const rows = [...snapshots.flatMap(withItems).filter(keepDiagnosis), ...serverRows];
+  const rows = [...snapshots.flatMap(snap => withItems(snap).map(row => ({ ...row, source: snap === data ? 'state' : 'sensors' }))).filter(keepDiagnosis),
+    ...serverRows.map(row => ({ ...row, source: 'dashboard' }))];
   const alarms = rows.map(r => r.text);
   // Retained faults that could not be checked are never treated as clear.
   const unchecked = snapshots.flatMap(snap => (Array.isArray(snap.alarm_held) ? snap.alarm_held : [])
@@ -646,6 +647,7 @@ function renderHardware(data) {
   // snapshot means the alarm list is unknown, not clear: never say "no alarms".
   // Drive-specific notes ("sdb: no self-test on record") are on Drive Health.
   const issues = [];
+  const review = getFreshCache('alarms', 300000)?.review;
   if (stateUnknown) {
     const text = data.status === 'missing'
       ? `No health snapshot yet (${data.path || ''}); is ${collector} installed?`
@@ -664,6 +666,10 @@ function renderHardware(data) {
     // `initial`: already there when the server's alarm history began, so it may be older.
     const since = sinceText(item?.since);
     if (since) issues.push(hwRow('hw-note', `${item.initial ? 'seen since' : 'since'} ${since}`));
+    if (review?.supported && alarmReviewable({ ...item, source: rows[i].source })) {
+      issues.push(`<button class="history-settings-btn" data-review-alarm="${i}" ${review.password_configured ? '' : 'disabled'}
+        title="${review.password_configured ? 'Mark this evidence reviewed; new evidence will appear again' : 'Configure the settings password to review evidence'}">Mark reviewed</button>`);
+    }
     // Several lines of one kind in a row (journal messages) share one hint, after the last.
     const hint = hwHint(text, data);
     if (hint && hint !== (i + 1 < rows.length ? hwHint(rows[i + 1].text, data) : null)) issues.push(hwRow('hw-note', `check: ${hint}`));
@@ -675,7 +681,7 @@ function renderHardware(data) {
     if (retirement?.supported && typeof h.key === 'string' && Number.isFinite(h.since) && Number.isFinite(h.unchecked_since)) {
       const enabled = retirement.password_configured === true;
       issues.push(`<button class="history-settings-btn" data-retire-alarm="${index}" ${enabled ? '' : 'disabled'}
-        title="${enabled ? 'Retire an unchecked alarm for a device you deliberately removed' : 'Configure the settings password to retire alarms'}">Retire</button>`);
+        title="${enabled ? 'Close an unchecked alarm while keeping its history' : 'Configure the settings password to close alarms'}">Close unchecked</button>`);
     }
   });
   if (stateKnown && !stale && !serverUnknown && !sensorsUnknown && !sensorsAbsent && alarms.length === 0 && unchecked.length === 0) issues.push(hwRow('text-success', 'no alarms'));
@@ -701,17 +707,32 @@ function renderHardware(data) {
     backup.push(hwRow('hw-note', `check: systemctl list-timers ${b.timer}; journalctl --unit ${backupService(b.timer)} --since -2days`));
   }
 
-  // The newest lines of the event log (/api/alarms), newest first; nothing on a
-  // backend without it.
-  // Only from a fetch of the last five minutes: older ones are not "recent".
-  const log = getFreshCache('alarms', 300000)?.recent;
+  // A short teaser keeps recovered incidents visible; the history card has the
+  // timeline and full details. Recorded facts remain valid after a refresh fails.
+  const cachedAlarms = getCache('alarms');
+  const log = cachedAlarms?.recent;
   const recent = (Array.isArray(log) ? log : [])
-    .map(hwEventText).filter(Boolean).slice(-5).reverse().map(t => hwRow('hw-note', t));
+    .filter(e => ['raised', 'cleared', 'retired', 'expired', 'reviewed', 'reopened'].includes(e?.event))
+    .map(hwEventText).filter(Boolean).slice(-1).map(t => hwRow('hw-note', t));
+  if (recent.length && !getFreshCache('alarms', 300000)) recent.push(hwRow('hw-note', 'Showing previously fetched alarm history.'));
+  if (typeof historyMetricAvailable === 'function' && historyMetricAvailable('alarms')) {
+    recent.push('<button class="history-btn" data-history-metric="alarms">Alarm history</button>');
+  }
+  const reviewed = Array.isArray(cachedAlarms?.reviewed) ? cachedAlarms.reviewed : [];
+  const reviewOpen = content.querySelector?.('[data-reviewed]')?.open;
+  const reviewedHTML = reviewed.length ? `<details data-reviewed ${reviewOpen ? 'open' : ''}><summary>Reviewed evidence (${reviewed.length})</summary>${reviewed.map(row => hwRow('hw-note', row.text) +
+    (row.reviewed?.note ? hwRow('hw-note', row.reviewed.note) : '')).join('')}</details>` : '';
 
-  content.innerHTML = hwSection('Issues', issues) + hwSection('Recent changes', recent) +
+  content.innerHTML = hwSection('Issues', issues) + hwSection('Alarm history', recent) + reviewedHTML +
     hwSection('Memory', memory) + hwSection('Backup', backup) +
     '<div class="hw-note">alarm rules and the full table: collector/README.md</div>';
   content.onclick = event => {
+    const reviewButton = event.target.closest('[data-review-alarm]');
+    if (reviewButton && !reviewButton.disabled) {
+      const row = rows[Number(reviewButton.dataset.reviewAlarm)];
+      if (row?.item) openAlarmReview({ ...row.item, source: row.source });
+      return;
+    }
     const button = event.target.closest('[data-retire-alarm]');
     if (button && !button.disabled) {
       const held = unchecked[Number(button.dataset.retireAlarm)];
@@ -730,29 +751,44 @@ function renderHardware(data) {
 // read failures. The server checks both timestamps so an old dialog cannot
 // retire a fault which has since returned or changed.
 let alarmRetirementPopup = null;
-function openAlarmRetirement(alarm) {
+function alarmReviewable(row) {
+  return row?.source === 'state' && (row.key?.startsWith('journal/') || ['sel/memory', 'sel/hardware'].includes(row.key)) &&
+    Array.isArray(row.evidence) && row.evidence.length > 0 && Number.isFinite(row.since);
+}
+function openAlarmReview(alarm) { openAlarmRetirement(alarm, 'review'); }
+
+function openAlarmRetirement(alarm, action = 'retire') {
   closeAlarmRetirement();
+  const review = action === 'review';
+  const title = review ? 'Mark evidence reviewed' : 'Close unchecked alarm';
   const popup = document.createElement('div');
   popup.className = 'history-settings-popup';
   popup.setAttribute('role', 'dialog');
-  popup.setAttribute('aria-label', 'Retire unchecked alarm');
+  popup.setAttribute('aria-label', title);
   popup.style.left = '50%';
   popup.style.top = '25%';
   popup.style.transform = 'translateX(-50%)';
   popup.style.maxWidth = 'min(420px, calc(100vw - 32px))';
   popup.innerHTML = `
-    <div class="history-settings-header">Retire unchecked alarm</div>
+    <div class="history-settings-header">${title}</div>
     <div class="hw-note" id="ar-alarm"></div>
-    <div class="hw-note">Use this for a device you deliberately removed. Its history stays, and future faults can raise new alarms.</div>
+    <div class="hw-note">${review
+      ? 'This evidence leaves the attention list. New evidence brings it back. Review does not establish recovery.'
+      : 'Close an old concern after repairing, replacing or removing hardware. Its history stays, and future faults can raise new alarms.'}</div>
+    <label class="history-settings-row">Note (optional)
+      <textarea id="ar-note" maxlength="2000" rows="3" placeholder="What did you check or change?"></textarea>
+    </label>
     <label class="history-settings-row">Settings password
       <input type="password" class="history-settings-input" id="ar-password" autocomplete="current-password">
     </label>
     <div class="history-settings-buttons">
       <button class="history-settings-btn" id="ar-cancel">Cancel</button>
-      <button class="history-settings-btn" id="ar-confirm">Retire alarm</button>
+      <button class="history-settings-btn" id="ar-confirm">${review ? 'Mark reviewed' : 'Close alarm'}</button>
     </div>
     <div class="history-settings-status" id="ar-status" role="status"></div>`;
-  popup.alarm = { source: alarm.source, key: alarm.key, since: alarm.since, unchecked_since: alarm.unchecked_since };
+  popup.action = action;
+  popup.alarm = { source: alarm.source, key: alarm.key, since: alarm.since,
+    ...(review ? { evidence: [...alarm.evidence] } : { unchecked_since: alarm.unchecked_since }) };
   popup.querySelector('#ar-alarm').textContent = alarm.text;
   popup.querySelector('#ar-cancel').addEventListener('click', () => closeAlarmRetirement(popup));
   popup.querySelector('#ar-confirm').addEventListener('click', () => submitAlarmRetirement(popup));
@@ -781,6 +817,10 @@ async function refreshAlarmViews() {
     return result;
   }));
   if (results[2].ok) renderHardware(results[2].data);
+  if (typeof historyCards !== 'undefined' && historyCards.has('alarms')) {
+    const entry = historyCards.get('alarms');
+    await loadHistoryData('alarms', Number(entry.card.querySelector('.history-range-input').value) || defaultHistoryHours);
+  }
   return results.every(result => result.ok);
 }
 
@@ -795,14 +835,16 @@ async function submitAlarmRetirement(popup = alarmRetirementPopup) {
     return;
   }
   confirm.disabled = password.disabled = true;
-  status.textContent = 'Retiring alarm…';
+  const review = popup.action === 'review';
+  const note = popup.querySelector('#ar-note').value.trim();
+  status.textContent = review ? 'Saving review…' : 'Closing alarm…';
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
   let finished = false;
   try {
-    const response = await fetch('/api/alarms/retire', {
+    const response = await fetch(review ? '/api/alarms/review' : '/api/alarms/retire', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
-      body: JSON.stringify({ ...popup.alarm, password: password.value }),
+      body: JSON.stringify({ ...popup.alarm, password: password.value, ...(note ? { note } : {}) }),
     });
     const body = await response.json();
     if (response.ok || response.status === 409) {
@@ -811,14 +853,14 @@ async function submitAlarmRetirement(popup = alarmRetirementPopup) {
       const refreshed = await refreshAlarmViews();
       if (alarmRetirementPopup !== popup) return;
       if (response.ok && refreshed) { closeAlarmRetirement(popup); return; }
-      status.textContent = response.ok ? 'Alarm retired. Refresh failed; the next poll will retry.' :
-        'This alarm changed. Close this dialog and review its current state before retiring it.';
+      status.textContent = response.ok ? 'Saved. Refresh failed; the next poll will retry.' :
+        'This alarm changed. Close this dialog and review its current state before trying again.';
       popup.querySelector('#ar-cancel').textContent = 'Close';
     } else if (alarmRetirementPopup === popup) {
-      status.textContent = body.error || 'Could not retire this alarm';
+      status.textContent = body.error || 'Could not save this action';
     }
   } catch (error) {
-    if (alarmRetirementPopup === popup) status.textContent = 'Could not confirm retirement. Refresh before retrying.';
+    if (alarmRetirementPopup === popup) status.textContent = 'Could not confirm the action. Refresh before retrying.';
   } finally {
     clearTimeout(timeout);
     if (alarmRetirementPopup === popup && !finished) confirm.disabled = password.disabled = false;
@@ -838,6 +880,8 @@ function hwEventText(e) {
     case 'changed': return `${when} ${e.was ?? '?'} -> ${e.value ?? '?'}: ${e.text}`;
     case 'cleared': return `${when} cleared${span(e.active_for_s)}${e.after_boot ? ' (reboot)' : ''}: ${e.text}`;
     case 'retired': return `${when} retired by operator: ${e.text}`;
+    case 'reviewed': return `${when} reviewed by operator: ${e.text}`;
+    case 'reopened': return `${when} new evidence: ${e.text}`;
     case 'expired': return `${when} dropped, unchecked for 30 days: ${e.text}`;
     case 'boot': return `${when} booted${e.kernel ? ` ${e.kernel}` : ''}` +
       (e.previous?.clean === false ? `; the boot before ended without a shutdown${e.previous.ended ? ` at ${e.previous.ended}` : ''}` : '');
@@ -977,6 +1021,148 @@ function servicesGridHTML(d, hours, width) {
     `<span style="left:${((tick.value / 1000 - from) / (to - from) * 100).toFixed(3)}%">${tick.label}</span>`).join('');
   const note = d.truncated ? '<div class="hw-note">the log could not be read back this far: the oldest cells are empty</div>' : '';
   return `<div class="svc-hist" style="grid-template-columns:${HISTORY_AXIS_WIDTH}px minmax(0,1fr);padding-right:${HISTORY_PLOT_INSET}px">${rows}<span></span><span class="svc-axis">${ticks}</span></div>${note}`;
+}
+
+// Alarm history shows recorded observations, never inferred continuous health.
+const ALARM_EVENT_LABELS = {
+  raised: ['▲', 'Raised'], cleared: ['●', 'Recovery confirmed'],
+  retired: ['■', 'Closed by operator'], expired: ['◇', 'Expired without re-check'],
+  reviewed: ['✓', 'Reviewed by operator'], reopened: ['◆', 'New evidence'], changed: ['·', 'Value changed'],
+};
+const alarmIdentity = row => JSON.stringify([row.source, row.key]);
+function alarmEventLabel(event) {
+  if (event.event === 'raised' && event.initial) return 'First observed';
+  if (event.event === 'cleared' && event.after_boot) return 'Cleared after reboot';
+  return ALARM_EVENT_LABELS[event.event]?.[1] || event.event;
+}
+function alarmTime(epoch) {
+  return Number.isFinite(epoch) && Number.isFinite(new Date(epoch * 1000).getTime())
+    ? new Date(epoch * 1000).toLocaleString() : 'Time unavailable';
+}
+function alarmHistoryGroups(data, current) {
+  const groups = new Map();
+  const add = row => {
+    if (typeof row?.source !== 'string' || typeof row?.key !== 'string' || typeof row?.text !== 'string') return null;
+    const id = alarmIdentity(row);
+    if (!groups.has(id)) groups.set(id, { id, source: row.source, key: row.key, text: row.text, events: [], current: null });
+    return groups.get(id);
+  };
+  const events = (Array.isArray(data?.events) ? data.events : []).filter(e => ALARM_EVENT_LABELS[e?.event] && Number.isFinite(Date.parse(e.timestamp)))
+    .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+  for (const event of events) {
+    const group = add(event);
+    if (group) { group.events.push(event); group.text = event.text; }
+  }
+  for (const [field, status] of [['active', 'Currently reported'], ['held', 'Not re-checked'], ['reviewed', 'Reviewed evidence']]) {
+    for (const row of Array.isArray(current?.[field]) ? current[field] : []) {
+      if (row.source === 'services') continue; // Services have their own history.
+      const group = add(row);
+      if (group) { group.current = { ...row, status, kind: field }; group.text = row.text; }
+    }
+  }
+  return [...groups.values()].sort((a, b) => {
+    const newest = group => Date.parse(group.events.at(-1)?.timestamp) || 0;
+    return newest(b) - newest(a) || a.id.localeCompare(b.id);
+  });
+}
+
+function alarmHistoryHTML(entry, width) {
+  const data = entry.alarmHistory;
+  const current = entry.alarmCurrent;
+  const groups = alarmHistoryGroups(data, current);
+  entry.alarmGroups = groups;
+  if (!entry.alarmSelectionInitialized) {
+    entry.alarmSelection = groups[0]?.id ?? null;
+    entry.alarmSelectionInitialized = true;
+  } else if (!groups.some(group => group.id === entry.alarmSelection)) entry.alarmSelection = null;
+  const selected = groups.find(group => group.id === entry.alarmSelection);
+  const from = Number(data.cutoff), to = Number(data.now);
+  const validRange = Number.isFinite(from) && Number.isFinite(to) && to > from;
+  const position = epoch => Math.max(0, Math.min(100, (epoch - from) / (to - from) * 100));
+  const notice = [];
+  if (entry.alarmHistoryError) notice.push('History refresh failed; showing the last fetched events.');
+  if (entry.alarmCurrentStale) notice.push('Current concerns could not be refreshed. Actions are disabled until refresh succeeds.');
+  if (data.truncated) notice.push('Only part of the event log was read. Events in this range may be missing.');
+  if (data.skipped) notice.push(`${data.skipped} unreadable event record${data.skipped === 1 ? '' : 's'} skipped.`);
+  const unknown = Object.entries(current?.sources || {}).filter(([source, value]) => source !== 'services' && value?.status !== 'ok');
+  if (unknown.length) notice.push(`Current checks unavailable or stale: ${unknown.map(([source]) => source).join(', ')}. Missing readings do not establish recovery.`);
+  const currentRows = groups.map((group, i) => group.current && group.current.kind !== 'reviewed' ?
+    `<button class="alarm-current-row" data-alarm-lane="${i}"><span>${escapeHtml(group.current.status)}</span> ${escapeHtml(group.text)}${group.current.since < from ? ' <small>First observed before this range</small>' : ''}</button>` : '').join('');
+  const reviewed = groups.map((group, i) => group.current?.kind === 'reviewed' ?
+    `<button class="alarm-current-row" data-alarm-lane="${i}">${escapeHtml(group.text)}</button>` : '').join('');
+  const hasEvents = groups.some(group => group.events.length);
+  const lanes = groups.map((group, i) => {
+    if (!group.events.length) return '';
+    const markers = group.events.map(event => {
+      const epoch = Date.parse(event.timestamp) / 1000;
+      if (!validRange || epoch < from || epoch > to) return '';
+      return `<span class="alarm-marker alarm-marker-${event.event}" style="left:${position(epoch).toFixed(4)}%" aria-hidden="true"
+        title="${escapeHtml(`${alarmEventLabel(event)} · ${alarmTime(epoch)}`)}">${ALARM_EVENT_LABELS[event.event][0]}</span>`;
+    }).join('');
+    return `<button class="alarm-lane${group.id === entry.alarmSelection ? ' selected' : ''}" data-alarm-lane="${i}" aria-pressed="${group.id === entry.alarmSelection}">
+      <span class="alarm-lane-name">${escapeHtml(group.text)} <small>${escapeHtml(group.source)}</small></span>
+      <span class="alarm-track">${markers}</span></button>`;
+  }).join('');
+  const ticks = validRange ? historyTicks(from * 1000, to * 1000, Math.max(1, width)).map(tick =>
+    `<span style="left:${position(tick.value / 1000).toFixed(4)}%">${escapeHtml(tick.label)}</span>`).join('') : '';
+  let details = '<p class="hw-note">Select an alarm to see its recorded events and current state.</p>';
+  if (selected) {
+    const row = selected.current;
+    const capability = row?.kind === 'held' ? current?.retirement : current?.review;
+    const action = row?.kind === 'held' ? 'retire' : row?.kind === 'active' && alarmReviewable(row) ? 'review' : null;
+    const enabled = !entry.alarmCurrentStale && capability?.password_configured === true;
+    const button = action && capability?.supported ? `<button class="history-settings-btn" data-alarm-action="${action}" ${enabled ? '' : 'disabled'}
+      title="${enabled ? 'Requires the settings password' : 'Refresh current concerns and configure the settings password to make changes'}">${action === 'review' ? 'Mark reviewed' : 'Close unchecked alarm'}</button>` : '';
+    const events = [...selected.events].reverse().map(event => {
+      const observed = Number.isFinite(event.since) ? `<span>First observed: ${escapeHtml(alarmTime(event.since))}${event.since < from ? ' (before this range)' : ''}</span>` : '';
+      const interval = Number.isFinite(event.active_for_s) && event.active_for_s >= 0 ? `<span>Observed interval: ${Math.round(event.active_for_s)} seconds</span>` : '';
+      return `<li><strong>${escapeHtml(alarmEventLabel(event))}</strong> <time>${escapeHtml(alarmTime(Date.parse(event.timestamp) / 1000))}</time>
+        <div>${escapeHtml(event.text)}</div>${observed}${interval}${event.note ? `<p class="alarm-note">${escapeHtml(event.note)}</p>` : ''}</li>`;
+    }).join('');
+    details = `<h3>${escapeHtml(selected.text)}</h3>
+      <div class="alarm-detail-status">${row ? escapeHtml(row.status) : 'Historical observations; current state is not established by this list.'} ${button}</div>
+      ${row?.reviewed?.note ? `<p class="alarm-note">Review note: ${escapeHtml(row.reviewed.note)}</p>` : ''}
+      <details><summary>Source and identity</summary><code>${escapeHtml(selected.source)} · ${escapeHtml(selected.key)}</code></details>
+      ${events ? `<ol class="alarm-events">${events}</ol>` : '<p class="hw-note">No events for this alarm were recorded in the selected range.</p>'}`;
+  }
+  const contextEvents = (Array.isArray(data.events) ? data.events : []).filter(e => ['boot', 'gap'].includes(e?.event) && Number.isFinite(Date.parse(e.timestamp)));
+  const context = contextEvents.length ? `<details><summary>Monitoring gaps and boots (${contextEvents.length})</summary>${contextEvents.map(e =>
+    `<div class="hw-note">${escapeHtml(alarmTime(Date.parse(e.timestamp) / 1000))} · ${escapeHtml(e.source || '')} · ${e.event === 'boot' ? 'Boot recorded' : `Monitoring gap${e.from && e.to ? `: ${escapeHtml(e.from)} to ${escapeHtml(e.to)}` : ''}`}</div>`).join('')}</details>` : '';
+  return `<div class="alarm-history">
+    <div class="alarm-history-notice" role="status">${notice.map(text => `<p>${escapeHtml(text)}</p>`).join('')}</div>
+    <div class="alarm-current"><h3>Current concerns</h3>${currentRows || `<p class="hw-note">${entry.alarmCurrentStale ? 'Current concerns unavailable.' : 'No current hardware concerns reported.'}</p>`}</div>
+    ${reviewed ? `<details class="alarm-reviewed" ${entry.alarmReviewedOpen ? 'open' : ''}><summary>Reviewed evidence</summary>${reviewed}</details>` : ''}
+    <div class="alarm-legend">▲ Raised · ● Recovery confirmed · ■ Closed · ◇ Expired · ✓ Reviewed · ◆ New evidence</div>
+    ${hasEvents ? `<div class="alarm-lanes" style="padding-left:${HISTORY_AXIS_WIDTH}px;padding-right:${HISTORY_PLOT_INSET}px">${lanes}</div>
+      <div class="alarm-axis" style="margin-left:${HISTORY_AXIS_WIDTH}px;margin-right:${HISTORY_PLOT_INSET}px">${ticks}</div>` : '<p class="no-history-data">No alarm events recorded in this range.</p>'}
+    <div class="alarm-detail">${details}</div>${context}
+    <p class="hw-note">Markers are recorded observations, not continuous health measurements. Service outages have their own history.</p>
+  </div>`;
+}
+
+function renderAlarmHistory(entry) {
+  const box = entry.card.querySelector('.chart-container');
+  const scroll = box.querySelector('.alarm-lanes')?.scrollTop || 0;
+  const focused = box.querySelector('.alarm-lane:focus')?.dataset.alarmLane;
+  const reviewed = box.querySelector('.alarm-reviewed');
+  if (reviewed) entry.alarmReviewedOpen = reviewed.open;
+  box.innerHTML = alarmHistoryHTML(entry, box.clientWidth - HISTORY_AXIS_WIDTH - HISTORY_PLOT_INSET);
+  const lanes = box.querySelector('.alarm-lanes');
+  if (lanes) lanes.scrollTop = scroll;
+  if (focused != null) box.querySelector(`.alarm-lane[data-alarm-lane="${focused}"]`)?.focus({ preventScroll: true });
+  box.onclick = event => {
+    const lane = event.target.closest('[data-alarm-lane]');
+    if (lane) {
+      entry.alarmSelection = entry.alarmGroups[Number(lane.dataset.alarmLane)]?.id ?? null;
+      renderAlarmHistory(entry);
+      return;
+    }
+    const action = event.target.closest('[data-alarm-action]');
+    if (action && !action.disabled) {
+      const row = entry.alarmGroups.find(group => group.id === entry.alarmSelection)?.current;
+      if (row) action.dataset.alarmAction === 'review' ? openAlarmReview(row) : openAlarmRetirement(row);
+    }
+  };
 }
 
 // Shared by the Hardware health and Drive Health cards.
@@ -4470,13 +4656,30 @@ async function loadHistoryData(metric, hours, data) {
   if (!entry) return;
   const mySeq = ++entry.loadSeq;
 
-  // A grid metric (Services) has its own endpoint and no chart: fetch, then
+  // Custom history cards have their own endpoints and no numeric chart: fetch, then
   // replace the markup, under the same stale-response gate as below.
   const gridUrl = HISTORY_METRICS[metric].grid;
   if (gridUrl) {
-    const grid = await safeFetch(`${gridUrl}?hours=${encodeURIComponent(hours)}`, null, 30000);
+    const [grid, current] = await Promise.all([
+      safeFetch(`${gridUrl}?hours=${encodeURIComponent(hours)}`, null, 30000),
+      metric === 'alarms' ? safeFetch('/api/alarms', null, 30000) : null,
+    ]);
     if (historyCards.get(metric) !== entry || entry.loadSeq !== mySeq) return;
     const box = entry.card.querySelector('.chart-container');
+    if (metric === 'alarms') {
+      if (current?.ok) entry.alarmCurrent = current.data;
+      entry.alarmCurrentStale = !current?.ok;
+      if (grid.ok && grid.data) {
+        entry.alarmHistory = grid.data;
+        entry.alarmHistoryError = false;
+        renderAlarmHistory(entry);
+        entry.hasGrid = true;
+      } else if (entry.hasGrid) {
+        entry.alarmHistoryError = true;
+        renderAlarmHistory(entry);
+      } else box.innerHTML = historyErrorHTML(grid.errorType);
+      return;
+    }
     if (grid.ok && grid.data) {
       box.innerHTML = servicesGridHTML(grid.data, hours, box.clientWidth - HISTORY_AXIS_WIDTH - HISTORY_PLOT_INSET);
       entry.hasGrid = true;
@@ -4610,8 +4813,8 @@ document.querySelector('.grid').addEventListener('click', (e) => {
   if (historyBtn) {
     const metric = historyBtn.dataset.historyMetric;
 
-    // Fire-and-forget: record current data (server rate-limits to 1/min)
-    fetch('/api/history/record', { method: 'POST' }).catch(e => console.warn('history record failed:', e));
+    // Alarm browsing reads its existing log; it must not trigger metric recording.
+    if (metric !== 'alarms') fetch('/api/history/record', { method: 'POST' }).catch(e => console.warn('history record failed:', e));
 
     if (historyCards.has(metric)) {
       removeHistoryCard(metric);

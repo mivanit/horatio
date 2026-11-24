@@ -5,6 +5,11 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 
 ## [Unreleased]
 
+- Alarm history has a full-width timeline and event details, including recovery,
+  operator closure and optional notes. History reads report incomplete ranges.
+  Journal/BMC evidence can be marked reviewed; new evidence restores attention
+  while old entries aging out do not. Web edits require the dashboard password;
+  local agents can submit JSON action files and read result receipts.
 - Sensor labels can differ between old and new records after this upgrade, and
   identity changes can split a sensor's history into separate lines. Historical
   keys are preserved rather than merged. Duplicate chart labels use shorter

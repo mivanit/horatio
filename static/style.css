@@ -544,6 +544,55 @@ h1 {
   color: var(--text-muted);
 }
 
+/* Alarm history uses the same time-axis margins as numeric history cards. */
+.alarm-history { font-size: 12px; color: var(--text-secondary); }
+.alarm-history h3 { font-size: 13px; margin: 0 0 8px; overflow-wrap: anywhere; }
+.alarm-history-notice { color: var(--color-warning); }
+.alarm-history-notice:empty { display: none; }
+.alarm-current { margin-bottom: 10px; }
+.alarm-current-row {
+  display: block; width: 100%; border: 0; background: transparent; color: inherit;
+  text-align: left; padding: 5px 0; cursor: pointer; font: inherit; overflow-wrap: anywhere;
+}
+.alarm-current-row span { color: var(--color-warning); margin-right: 6px; }
+.alarm-current-row small { display: block; color: var(--text-muted); }
+.alarm-current-row:hover { text-decoration: underline; }
+.alarm-legend { color: var(--text-muted); font-size: 11px; margin: 12px 0; }
+.alarm-lanes { max-height: 360px; overflow-y: auto; scrollbar-gutter: stable; }
+.alarm-lane {
+  display: block; width: 100%; padding: 5px 0; margin: 0; background: transparent;
+  border: 0; border-bottom: 1px solid var(--border-color); color: inherit;
+  text-align: left; cursor: pointer; font: inherit;
+}
+.alarm-lane.selected { background: color-mix(in srgb, var(--color-accent) 9%, transparent); }
+.alarm-lane:focus-visible, .alarm-current-row:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.alarm-lane-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alarm-lane-name small { color: var(--text-muted); }
+.alarm-track { position: relative; display: block; height: 28px; margin: 2px 8px 0; }
+.alarm-track::before { content: ''; position: absolute; left: 0; right: 0; top: 14px; border-top: 1px solid var(--border-color); }
+.alarm-marker { position: absolute; top: 2px; transform: translateX(-50%); font-size: 17px; line-height: 24px; }
+.alarm-marker-raised, .alarm-marker-reopened { color: var(--color-error-light); }
+.alarm-marker-cleared { color: var(--color-success); }
+.alarm-marker-retired, .alarm-marker-reviewed { color: var(--color-accent); }
+.alarm-marker-expired { color: var(--color-warning); }
+.alarm-marker-changed { color: var(--text-muted); }
+.alarm-axis { position: relative; height: 26px; margin-top: 4px; color: var(--text-muted); font-size: 11px; }
+.alarm-axis span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+.alarm-detail { border-top: 1px solid var(--border-color); padding-top: 12px; margin-top: 10px; }
+.alarm-detail-status { margin-bottom: 8px; }
+.alarm-detail code { display: block; overflow-wrap: anywhere; white-space: normal; padding: 6px 0; }
+.alarm-events { list-style: none; padding: 0; max-height: 360px; overflow-y: auto; }
+.alarm-events li { border-bottom: 1px solid var(--border-color); padding: 10px 0; overflow-wrap: anywhere; }
+.alarm-events time { color: var(--text-muted); margin-left: 8px; }
+.alarm-events li > span { display: block; color: var(--text-muted); margin-top: 3px; }
+.alarm-note { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; }
+.alarm-history details, [data-reviewed] { margin: 8px 0; }
+.alarm-history summary, [data-reviewed] summary { cursor: pointer; }
+#ar-note { width: 100%; min-width: 0; font: inherit; color: var(--text-input); background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); resize: vertical; padding: 6px; }
+@media (max-width: 600px) {
+  .alarm-events time { display: block; margin-left: 0; }
+}
+
 /* Services card: name, state, response time, then uptime over 1 h / 24 h / 7 d */
 .svc-table {
   display: grid;

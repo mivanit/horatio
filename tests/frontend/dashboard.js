@@ -651,7 +651,7 @@ function testHardwareSince() {
   assert(html().indexOf('check: journalctl') > html().indexOf('NVRM'), 'after the last of them');
   assert(html().includes('check: smartctl'));
   assert(html().includes(`sdb: SMART health FAILED: not re-checked since ${context.sinceText(t - 1800)}, alarm since ${context.sinceText(t - 86400 * 9)}`));
-  assert(!html().includes('flap damping') && !html().includes('Recent changes'));
+  assert(!html().includes('flap damping') && !html().includes('Alarm history'));
 
   // Nothing wrong that could be checked, but one alarm that could not: not "all clear".
   context.dataCache.sensors.data = { status: 'ok', age_sec: 5, alarms: [] };
@@ -667,7 +667,7 @@ function testHardwareSince() {
   context.renderHardware({ status: 'ok', age_sec: 30, alarms: ['a'], alarm_items: [item('k', 'another text', t)] });
   assert(!html().includes('since '));
 
-  // The newest five lines of the alarm log, newest first; gaps and junk are left out.
+  // The latest alarm transition is visible without opening the full history card.
   const at = seconds => new Date((t - seconds) * 1000).toISOString();
   // Text from the box is escaped wherever it is shown.
   const markup = 'journal: app: <b>&"x"';
@@ -686,11 +686,9 @@ function testHardwareSince() {
     { timestamp: at(2800), event: 'cleared', text: 'GPU 1: thermal slowdown active (sw)', active_for_s: 1200 },
   ] } };
   context.renderHardware({ status: 'ok', age_sec: 30, alarms: [] });
-  const recent = html().slice(html().indexOf('Recent changes'), html().indexOf('alarm rules'));
-  const order = ['cleared after 20 min: GPU 1', 'raised: GPU 1', 'booted 6.8.0-149-generic; the boot before ended without a shutdown at 2026-11-24T01:21:26+00:00',
-    '8 -> 9: sde: reallocated=9', 'first seen: sde: reallocated=8'].map(text => recent.indexOf(text));
-  assert(order.every(i => i > 0) && order.every((i, n) => n === 0 || i > order[n - 1]), `newest first: ${order}`);
-  assert(!recent.includes('too old') && !recent.includes('unreadable') && !recent.includes('gap'));
+  const recent = html().slice(html().indexOf('Alarm history'), html().indexOf('alarm rules'));
+  assert(recent.includes('cleared after 20 min: GPU 1'));
+  assert(!recent.includes('raised: GPU 1') && !recent.includes('too old') && !recent.includes('unreadable') && !recent.includes('gap'));
   // Lines that lack what they should have are shown without the missing part, or not at all.
   context.dataCache.alarms.data.recent = [
     { timestamp: at(500), event: 'changed', text: '<s>sde', value: 9 },
@@ -700,14 +698,14 @@ function testHardwareSince() {
     { timestamp: 4e22, event: 'raised', text: 'no such date' },
   ];
   context.renderHardware({ status: 'ok', age_sec: 30, alarms: [] });
-  const odd = html().slice(html().indexOf('Recent changes'), html().indexOf('alarm rules'));
-  assert(odd.includes('? -> 9: &lt;s>sde') && odd.includes('booted; the boot before ended without a shutdown<') && odd.includes(' cleared: x'));
+  const odd = html().slice(html().indexOf('Alarm history'), html().indexOf('alarm rules'));
+  assert(odd.includes(' cleared: x') && !odd.includes('booted') && !odd.includes('sde'));
   assert(!odd.includes('undefined') && !odd.includes('NaN') && !odd.includes('after -') && !odd.includes('no such date'), odd);
-  assert.equal(odd.split('hw-row hw-note').length - 1, 3, 'the raise that names no alarm is left out');
-  // The list was fetched too long ago to be called recent.
+  assert.equal(odd.split('hw-row hw-note').length - 1, 1, 'only the last readable lifecycle event is previewed');
+  // Historical facts remain visible when a refresh has not succeeded recently.
   context.dataCache.alarms.lastUpdate = now - 6 * 60 * 1000;
   context.renderHardware({ status: 'ok', age_sec: 30, alarms: [] });
-  assert(!html().includes('Recent changes'));
+  assert(html().includes('Alarm history') && html().includes('previously fetched'));
   assert.deepEqual(context.errors, []);
 }
 
@@ -1311,7 +1309,7 @@ function historySettingsContext() {
     get value() { return this._value; }
     set innerHTML(html) {
       this.children = new Map();
-      for (const match of html.matchAll(/<(input|button|div)\b([^>]*\bid="([^"]+)"[^>]*)>/g)) {
+      for (const match of html.matchAll(/<(input|button|div|textarea)\b([^>]*\bid="([^"]+)"[^>]*)>/g)) {
         const el = new Element(match[1]);
         el.checked = /\bchecked\b/.test(match[2]);
         el.disabled = /\bdisabled\b/.test(match[2]);
@@ -1843,7 +1841,7 @@ function testHardwareIndependentSources() {
       backup: { age_hours: 2, timer: 'backup.timer' } });
     assert.equal(header(), '3 issues', `${status}: independent alarms stay counted`);
     for (const text of ['GPU ECC errors', 'Host driver mismatch', 'CPU fan stopped', 'Case fan fault',
-      'Chassis fan fault', 'Collector diagnostic note', 'Host diagnostic note', 'Recent changes', 'Previous fault', '(1 h)']) {
+      'Chassis fan fault', 'Collector diagnostic note', 'Host diagnostic note', 'Alarm history', 'Previous fault', '(1 h)']) {
       assert(html().includes(text), `${status}: ${text}`);
     }
     assert(!html().includes('collector driver mismatch'), 'only the duplicate mismatch diagnosis is suppressed');
@@ -1910,7 +1908,7 @@ function testHardwareIndependentSources() {
   context.renderHardware(retiredSources);
   assert.equal((html().match(/data-retire-alarm=/g) || []).length, 3, 'only retained faults get retirement controls');
   for (let i = 0; i < 3; i++) context.elements.get('hardware-content').onclick({
-    target: { closest: () => ({ dataset: { retireAlarm: String(i) }, disabled: false }) },
+    target: { closest: selector => selector === '[data-retire-alarm]' ? ({ dataset: { retireAlarm: String(i) }, disabled: false }) : null },
   });
   assert.deepEqual(selected.map(h => h.source), ['state', 'sensors', 'dashboard']);
   assert(selected.every(h => h.since === ts - 3600 && h.unchecked_since === ts - 120));

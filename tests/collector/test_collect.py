@@ -165,6 +165,54 @@ def test_sel_fault_phrases_come_from_config(tmp_path: Path) -> None:
     assert state["alarms"] == []
 
 
+def test_sel_review_evidence_tracks_entries_not_rolling_counts(tmp_path: Path) -> None:
+    for sensor, event, key in (
+        ("Memory #0x02", "Correctable ECC | DIMMA1", "sel/memory"),
+        ("Power Supply #0x63", "Redundancy Lost", "sel/hardware"),
+    ):
+        lines = [sel_line(id_, sensor, event) for id_ in ("1a", "1b", "1c")]
+
+        def evidence(name: str, text: str, error: str = "") -> dict[str, Any]:
+            state = collect(
+                tmp_path / key.replace("/", "-") / name,
+                {"tmp/sel.txt": text, "tmp/sel.err": error},
+            )[0]
+            return next(item for item in state["alarm_items"] if item["key"] == key)
+
+        old = set(evidence("old", "".join(lines[:2]))["evidence"])
+        aged = set(evidence("aged", lines[1])["evidence"])
+        replacement = set(evidence("new", "".join(lines[1:]))["evidence"])
+        assert aged < old
+        assert replacement - old, "same count with a new SEL entry needs review again"
+        assert "evidence" not in evidence("failed", lines[1], "exit 124")
+
+
+def test_journal_review_evidence_preserves_repeats_and_precision(
+    tmp_path: Path,
+) -> None:
+    lines = [
+        f"2026-11-24T01:00:00.{fraction}+0000 host worker[42]: disk read failed\n"
+        for fraction in ("000001", "000002", "000003")
+    ]
+
+    def alarm(name: str, text: str, error: str = "") -> dict[str, Any]:
+        state = collect(
+            tmp_path / name,
+            {"tmp/journal-err.txt": text, "tmp/journal-err.err": error},
+        )[0]
+        return next(i for i in state["alarm_items"] if i["key"].startswith("journal/"))
+
+    old = alarm("old", "".join(lines[:2]))
+    aged = alarm("aged", lines[1])
+    new = alarm("new", "".join(lines[1:]))
+    assert old["key"] == aged["key"] == new["key"]
+    assert set(aged["evidence"]) < set(old["evidence"])
+    assert set(new["evidence"]) - set(old["evidence"])
+    assert len(alarm("duplicates", lines[0] * 2)["evidence"]) == 2
+    assert "evidence" not in alarm("failed", lines[0], "exit 124")
+    assert "evidence" not in alarm("oversized", lines[0] * 257)
+
+
 def test_edac_uncorrectable(tmp_path: Path) -> None:
     state: dict[str, Any] = collect(
         tmp_path,

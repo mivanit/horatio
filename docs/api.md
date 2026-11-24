@@ -7,13 +7,14 @@ password setup, see [operations](operations.md).
 ## Authentication
 
 Most endpoints are unauthenticated, including the dashboard, config, live metrics,
-and history queries. Three Python endpoints require the dashboard password:
+and history queries. These Python endpoints require the dashboard password:
 
 | Endpoint | Where to pass the password |
 |---|---|
 | `GET /api/history/raw` | `X-Dashboard-Password` header, or `password` query parameter |
 | `POST /api/history/settings` | `password` field in the JSON body, alongside the settings |
 | `POST /api/alarms/retire` | `password` field in the JSON body, alongside the occurrence identifiers |
+| `POST /api/alarms/review` | `password` field in the JSON body, alongside the occurrence and evidence identifiers |
 
 These endpoints return 503 when no password is configured. Setting a password does
 not protect the other endpoints; see the [security model](operations.md#access-and-security).
@@ -87,9 +88,11 @@ Current concerns and when they began:
 | `active` | `{source, key, text, value, since, initial}` rows from the sources below. |
 | `sources` | Each source's `status`. A status other than `ok` means unknown, never clear. |
 | `held` | Previously observed alarms that could not be re-checked, such as a failing drive that is asleep. |
+| `reviewed` | Journal or BMC event evidence already reviewed by an operator. New evidence returns it to `active`. |
 | `notes` | The server's setup hints and other notes, such as a reboot pending under a week or a scrub in progress. |
 | `recent` | The newest 50 lines of `logs/events.jsonl`. |
 | `retirement` | Metadata advertising whether retirement is supported and a password is configured. |
+| `review` | Metadata advertising whether evidence review is supported and a password is configured. |
 
 The sources are `state` (the 15-minute snapshot), `sensors` (the 60-second
 snapshot, counted only while fresh), `dashboard` (fan rules and host checks), and
@@ -105,12 +108,47 @@ of stale or held findings; [configuration](configuration.md) owns the configurab
 
 ### `POST /api/alarms/retire`
 
-Retire a held occurrence with a JSON body containing
-`{source, key, since, unchecked_since, password}`. Copy the occurrence identifiers
+Close a held occurrence with a JSON body containing
+`{source, key, since, unchecked_since, password, note?}`. The optional `note` is a
+string of at most 2,000 characters, saved with the `retired` event. Copy the occurrence identifiers
 from `GET /api/alarms`. Returns 409 if that occurrence changed or is no longer held,
 and 503 when no password is configured. The GET response's `retirement` metadata
 advertises availability. See [operations](operations.md#alarms) for the UI workflow
 and what retirement means.
+
+### `POST /api/alarms/review`
+
+Mark existing journal or BMC event evidence as reviewed, using
+`{source, key, since, evidence, password, note?}`. Copy `evidence`, an array of
+opaque entry identifiers, from the current alarm. The optional note has the same
+limit as retirement. The server checks the occurrence and fresh evidence before
+saving; a changed occurrence or evidence returns 409. Live conditions such as a
+stopped fan cannot be reviewed away. Reviewed evidence stays in history and is
+listed separately from current concerns. A new underlying log entry makes it
+unreviewed again; older entries aging out do not.
+
+Local agents can submit these actions through files without HTTP or a dashboard
+password; see [file-based alarm actions](alarm-actions.md).
+
+### `GET /api/alarms/history`
+
+Takes `hours` (default 24), returning `{cutoff, now, events, truncated, skipped}`.
+`cutoff` and `now` are epoch seconds. Events are sorted by observation time and
+retain their log fields, including notes and occurrence identifiers. This is
+hardware/host alarm history; service outages have their own history endpoint.
+
+The reader scans at most 4 MiB from the end of `logs/events.jsonl`. `truncated`
+means earlier bytes were not inspected, so relevant events may be missing;
+`skipped` counts unusable records. A missing file means no recorded history,
+whereas an unreadable file is an error. An empty event list does not mean the
+machine was healthy: an ongoing fault may produce no events in the range.
+
+`cleared` means recovery was confirmed, `retired` means an operator closed an
+unchecked alarm, and `expired` means evidence remained unavailable. `reviewed`
+records an operator review; `reopened` records new evidence after review.
+These are observations, not a continuous health trace. `initial: true` means
+the fault was already present when first observed, and `after_boot: true` on a
+clear event indicates it cleared after a reboot.
 
 ## Service checks
 

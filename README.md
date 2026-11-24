@@ -106,7 +106,7 @@ uv run python python/server.py --set-password
 ```
 
 This sets the password for raw history downloads, recording-settings changes,
-and alarm retirement. It does **not** protect the dashboard. See
+and alarm closure/review. It does **not** protect the dashboard. See
 [access and security](docs/operations.md#access-and-security) for the service
 sandbox and process-data privacy details.
 

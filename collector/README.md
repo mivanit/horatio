@@ -171,6 +171,15 @@ been there, and when it went, is tracked by the dashboard server from `alarm_ite
 in one list; `/api/storage-health` and `/api/sensors` serve each `alarm_items` entry with its
 `since`.
 
+Journal and BMC event alarms also carry `evidence`: opaque identifiers for the
+underlying log entries. The dashboard uses these to remember an operator's
+review without hiding newly arriving evidence. Entries aging out leave a subset
+of the reviewed identifiers; new entries add identifiers and need review again.
+Journal captures include microsecond timestamps, and duplicate entries retain
+their multiplicity. Failed captures and groups larger than 256 entries omit
+review evidence, so they cannot be hidden by a review. Reinstall the collector
+after upgrading to enable this metadata.
+
 `state.json` also has `boot`: `{id, kernel, previous: {clean, ended, kernel}}`. `previous` is
 how the boot before this one ended, read from the journal: `clean` is true when its last lines
 include journald's own `Journal stopped`, false after a power cut or a hang; `null` when the

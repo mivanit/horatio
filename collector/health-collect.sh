@@ -76,7 +76,7 @@ timeout 60  lsblk --json --output NAME,TYPE,MOUNTPOINTS > "$tmp/lsblk.json" 2> "
 # --plain drops the bullet column, --no-legend the header/footer: one unit per line.
 timeout 60  systemctl --failed --plain --no-legend > "$tmp/failed.txt" 2> "$tmp/failed.err" || echo "exit $?" >> "$tmp/failed.err"
 # error-and-worse from every unit and the kernel in the last day.
-timeout 60  journalctl --priority err --since -24hours --quiet --no-pager --output short-iso \
+timeout 60  journalctl --priority err --since -24hours --quiet --no-pager --output short-iso-precise \
                                              > "$tmp/journal-err.txt" 2> "$tmp/journal-err.err" || echo "exit $?" >> "$tmp/journal-err.err"
 # The previous boot: its last journal lines (a clean shutdown ends with journald's
 # own "Journal stopped"; a power cut or a hang ends mid-sentence) and its kernel.
@@ -201,7 +201,7 @@ checked = []
 # Keys of alarms that exist but are not printed (journal messages past the limit).
 alarm_hidden = []
 
-def alarm(key, text, value=None, requires=None):
+def alarm(key, text, value=None, requires=None, evidence=None):
     """Raise one alarm. `text` is what readers print and is all `alarms` holds.
     `key` is its stable identity: no counts, ages or device letters that move
     (drives go by serial). `value` only for a fault counter that never falls on
@@ -220,6 +220,8 @@ def alarm(key, text, value=None, requires=None):
             item["value"] = value
         if requires is not None:
             item["requires"] = requires
+        if evidence:
+            item["evidence"] = evidence
     except Exception:
         traceback.print_exc()
     alarm_items.append(item)
@@ -259,6 +261,22 @@ def capture_ok(name):
     """True when the bash stage's capture <name> ran clean (empty .err sidecar)."""
     text = read(f"{name}.err").strip()
     return not text or text == "SEL has no entries"
+
+def evidence_tokens(lines, complete):
+    """Identity of each underlying log entry, independent of the display summary.
+
+    Aging entries out leaves a subset; a new entry adds a token and requires a
+    fresh review. Include duplicate multiplicity, never just a rolling count.
+    Incomplete or oversized captures remain visible but cannot be reviewed.
+    """
+    if not complete or not lines or len(lines) > 256:
+        return None
+    counts, tokens = {}, []
+    for line in lines:
+        line = line.strip()
+        counts[line] = counts.get(line, 0) + 1
+        tokens.append(hashlib.sha256(f"{counts[line]}:{line}".encode()).hexdigest())
+    return sorted(tokens)
 
 # schema: bumped when the meaning of alarm_items / checked changes. boot_id tells
 # a reader that counters which reset at boot (ECC, failed units) did so.
@@ -368,7 +386,8 @@ def sel_memory():
     recent = [l for l in mem if sel_recent(l)]
     state["sel_memory"] = {"count": len(mem), "recent": recent}
     if recent:
-        alarm("sel/memory", f"SEL: {len(recent)} memory events in {SEL_RECENT_DAYS}d ({len(mem)} total), latest: {recent[-1]}")
+        alarm("sel/memory", f"SEL: {len(recent)} memory events in {SEL_RECENT_DAYS}d ({len(mem)} total), latest: {recent[-1]}",
+              evidence=evidence_tokens(recent, sel_read()))
     if sel_read():
         check("sel/memory")
 part(sel_memory)
@@ -402,7 +421,8 @@ def sel_hardware():
     hw_recent = [l for l in hw if sel_recent(l)]
     state["sel_hardware"] = {"count": len(hw), "recent": hw_recent}
     if hw_recent:
-        alarm("sel/hardware", f"SEL: {len(hw_recent)} hardware events in {SEL_RECENT_DAYS}d ({len(hw)} total), latest: {hw_recent[-1]}")
+        alarm("sel/hardware", f"SEL: {len(hw_recent)} hardware events in {SEL_RECENT_DAYS}d ({len(hw)} total), latest: {hw_recent[-1]}",
+              evidence=evidence_tokens(hw_recent, sel_read()))
 
     # A dated-looking line whose date did not parse is a format change (locale, ipmitool
     # version), not a hardware event: say so instead of silently under-counting.
@@ -762,7 +782,7 @@ def journal():
             ignore.append(re.compile(pattern))
         except (re.error, TypeError) as e:      # a typo must not cost the journal section
             info.append(f"journal_ignore: skipped {pattern!r}: {e}")
-    # short-iso: one line per message starting with its ISO timestamp, continuation
+    # short-iso-precise: one line per message with microsecond timestamp, continuation
     # lines indented. The "timestamp host unit[pid]:" prefix is three tokens; sudo
     # pads its message with spaces after that, hence the strip.
     JOURNAL_PREFIX = re.compile(r"^\S+ \S+ \S+ ")
@@ -782,14 +802,16 @@ def journal():
         who, msg = (m.group(2), m.group(3).strip()) if m else ("?", JOURNAL_PREFIX.sub("", l).strip())
         said = msg if msg.startswith(f"{who}:") else f"{who}: {msg}"
         digest = hashlib.sha1(re.sub(r"\d+", "#", said).encode()).hexdigest()[:8]
-        g = groups.setdefault(digest, {"n": 0, "first": when})
+        g = groups.setdefault(digest, {"n": 0, "first": when, "lines": []})
         g.update(n=g["n"] + 1, last=when, said=said)
+        g["lines"].append(l)
     # Oldest first: the order, and so which ones are shown, does not change as
     # new messages arrive. One transient error keeps its line for 24 h: intended.
     shown = sorted(groups.items(), key=lambda kv: kv[1]["first"])
     for digest, g in shown[:JOURNAL_MAX]:
         when = f"at {g['first']}" if g["n"] == 1 else f"first {g['first']}, last {g['last']}"
-        alarm(f"journal/{digest}", f"journal: {g['said']} ({g['n']} in 24h, {when})")
+        alarm(f"journal/{digest}", f"journal: {g['said']} ({g['n']} in 24h, {when})",
+              evidence=evidence_tokens(g['lines'], capture_ok("journal-err")))
     if len(shown) > JOURNAL_MAX:
         alarm("journal-more", f"journal: {len(shown) - JOURNAL_MAX} more distinct error-level messages in 24h")
     # The messages past the ones printed are still there: a reader that knew one
