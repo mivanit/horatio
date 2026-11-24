@@ -166,6 +166,12 @@ label/alias rules, but their alarms cannot be tracked across observations.
 Charts prefer configured aliases, then the sensor's original label. Physical
 identity is shown only when needed to distinguish equal display names or when
 an old fan record has no known label. This never combines separate history keys.
+An upgrade can therefore leave old and new records with different names or
+separate lines; see [history identities across upgrades](operations.md#history-identities-across-upgrades).
+
+Alarm raising is deliberately immediate, while clearing requires three clean
+observations. Readings repeatedly crossing a limit can still produce repeated
+alarm events; see [alarm behavior and threshold tuning](operations.md#alarms).
 
 ### Hidden sensors
 

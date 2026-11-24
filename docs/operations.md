@@ -181,6 +181,16 @@ Every Python server start logs the Horatio version and installed Git build in
 upgraded build starts without adding an alarm event. The build comes from the
 installer's `.build` stamp; it is `unknown` when no Git build stamp is available.
 
+### History identities across upgrades
+
+An upgrade that changes sensor keys can split one physical sensor into separate
+history lines. Old records still render, but their labels may differ from new
+records. Horatio deliberately keeps those keys separate: a label that uniquely
+matches a device today does not prove which device produced an older reading.
+Neither history nor remembered alarms are automatically merged by label or GPU
+index. Display aliases change names only; they do not join series. Obsolete held
+alarms can be retired as described below.
+
 ## Alarms
 
 `events.jsonl` covers hardware and host alarms: the two root collectors' (by the `key`
@@ -229,6 +239,11 @@ belonged to.
 Held alarms also expire after 30 days without a check and at least three
 unchecked snapshots. Expiry records missing evidence, not recovery.
 
+This is intentional even when a repair removes the original evidence. Removing
+a faulty disk or DIMM, or uninstalling a GPU driver, does not by itself tell the
+tracker that the fault was fixed. Confirm the repair before retiring the old
+alarm; a missing reading alone is not a healthy reading.
+
 Each line's `timestamp` is when the thing was observed: for a collector's alarm, the time of
 the snapshot that showed it, which can be up to 30 s before the line was written. So lines
 from different sources are close to, but not strictly in, time order. A pass is written in
@@ -239,6 +254,20 @@ saving `alarms-state.json`.
 tail logs/events.jsonl                                   # what changed lately
 curl -s localhost:8080/api/alarms | python3 -m json.tool # what is wrong now, since when
 ```
+
+### Shutdown and interrupted writes
+
+The Python server waits for an in-flight alarm update to finish before releasing
+its write lock during shutdown. There is no application timeout on that wait:
+stopping the wait would not stop a thread blocked in disk I/O, and a later writer
+could otherwise race it and overwrite newer state.
+
+A hung filesystem can therefore prevent a graceful shutdown. The installed
+service relies on the host's systemd stop timeout and kill policy rather than
+adding another timeout inside Horatio. A manually launched server has no such
+service-manager deadline. Forced termination or power loss can interrupt writes;
+the alarm event log and saved alarm state are not a single atomic transaction.
+As noted above, interruption between them can repeat an event after restart.
 
 ### Dashboard alarm sources
 

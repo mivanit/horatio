@@ -30,6 +30,24 @@ intentionally removed, so missing snapshots are neutral even after a restart.
 Alarm history is retained. Reinstalling clears the marker; missing snapshots
 without it, installed units, and unreadable discovery still warn.
 
+The marker is written only after removal succeeds. A dashboard refresh between
+snapshot deletion and marker creation can briefly warn about missing snapshots.
+This small transition is intentional: marking removal complete earlier could
+conceal a failed uninstall.
+
+## Incomplete power readings
+
+Without a usable whole-machine power reading, the dashboard can sum per-PSU
+input power only when every reported PSU input has a numeric Watts reading and
+the capture is complete. A BMC `ns` or "No Reading" row is unknown, not zero.
+
+An empty PSU slot can therefore prevent a total from appearing on a machine
+without a separate total. The current readings do not reliably distinguish an
+empty slot from a failed measurement on a populated slot. Horatio deliberately
+leaves the total unavailable instead of silently understating consumption; it
+does not infer slot occupancy from a missing value. Other valid power readings
+remain usable, and a separate whole-machine reading does not need this sum.
+
 ## Requirements
 
 - Linux with systemd, python3, `lsblk`, `journalctl`, and `smartmontools` for the drive rows
