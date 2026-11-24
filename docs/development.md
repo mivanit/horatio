@@ -115,6 +115,35 @@ sh scripts/setup-lua-runtime.sh /tmp/horatio-lua-runtime
 LUA_RUNTIME=/tmp/horatio-lua-runtime uv run --locked pytest tests/lua/test_runtime.py
 ```
 
+### Installed-service and migration tests
+
+CI runs `tests/deployment/test_systemd.py` on separate disposable Ubuntu VMs for
+Python and Lua. These invoke the real installers from a checkout under the user's
+home, with the shipped systemd restrictions. Python covers fresh installation and
+v0.2.1 migration, including credentials, configuration, history and existing root
+collectors. Lua checks service restart and unattended recording by the actual
+five-minute timer; that test intentionally takes several minutes.
+
+These tests install system services and require a disposable systemd host,
+passwordless sudo, the documented backend prerequisites, and a uv-managed Python
+under the invoking user's home. They refuse an existing Horatio installation and
+are excluded from the default test suite. To run one backend:
+
+```bash
+HORATIO_SYSTEMD_TEST=1 uv run --locked pytest -v tests/deployment/test_systemd.py -k python
+HORATIO_SYSTEMD_TEST=1 uv run --locked pytest -v tests/deployment/test_systemd.py -k lua
+```
+
+The OpenWrt migration scenario installs the actual v0.2.1 tag alongside LuCI,
+then applies the documented manual source update and renamed installer. It checks
+configuration and history preservation, including a gzip archive, continued
+recording after restart, and LuCI HTTP responses. Fetch tags before running it:
+
+```bash
+git fetch --tags
+scripts/openwrt-container-test.sh migrate
+```
+
 ### Choose a test environment
 
 The appropriate environment depends on the claim being tested:
@@ -123,7 +152,8 @@ The appropriate environment depends on the claim being tested:
 |---|---|---|
 | Linux APIs and history, frontend logic, mocked installers/collectors | `make test-python` on Linux with the locked Python environment and Node.js | Actual router services or GPU hardware |
 | Lua recording locks, interrupted writes, and rotation | `make test-lua` on Linux with real Lua 5.1/Nixio and gzip | OpenWrt's service lifecycle or flash storage |
-| Router install, `--update` and the dashboard answering | `make test-openwrt-container`: the official OpenWrt rootfs booted with procd in docker or podman, with its own UCI, uhttpd, apk feeds and BusyBox; CI runs it on every push | The nginx/LuCI port handoff, real network interfaces, flash storage |
+| Installed Python/Lua services, Python upgrade, unattended Lua timer | Opt-in `tests/deployment/test_systemd.py` on disposable systemd VMs; CI runs both backends | Real GPU, disk and BMC hardware |
+| Router fresh install, `--update`, migration into the candidate and LuCI coexistence | `scripts/openwrt-container-test.sh fresh` / `migrate`: the official OpenWrt rootfs booted with procd in docker or podman, with its own UCI, uhttpd, LuCI, apk feeds and BusyBox; CI runs both scenarios | The nginx/LuCI port handoff, real network interfaces, flash storage |
 | Router installation and service readiness | A disposable, booted OpenWrt VM with its own UCI, procd, uhttpd, nginx, and BusyBox | Every custom router configuration or physical flash behavior |
 
 The Lua suite checks preservation after application/process failures, not
