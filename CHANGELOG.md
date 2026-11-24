@@ -5,6 +5,26 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 
 ## [Unreleased]
 
+- Alarm writes remain protected through repeated cancellation. A failed write
+  during shutdown no longer swallows cancellation, and an older writer cannot
+  overwrite a subsequent retirement after its caller is cancelled.
+- GPUs without a usable maximum operating temperature or T.Limit pair use the
+  reported slowdown temperature and existing warning margin. Successful NVIDIA
+  captures clear driver-mismatch evidence independently of PCI-ID parsing;
+  missing tools still leave old faults unresolved.
+- ZFS spare-state alarms identify each spare by GUID. Unavailable or faulty
+  spares warn even while the pool is ONLINE; their absent I/O counters still do
+  not prevent pool error recovery.
+- Intentional collector uninstall leaves a disabled marker, cleared on reinstall,
+  so missing snapshots stop warning without discarding alarm history. Installed
+  units, unreadable discovery, and accidental monitoring loss still warn.
+- Fan charts prefer their original labels, and temperature-history legends omit
+  physical paths unless needed to distinguish equal names. Series identities and
+  existing aliases remain intact.
+- Known console-login messages about the missing optional `pam_lastlog.so`
+  module are ignored; other PAM errors remain visible.
+- Documentation now describes endpoint discovery, unidentified fan evaluation,
+  and held-alarm expiry accurately.
 - Service uptime counting runs off the event loop for the services, alarms, and
   terminal endpoints. Uptime remains successful checks divided by total checks;
   periods without checks do not count as downtime. Service-history bucketing and
@@ -22,7 +42,7 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
   An unreadable SMART self-test log no longer clears an earlier self-test alarm.
 - GPU alarms use PCI addresses rather than display indices. USB/HID and I2C fan
   identities preserve physical topology across bus renumbering; legacy alarm
-  keys remain held until explicitly retired. Existing fan display aliases keep
+  keys remain held until explicitly retired or expired. Existing fan display aliases keep
   working, and fans lacking durable identity still report current low readings.
 - ZFS spare inventory no longer prevents error recovery. Older power records
   exclude PSU inputs from stacked components; Lua temperature history keeps

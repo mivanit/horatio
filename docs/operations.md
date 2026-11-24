@@ -211,6 +211,9 @@ while the dialog is open, refresh and review it again. This also handles obsolet
 label/index alarm keys from upgrades without guessing which current device they
 belonged to.
 
+Held alarms also expire after 30 days without a check and at least three
+unchecked snapshots. Expiry records missing evidence, not recovery.
+
 Each line's `timestamp` is when the thing was observed: for a collector's alarm, the time of
 the snapshot that showed it, which can be up to 30 s before the line was written. So lines
 from different sources are close to, but not strictly in, time order. A pass is written in
@@ -234,8 +237,10 @@ The dashboard's own source (`dashboard`) covers fans below their configured
   whether rebooting into the same kernel fixes it.
 - ZFS alarms (`zfs/` keys, from `zfs.py`) cover a pool not ONLINE, device or data
   errors, a pool never scrubbed, a scrub older than `zfs_scrub_max_days`, an
-  expected pool missing, or unreadable state while pools are expected. A scrub
-  in progress is a note.
+  expected pool missing, unhealthy spare disks, or unreadable state while pools
+  are expected. Spare state is checked separately from I/O counters; a missing
+  spare retains its prior alarm until explicitly retired or observed healthy.
+  A scrub in progress is a note.
 
 See [sensor and ZFS configuration](configuration.md) for rules, the
 [collector guide](../collector/README.md) for hardware troubleshooting and raw

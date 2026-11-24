@@ -25,7 +25,7 @@ not protect the other endpoints; see the [security model](operations.md#access-a
 | `GET /api/4/<plugin>` | Glances REST API for `cpu`, `percpu`, `mem`, `memswap`, `gpu`, `network`, `diskio`, `load`, `uptime`, `system`, and `fs`; other plugins return 404. The sensor and filesystem exceptions are below. |
 | `GET /api/4/fs` | Glances filesystems, deduplicated by device so bind mounts collapse. |
 | `GET /api/processlist` | The process list used by the UI, with arguments stripped. |
-| `GET /api/list-endpoints` | Which file-backed endpoints exist on this box: mail, storage-health, and sensors. |
+| `GET /api/list-endpoints` | Implemented API routes (relative to `/api`) and `backend: "python"`; a listed route does not imply its collector or data is available. |
 | `GET /api/version` | `{version, build}`: the running release and the commit `install.sh` installed on a git checkout (`null` otherwise). |
 | `GET /api/cpu-info` | CPU details from `/proc/cpuinfo`. |
 | `GET /api/gpu-processes` | Per-(GPU, pid) memory, plus `gpu_util_percent` and `gpu_mem_util_percent` from `nvidia-smi pmon`. Utilization is `null` when the driver had no sample for that pid, pmon is unavailable or slow, or the GPU is beyond pmon's first four. |
@@ -208,7 +208,7 @@ for installation, configuration paths, and service behavior.
 - `/api/cpu-info`, `/api/ip-info`, `/api/ping`, and `/api/version` are available;
   version `build` is always `null`.
 - `/api/list-endpoints` returns the Lua routes as `endpoints`, plus `backend: "lua"`
-  and `history_metrics`, rather than the Python file-backed endpoint list.
+  and `history_metrics` for the supported history charts.
 - Temperature readings include a history `key` derived from physical topology
   where available. Readings without a reliable, unique identity remain visible
   live but have `key: false` and are omitted from history with a log diagnostic.

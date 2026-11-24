@@ -23,6 +23,13 @@ Root-owned copies run; the checkout is never executed by a timer, so editing it 
 changes nothing until root re-runs the installer, which copies from it (so the web service's
 unit mounts the checkout read-only, `logs/` aside). Idempotent, keeps an existing config.
 
+`sudo bash install.sh --uninstall` removes the collectors and snapshots, keeps
+their configuration, and writes `/etc/horatio/collectors-disabled`. With no
+installed collector units, that marker tells the dashboard monitoring was
+intentionally removed, so missing snapshots are neutral even after a restart.
+Alarm history is retained. Reinstalling clears the marker; missing snapshots
+without it, installed units, and unreadable discovery still warn.
+
 ## Requirements
 
 - Linux with systemd, python3, `lsblk`, `journalctl`, and `smartmontools` for the drive rows
@@ -53,7 +60,7 @@ it survives re-installs. Keys:
 | `smart_timeout_s` | seconds each drive's `smartctl` may take in the 15-min run (default 60). Drives are read one at a time and the run has a 20-min limit: 180 + 300 + drives × this must stay under 1200 with room to spare, i.e. 11 drives at the default |
 | `ipmi_timeout_s`, `gpu_timeout_s` | seconds each `ipmitool` / `nvidia-smi` call in the sensors run may take before it is killed and reported as an alarm (defaults 20 and 15). Three of each must fit inside `horatio-sensors.service`'s `TimeoutStartSec=2min`, or a hung BMC gets the run killed before its alarm is written |
 | `fan_rpm_alarm_above` | alarm when any fan exceeds this RPM; `null` = off |
-| `gpu_temp_alarm_margin_c` | alarm when a GPU's core or memory temperature is within this many °C of the driver's max operating temperature for it (including the relative GPU T.Limit reading on newer cards); absent = 3, `null` = off (the slowdown, ECC and retired-page GPU alarms stay on) |
+| `gpu_temp_alarm_margin_c` | alarm when a GPU's core or memory temperature is within this many °C of the driver's max operating temperature for it (including the relative GPU T.Limit reading on newer cards). If neither core limit is usable, use the reported core slowdown temperature with the same margin; never substitute a core limit for memory. Absent = 3, `null` = off (the slowdown, ECC and retired-page GPU alarms stay on) |
 | `backup_timer` | systemd timer whose last trigger is checked (alarm after 30 h); `null` = none. Give it `Persistent=true`: systemd forgets the last trigger of other timers at reboot, so until the timer next fires the snapshot only notes `has not fired since boot` (an alarm once the box has been up 30 h) |
 
 A missing file uses built-in defaults (the shipped fault phrases, an empty defect baseline, no
@@ -133,7 +140,7 @@ ago`), so two snapshots cannot be compared by text. Each snapshot therefore also
 | `sensors-snapshot/missing`, `/stale` | the 60 s file, judged by the 15-min run |
 | `bmc/<fan\|temp\|power>/<name>@<entity>` | a BMC sensor whose status is not ok |
 | `fans/ceiling/<name>@<entity>` | `fan_rpm_alarm_above`; one key per fan, so a missing fan cannot be cleared by its neighbors |
-| `gpu/pci/<domain:bus:slot.function>/temp/<memory\|core\|tlimit>`, `/slowdown`, `/ecc`, `/retired_pages` | per GPU, by normalized PCI address; indices are display-only. Legacy index alarms remain held until retired, so a surviving GPU cannot clear another GPU's fault |
+| `gpu/pci/<domain:bus:slot.function>/temp/<memory\|core\|tlimit>`, `/slowdown`, `/ecc`, `/retired_pages` | per GPU, by normalized PCI address; indices are display-only. Legacy index alarms remain held until retired or expired, so a surviving GPU cannot clear another GPU's fault |
 | `capture/<name>`, `unparsed/<name>` | a capture that failed, a line that did not parse |
 | `collector/<part>`, `smart/dev:<name>/crash` | a part of the 15-min run that crashed; the check of one drive that crashed |
 
@@ -167,6 +174,7 @@ and the server logs a `boot` event when `boot_id` changes.
 | `fan <name>: N RPM over C RPM ceiling (boost back on, manual override, or box hot)` | only with `fan_rpm_alarm_above` set: a BMC fan setting reverted (power-cycle?), the fans are held at a manual speed above the ceiling, or the box is hot |
 | `GPU N: memory X C >= max operating Y C - M` / `GPU N: core X C >= …` | within `gpu_temp_alarm_margin_c` of the driver's limit (`nvidia-smi -q -d TEMPERATURE`). The memory has no throttle of its own: cut the load or raise the fans. The core throttles itself at its max operating temp |
 | `GPU N: T.Limit X C <= max operating Y C + M` | the driver's relative GPU thermal margin is within `gpu_temp_alarm_margin_c` of its max operating threshold. T.Limit counts downward as the GPU heats up; it is not an absolute core or memory temperature |
+| `GPU N: core X C >= slowdown Y C - M` | no usable maximum operating temperature or T.Limit pair; warn before the reported hardware slowdown threshold using the configured margin |
 | `GPU N: thermal slowdown active (sw\|hw)` | the driver (sw, at max operating temp) or the board (hw, at slowdown temp) is cutting clocks for heat: `nvidia-smi -q -d TEMPERATURE,PERFORMANCE`. Power-cap throttling is normal and never alarms. `gpus[].sw_thermal_s` / `hw_thermal_s` count the seconds since driver load |
 | `NVIDIA driver/library version mismatch: …` | observed directly by `nvidia-smi`; finish the driver update and reboot. The server may add installed/loaded version details, but the collector preserves the alarm even when those are unavailable |
 | `GPU N: K uncorrected ECC errors since driver load` / `GPU N: retired pages pending` | `nvidia-smi -q -d ECC,PAGE_RETIREMENT`; pending pages retire at the next driver reload (reboot). Repeats mean the card is failing |

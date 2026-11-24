@@ -151,7 +151,12 @@ An explicitly ruled missing fan keeps its alarm. Unreadable fans covered only by
 the default rule remain unchecked in alarm history. Old Linux display-name rules
 must be updated to ids: ordinal names can move to another device and are never
 silently reassigned. Without a stable physical path, the reading stays visible
-with a setup note and its rules are not evaluated.
+with a setup note. Current low readings still evaluate default and matching
+label/alias rules, but their alarms cannot be tracked across observations.
+
+Charts prefer configured aliases, then the sensor's original label. Physical
+identity is shown only when needed to distinguish equal display names or when
+an old fan record has no known label. This never combines separate history keys.
 
 ### Hidden sensors
 
