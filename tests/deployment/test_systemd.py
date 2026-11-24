@@ -203,8 +203,9 @@ def test_python_fresh_install(installed_host: Path) -> None:
     python_ready(app)
     before = records(app)
     run("sudo", "systemctl", "restart", "horatio.service")
+    after_restart = records(app)
     python_ready(app)
-    eventually(lambda: len(records(app)) > len(before))
+    eventually(lambda: len(records(app)) > len(after_restart))
     assert records(app)[: len(before)] == before
 
 
@@ -280,7 +281,8 @@ def test_lua_installed_service_and_unattended_timer(installed_host: Path) -> Non
     assert b"static/app.js?v=" in request("/")
     run("systemctl", "is-enabled", "--quiet", "horatio-lua-history.timer")
     run("systemctl", "is-active", "--quiet", "horatio-lua-history.timer")
-    before = records(app)
+    # Readiness can finish while the first timer-triggered write is still running.
+    before = eventually(lambda: records(app))
     trigger = run(
         "systemctl",
         "show",

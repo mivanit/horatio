@@ -129,6 +129,13 @@ def test_uninstall_and_reinstall_preserve_config_and_history(
 
     result = box.run("--uninstall")
     assert result.returncode == 0, result.stdout + result.stderr
+    stopped = [
+        event["argv"][-1]
+        for event in box.events()
+        if event["argv"][:3] == ["systemctl", "disable", "--now"]
+    ]
+    assert set(stopped[:2]) == {"horatio-collect.timer", "horatio-sensors.timer"}
+    assert set(stopped[2:]) == {"horatio-collect.service", "horatio-sensors.service"}
     marker = box.config / "collectors-disabled"
     assert marker.is_file() and marker.stat().st_mode & 0o777 == 0o644
     assert not list(box.units.iterdir()) and not box.snapshots.exists()

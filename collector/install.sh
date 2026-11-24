@@ -13,7 +13,8 @@
 set -euo pipefail
 [ "$(id --user)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
 S="$(cd "$(dirname "$0")" && pwd)"
-UNITS="horatio-collect.service horatio-collect.timer horatio-sensors.service horatio-sensors.timer"
+# Stop both timers before either service so uninstall cannot restart a collector.
+UNITS="horatio-collect.timer horatio-sensors.timer horatio-collect.service horatio-sensors.service"
 
 if [ "${1:-}" = "--uninstall" ]; then
     echo "==> removing the hardware health collectors"
