@@ -590,8 +590,9 @@ h1 {
 .alarm-events li > span { display: block; color: var(--text-muted); margin-top: 3px; }
 .alarm-note { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; }
 .alarm-note strong { font-weight: normal; color: var(--text-muted); }
-.alarm-history details, [data-reviewed] { margin: 8px 0; }
-.alarm-history summary, [data-reviewed] summary { cursor: pointer; }
+.alarm-history details, [data-reviewed], [data-hardware-details] { margin: 8px 0; }
+.alarm-history summary, [data-reviewed] summary, [data-hardware-details] summary { cursor: pointer; }
+[data-hardware-details] > .info-item { margin-top: 8px; }
 #ar-note { width: 100%; min-width: 0; font: inherit; color: var(--text-input); background: var(--bg-input); border: 1px solid var(--border-color); border-radius: var(--radius-sm); resize: vertical; padding: 6px; }
 .history-settings-popup.alarm-action-popup { width: 420px; min-width: 0; max-height: 70dvh; overflow-y: auto; }
 .alarm-action-popup .history-settings-row { flex-direction: column; align-items: stretch; gap: 6px; font-size: 12px; }

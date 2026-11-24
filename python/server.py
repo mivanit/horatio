@@ -5420,7 +5420,11 @@ def track_alarms(
         }
         if key in hidden:
             # Hidden means positively present, so earlier failed checks and
-            # absences no longer apply to this occurrence.
+            # absences no longer apply to this occurrence. Keep the evidence
+            # and review while the collector's display limit hides its details.
+            for field in ("evidence", "reviewed"):
+                if field in old:
+                    gone[field] = old[field]
             after[key] = gone
             continue
         absent: int = int(old.get("absent", 0))

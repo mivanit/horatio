@@ -168,7 +168,7 @@ are different things: one is a bulky sample on a schedule, the other a rare, sma
 |---|---|---|
 | `history.jsonl` | sample of the machine: CPU, memory, temperatures, fans, power, drives, GPUs, ping, processes | every `history.record_interval` |
 | `services.jsonl` | round of `http_targets` checks | every `services.check_interval` |
-| `events.jsonl` | alarm observations, recovery, closure/review (with optional notes), new evidence, boots and gaps | when it happens; nothing while an alarm just stays |
+| `events.jsonl` | alarm observations, clearing, closure/review (with optional notes), new evidence, boots and gaps | when it happens; nothing while an alarm just stays |
 | `alarms-state.json` | (not a log) what the alarm history currently holds, so a restart continues it | in place, about once a minute |
 | `alarm-actions/` | local agent action requests and result receipts; see [file interface](alarm-actions.md) | requests submitted by agents; results written by the server |
 | `server.log`, `glances.log` | the server's own messages | rotated at 5 MiB |
@@ -213,10 +213,11 @@ each gives in `alarm_items`) and the server's own fan rules and host checks. Eac
 An alarm that is absent only because it could not be looked at (a failing drive that is
 asleep, a BMC that timed out, a fan that stopped answering) is kept, not cleared; the
 Hardware card shows it as "not re-checked". The 60 s snapshot's alarms and the fan rules
-must be checked and healthy three times in a row to clear. An unchecked snapshot
-or another observation of the fault resets the count. Raising is immediate on the
+must be checked and absent under the current rules three times in a row to clear.
+An unchecked snapshot or another observation of the fault resets the count.
+Raising is immediate on the
 first bad reading, with no debounce, so a real fault is not delayed. A value fluctuating
-across its limit can still raise an alarm, clear after three clean readings, and
+across its limit can still raise an alarm, clear after three checks without it, and
 raise it again; each transition adds a line to `logs/events.jsonl`.
 
 For a fan, lower its `min_rpm` under `fans` in `config.json` if the minimum is too
@@ -261,8 +262,11 @@ The **H** button on Hardware health opens the full-width **Alarm history** card.
 It shares time-range controls with the other history cards. Select an alarm lane
 to read its dated events, outcomes and notes. Markers show recorded events, not
 continuous healthy/unhealthy intervals. Current concerns are shown separately,
-including those first observed before the selected range. Recovery, operator
-closure, expiry without a check, and review have different meanings.
+including those first observed before the selected range. Clearing, operator
+closure, expiry without a check, and review have different meanings. **Cleared**
+means the source checked the alarm and no longer reported it under the current
+rules. A rule change, a counter reset or old log entries aging out can clear an
+alarm without proving that hardware was repaired.
 
 The card reports incomplete reads and keeps previously loaded history when a
 refresh fails. It does not promise a complete archive for a selected time range.

@@ -5,7 +5,11 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 
 ## [Unreleased]
 
-- Alarm history has a full-width timeline and event details, including recovery,
+- Reviewed journal alarms retain their review while omitted from the collector's
+  displayed rows. History labels say "Cleared" without claiming a repair. The
+  Hardware card shows several recent events, keeps them visible when health
+  refresh fails, and preserves expanded history across refreshes.
+- Alarm history has a full-width timeline and event details, including clearing,
   operator closure and optional notes. History reads report incomplete ranges.
   Journal/BMC evidence can be marked reviewed; new evidence restores attention
   while old entries aging out do not. Web edits require the dashboard password;
@@ -16,8 +20,8 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
   distinguishing paths. Hidden sensor lines stay hidden across label changes
   while present in the chart; leaving the range resets their visibility, and an
   empty range resets all trace selections.
-- Unchecked alarm observations reset the clearing count, so recovery requires
-  consecutive checked, healthy observations.
+- Unchecked alarm observations reset the clearing count, so clearing requires
+  consecutive checked observations without the alarm.
 - Python startup logs include the Horatio version and installed Git build, so
   `logs/server.log` and the service journal record when a new build starts.
 - CI tests the minimum supported Python 3.10 as well as 3.13. Installed-service

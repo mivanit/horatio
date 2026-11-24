@@ -146,9 +146,12 @@ means earlier bytes were not inspected, so relevant events may be missing;
 whereas an unreadable file is an error. An empty event list does not mean the
 machine was healthy: an ongoing fault may produce no events in the range.
 
-`cleared` means recovery was confirmed, `retired` means an operator closed an
-unchecked alarm, and `expired` means evidence remained unavailable. `reviewed`
-records an operator review; `reopened` records new evidence after review, or
+`cleared` means the source checked the alarm and no longer reported it under the
+current rules. This can follow a healthy reading, a rule change, a counter reset
+or old log entries aging out; it does not establish that hardware was repaired.
+`retired` means an operator closed an unchecked alarm, and `expired` means
+evidence remained unavailable. `reviewed` records an operator review;
+`reopened` records new evidence after review, or
 review becoming inapplicable because complete evidence is unavailable
 (`reason: "evidence_unavailable"`).
 These are observations, not a continuous health trace. `initial: true` means

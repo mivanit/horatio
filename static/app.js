@@ -713,23 +713,15 @@ function renderHardware(data) {
     backup.push(hwRow('hw-note', `check: systemctl list-timers ${b.timer}; journalctl --unit ${backupService(b.timer)} --since -2days`));
   }
 
-  // A short teaser keeps recovered incidents visible; the history card has the
-  // timeline and full details. Recorded facts remain valid after a refresh fails.
-  const log = cachedAlarms?.recent;
-  const recent = (Array.isArray(log) ? log : [])
-    .filter(e => ['raised', 'cleared', 'retired', 'expired', 'reviewed', 'reopened'].includes(e?.event) || e?.reason === 'new_evidence')
-    .map(hwEventText).filter(Boolean).slice(-1).map(t => hwRow('hw-note', t));
-  if (recent.length && !getFreshCache('alarms', 300000)) recent.push(hwRow('hw-note', 'Showing previously fetched alarm history.'));
-  if (typeof historyMetricAvailable === 'function' && historyMetricAvailable('alarms')) {
-    recent.push('<button class="history-btn" data-history-metric="alarms">Alarm history</button>');
-  }
   const reviewOpen = content.querySelector?.('[data-reviewed]')?.open;
   const reviewedHTML = reviewed.length ? `<details data-reviewed ${reviewOpen ? 'open' : ''}><summary>Reviewed evidence (${reviewed.length})</summary>${reviewed.map(row => hwRow('hw-note', row.text) +
     (row.reviewed?.note ? hwRow('hw-note', row.reviewed.note) : '')).join('')}</details>` : '';
 
-  content.innerHTML = hwSection('Issues', issues) + hwSection('Alarm history', recent) + reviewedHTML +
-    hwSection('Memory', memory) + hwSection('Backup', backup) +
-    '<div class="hw-note">alarm rules and the full table: collector/README.md</div>';
+  const detailsOpen = content.querySelector?.('[data-hardware-details]')?.open;
+  const details = hwSection('Memory', memory) + hwSection('Backup', backup);
+  content.innerHTML = hwSection('Issues', issues) + hardwareAlarmHistoryHTML() + reviewedHTML +
+    (details ? `<details data-hardware-details ${detailsOpen ? 'open' : ''}><summary>Hardware details</summary>${details}
+      <div class="hw-note">alarm rules and the full table: collector/README.md</div></details>` : '');
   content.onclick = event => {
     const reviewButton = event.target.closest('[data-review-alarm]');
     if (reviewButton && !reviewButton.disabled) {
@@ -897,6 +889,27 @@ function hwEventText(e) {
 
 // The non-snapshot branches and a failed fetch reset what the last good snapshot
 // may have set: the red border, the "N issues" header and the snapshot age.
+function hardwareAlarmHistoryHTML() {
+  // Recorded facts remain useful when current health cannot be fetched.
+  const log = getCache('alarms')?.recent;
+  const rows = (Array.isArray(log) ? log : [])
+    .filter(e => ['raised', 'cleared', 'retired', 'expired', 'reviewed', 'reopened'].includes(e?.event) || e?.reason === 'new_evidence')
+    .map(hwEventText).filter(Boolean).slice(-3).reverse().map(text => hwRow('', text));
+  if (rows.length && !getFreshCache('alarms', 300000)) rows.push(hwRow('hw-note', 'Showing previously fetched alarm history; newer events may be missing.'));
+  if (typeof historyMetricAvailable === 'function' && historyMetricAvailable('alarms')) {
+    rows.push('<button class="history-settings-btn" data-history-metric="alarms">Alarm history</button>');
+  }
+  return hwSection('Alarm history', rows);
+}
+
+function renderHardwareError() {
+  const content = document.getElementById('hardware-content');
+  content.innerHTML = '<div class="info-item text-error">Error loading hardware health</div>' + hardwareAlarmHistoryHTML();
+  content.onclick = null;
+  resetHardwareHeader();
+  updateCardNoData('hardware', false);
+}
+
 function resetHardwareHeader() {
   updateCardCritical('hardware', false);
   const valueEl = document.getElementById('hardware-value');
@@ -1031,7 +1044,7 @@ function servicesGridHTML(d, hours, width) {
 
 // Alarm history shows recorded observations, never inferred continuous health.
 const ALARM_EVENT_LABELS = {
-  raised: ['▲', 'Raised'], cleared: ['●', 'Recovery confirmed'],
+  raised: ['▲', 'Raised'], cleared: ['●', 'Cleared'],
   retired: ['■', 'Closed by operator'], expired: ['◇', 'Expired without re-check'],
   reviewed: ['✓', 'Reviewed by operator'], reopened: ['◆', 'New evidence'], changed: ['·', 'Value changed'],
 };
@@ -1140,7 +1153,7 @@ function alarmHistoryHTML(entry, width) {
     details = `<h3>${escapeHtml(selected.text)}</h3>
       <div class="alarm-detail-status">${row ? escapeHtml(row.status) : 'History only; current state unconfirmed.'} ${button}</div>
       ${row?.reviewed?.note ? `<p class="alarm-note">Review note: ${escapeHtml(row.reviewed.note)}</p>` : ''}
-      <details><summary>Source and identity</summary><code>${escapeHtml(selected.source)} · ${escapeHtml(selected.key)}</code></details>
+      <details data-alarm-identity><summary>Source and identity</summary><code>${escapeHtml(selected.source)} · ${escapeHtml(selected.key)}</code></details>
       ${events ? `<ol class="alarm-events">${events}</ol>` : '<p class="hw-note">No events for this alarm were recorded in the selected range.</p>'}`;
   }
   const contextEvents = (Array.isArray(data.events) ? data.events : []).filter(e => ['boot', 'gap'].includes(e?.event) && Number.isFinite(Date.parse(e.timestamp)));
@@ -1150,7 +1163,7 @@ function alarmHistoryHTML(entry, width) {
     <div class="alarm-history-notice" role="status">${notice.map(text => `<p>${escapeHtml(text)}</p>`).join('')}</div>
     <div class="alarm-current"><h3>Current concerns</h3>${currentRows || `<p class="hw-note">${entry.alarmCurrentStale ? 'Current concerns unavailable.' : 'No current hardware concerns reported.'}</p>`}</div>
     ${reviewed ? `<details class="alarm-reviewed" ${entry.alarmReviewedOpen ? 'open' : ''}><summary>Reviewed evidence</summary>${reviewed}</details>` : ''}
-    <div class="alarm-legend">${[['raised', 'Raised'], ['cleared', 'Recovery confirmed'], ['retired', 'Closed'], ['expired', 'Expired'], ['reviewed', 'Reviewed'], ['reopened', 'Review reopened'], ['changed', 'Updated']].map(([event, label]) =>
+    <div class="alarm-legend">${[['raised', 'Raised'], ['cleared', 'Cleared'], ['retired', 'Closed'], ['expired', 'Expired'], ['reviewed', 'Reviewed'], ['reopened', 'Review reopened'], ['changed', 'Updated']].map(([event, label]) =>
       `<span><span class="alarm-marker-${event}" aria-hidden="true">${ALARM_EVENT_LABELS[event][0]}</span> ${label}</span>`).join('')}</div>
     ${hasEvents ? `<div class="alarm-lanes">${lanes}</div>
       <div class="alarm-axis" style="margin-left:${HISTORY_AXIS_WIDTH}px;margin-right:${HISTORY_PLOT_INSET}px">${ticks}</div>` : '<p class="no-history-data">No alarm events recorded in this range.</p>'}
@@ -1167,7 +1180,10 @@ function renderAlarmHistory(entry) {
   const focusedClass = focused?.classList.contains('alarm-lane') ? 'alarm-lane' : 'alarm-current-row';
   const reviewed = box.querySelector('.alarm-reviewed');
   if (reviewed) entry.alarmReviewedOpen = reviewed.open;
+  const identityOpen = box.querySelector('[data-alarm-identity]')?.open;
   box.innerHTML = alarmHistoryHTML(entry, box.clientWidth - HISTORY_AXIS_WIDTH - HISTORY_PLOT_INSET);
+  const identity = box.querySelector('[data-alarm-identity]');
+  if (identity) identity.open = identityOpen === true;
   const lanes = box.querySelector('.alarm-lanes');
   if (lanes) {
     // Let the scrollbar occupy the card's right padding, not the shared plot.
@@ -2003,9 +2019,7 @@ async function fetchSlowData() {
     guard('hardware', () => renderHardware(storageHealth.data));
     guard('drive-health', () => renderDriveHealth(storageHealth.data));
   } else if (storageHealth.errorType !== 'unavailable') {
-    document.getElementById('hardware-content').innerHTML = '<div class="info-item text-error">Error loading hardware health</div>';
-    resetHardwareHeader();
-    updateCardNoData('hardware', false);
+    renderHardwareError();
     setHtml(document.getElementById('drive-health-content'), '<div class="info-item text-error">Error loading drive health</div>');
     updateCardNoData('drive-health', false);
   }
@@ -3386,10 +3400,7 @@ async function refreshData(cacheKey, btn) {
           renderHardware(storageHealth.data);
           renderDriveHealth(storageHealth.data);
         } else if (storageHealth.errorType !== 'unavailable') {
-          document.getElementById('hardware-content').innerHTML =
-            '<div class="info-item text-error">Error loading hardware health</div>';
-          resetHardwareHeader();
-          updateCardNoData('hardware', false);
+          renderHardwareError();
           setHtml(document.getElementById('drive-health-content'),
             '<div class="info-item text-error">Error loading drive health</div>');
           updateCardNoData('drive-health', false);
