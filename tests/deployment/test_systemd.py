@@ -151,33 +151,35 @@ def installed_host() -> Iterator[Path]:
         try:
             yield app
         finally:
-            # Also captures failed startup/installer output in pytest's report.
-            print(
+            try:
+                # Capture diagnostics without making cleanup depend on them.
+                print(
+                    run(
+                        "sudo",
+                        "journalctl",
+                        "--no-pager",
+                        "-n",
+                        "150",
+                        *[arg for unit in UNITS for arg in ("-u", unit)],
+                    )
+                )
+                for log in (app / "logs").glob("*.log"):
+                    print(f"{log}:\n{log.read_text(errors='replace')[-12000:]}")
+            finally:
+                # Stop timers first so they cannot restart services during cleanup.
+                for unit in sorted(UNITS, key=lambda name: not name.endswith(".timer")):
+                    if Path("/etc/systemd/system", unit).exists():
+                        run("sudo", "systemctl", "disable", "--now", unit)
+                        run("sudo", "rm", "-f", "/etc/systemd/system/" + unit)
+                run("sudo", "systemctl", "daemon-reload")
+                run("sudo", "rm", "-rf", "/etc/horatio", "/var/lib/horatio")
                 run(
                     "sudo",
-                    "journalctl",
-                    "--no-pager",
-                    "-n",
-                    "150",
-                    *[arg for unit in UNITS for arg in ("-u", unit)],
+                    "rm",
+                    "-f",
+                    "/usr/local/bin/health-collect.sh",
+                    "/usr/local/bin/health-sensors.sh",
                 )
-            )
-            for log in (app / "logs").glob("*.log"):
-                print(f"{log}:\n{log.read_text(errors='replace')[-12000:]}")
-            # Disable timers first so they cannot restart services during cleanup.
-            for unit in sorted(UNITS, key=lambda name: not name.endswith(".timer")):
-                if Path("/etc/systemd/system", unit).exists():
-                    run("sudo", "systemctl", "disable", "--now", unit)
-                    run("sudo", "rm", "-f", "/etc/systemd/system/" + unit)
-            run("sudo", "systemctl", "daemon-reload")
-            run("sudo", "rm", "-rf", "/etc/horatio", "/var/lib/horatio")
-            run(
-                "sudo",
-                "rm",
-                "-f",
-                "/usr/local/bin/health-collect.sh",
-                "/usr/local/bin/health-sensors.sh",
-            )
 
 
 def python_ready(app: Path) -> None:
