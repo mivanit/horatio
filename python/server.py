@@ -309,23 +309,46 @@ _nethogs_lock: asyncio.Lock = asyncio.Lock()
 # Lock to prevent concurrent disk captures
 _disk_lock: asyncio.Lock = asyncio.Lock()
 
-# One HTTP client for every call to Glances, made by lifespan. Building a client
-# costs ~18 ms of event-loop time (httpx loads the CA bundle into a new SSL
-# context each time), which a dashboard polling ten plugins every 2 s paid per
-# request, for plaintext calls to 127.0.0.1.
+# Persistent clients avoid constructing an SSL context on every poll. Recording
+# has its own pool so browser traffic cannot use up its Glances connections.
 _glances_client_shared: httpx.AsyncClient | None = None
+_glances_client_recording: httpx.AsyncClient | None = None
 
 
 @asynccontextmanager
-async def _glances_client() -> AsyncIterator[httpx.AsyncClient]:
-    """The shared Glances client while the app runs; a throwaway one otherwise
-    (a coroutine driven without lifespan, as the unit tests do)."""
-    if _glances_client_shared is not None:
-        yield _glances_client_shared
+async def _glances_client(
+    *, recording: bool = False
+) -> AsyncIterator[httpx.AsyncClient]:
+    """Borrow the selected pool, or own a temporary client outside lifespan."""
+    shared: httpx.AsyncClient | None = (
+        _glances_client_recording if recording else _glances_client_shared
+    )
+    if shared is not None:
+        yield shared
         return
     client: httpx.AsyncClient
     async with httpx.AsyncClient() as client:
         yield client
+
+
+@asynccontextmanager
+async def _glances_clients() -> AsyncIterator[None]:
+    """Own both pools for startup, service operation, and task shutdown."""
+    global _glances_client_shared, _glances_client_recording
+    limits: httpx.Limits = httpx.Limits(
+        max_connections=20, max_keepalive_connections=10
+    )
+    async with (
+        httpx.AsyncClient(limits=limits) as interactive,
+        httpx.AsyncClient(limits=limits) as recording,
+    ):
+        _glances_client_shared = interactive
+        _glances_client_recording = recording
+        try:
+            yield
+        finally:
+            _glances_client_shared = None
+            _glances_client_recording = None
 
 
 _T = TypeVar("_T")
@@ -1796,7 +1819,7 @@ async def collect_history_sample(
     # Collect samples over time
     burst_start: float = time.monotonic()
     client: httpx.AsyncClient
-    async with _glances_client() as client:
+    async with _glances_client(recording=not live) as client:
         i: int
         for i in range(sample_count):
             e: Exception
@@ -2492,7 +2515,7 @@ async def wait_for_glances_warm(glances_url: str, timeout: float = 20.0) -> bool
     last: float | None = None
     changes: int = 0
     client: httpx.AsyncClient
-    async with _glances_client() as client:
+    async with _glances_client(recording=True) as client:
         while time.monotonic() < deadline:
             try:
                 resp: httpx.Response = await client.get(
@@ -2613,85 +2636,85 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except OSError as e:
             logger.warning("Could not tighten permissions on %s: %s", PASSWORD_FILE, e)
 
-    global _glances_client_shared
-    _glances_client_shared = httpx.AsyncClient(
-        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10)
-    )
-
-    logger.info("Starting Glances web server on port %d...", glances_port)
-    app.state.glances_process = start_glances(glances_port)
-    app.state.glances_started_at = time.time()
-    app.state.started_at = datetime.now(timezone.utc).isoformat()
-
-    # Initialize mutable history recording settings
-    app.state.history_record_interval = DEFAULT_HISTORY_RECORD_INTERVAL
-    app.state.history_sample_duration = DEFAULT_HISTORY_SAMPLE_DURATION
-    app.state.history_sample_count = DEFAULT_HISTORY_SAMPLE_COUNT
-    app.state.manual_record_min_interval = DEFAULT_MANUAL_RECORD_MIN_INTERVAL
-    # Recorder health, surfaced via /api/history so a stalled recorder is visible.
-    app.state.history_last_success = None
-    app.state.history_last_error = None
-    app.state.ping_enabled = True
-    app.state.history_processes_enabled = DEFAULT_HISTORY_PROCESSES_ENABLED
-    app.state.history_process_count = DEFAULT_HISTORY_PROCESS_COUNT
-
-    # Start background task for client disconnect detection
-    disconnect_task: asyncio.Task[None] = asyncio.create_task(
-        check_disconnected_clients()
-    )
-
-    # Start background task for history recording
-    app.state.history_task = asyncio.create_task(history_recorder())
-    logger.info(
-        "History recording enabled (every %d seconds)",
-        DEFAULT_HISTORY_RECORD_INTERVAL,
-    )
-
-    # Always on: the server's own fan rules need no collector to be installed.
-    alarm_task: asyncio.Task[None] = asyncio.create_task(alarm_tracker())
-
-    services_task: asyncio.Task[None] | None = None
-    if HTTP_TARGETS:
-        services_task = asyncio.create_task(services_checker())
-        logger.info(
-            "Service checks enabled (%d targets every %d seconds)",
-            len(HTTP_TARGETS),
-            SERVICES_CHECK_INTERVAL,
-        )
-
-    # Give Glances time to start
-    await asyncio.sleep(2)
-
-    # Record initial sample in background (non-blocking, last step of startup)
-    initial_sample_task: asyncio.Task[None] = asyncio.create_task(
-        record_initial_sample(app.state.glances_url)
-    )
-
-    yield  # Server runs here
-
-    # Shutdown (runs when Ctrl+C is pressed)
-    task: asyncio.Task[None]
-    for task in [
-        initial_sample_task,
-        disconnect_task,
-        app.state.history_task,
-        alarm_task,
-        *([services_task] if services_task else []),
-    ]:
-        task.cancel()
+    async with _glances_clients():
+        tasks: list[asyncio.Task[None]] = []
+        process_started: bool = False
+        app.state.history_task = None
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
+            logger.info("Starting Glances web server on port %d...", glances_port)
+            app.state.glances_process = start_glances(glances_port)
+            process_started = True
+            app.state.glances_started_at = time.time()
+            app.state.started_at = datetime.now(timezone.utc).isoformat()
 
-    if _glances_client_shared is not None:
-        shared: httpx.AsyncClient = _glances_client_shared
-        _glances_client_shared = None
-        await shared.aclose()
+            # Initialize mutable history recording settings
+            app.state.history_record_interval = DEFAULT_HISTORY_RECORD_INTERVAL
+            app.state.history_sample_duration = DEFAULT_HISTORY_SAMPLE_DURATION
+            app.state.history_sample_count = DEFAULT_HISTORY_SAMPLE_COUNT
+            app.state.manual_record_min_interval = DEFAULT_MANUAL_RECORD_MIN_INTERVAL
+            # Recorder health, surfaced via /api/history so a stalled recorder is visible.
+            app.state.history_last_success = None
+            app.state.history_last_error = None
+            app.state.ping_enabled = True
+            app.state.history_processes_enabled = DEFAULT_HISTORY_PROCESSES_ENABLED
+            app.state.history_process_count = DEFAULT_HISTORY_PROCESS_COUNT
 
-    stop_glances(
-        app.state.glances_process
-    )  # the watchdog may have replaced the original
+            # Start background task for client disconnect detection
+            disconnect_task: asyncio.Task[None] = asyncio.create_task(
+                check_disconnected_clients()
+            )
+
+            tasks.append(disconnect_task)
+
+            # Start background task for history recording
+            app.state.history_task = asyncio.create_task(history_recorder())
+            tasks.append(app.state.history_task)
+            logger.info(
+                "History recording enabled (every %d seconds)",
+                DEFAULT_HISTORY_RECORD_INTERVAL,
+            )
+
+            # Always on: the server's own fan rules need no collector to be installed.
+            alarm_task: asyncio.Task[None] = asyncio.create_task(alarm_tracker())
+
+            tasks.append(alarm_task)
+
+            services_task: asyncio.Task[None] | None = None
+            if HTTP_TARGETS:
+                services_task = asyncio.create_task(services_checker())
+                tasks.append(services_task)
+                logger.info(
+                    "Service checks enabled (%d targets every %d seconds)",
+                    len(HTTP_TARGETS),
+                    SERVICES_CHECK_INTERVAL,
+                )
+
+            # Give Glances time to start
+            await asyncio.sleep(2)
+
+            # Record initial sample in background (non-blocking, last step of startup)
+            initial_sample_task: asyncio.Task[None] = asyncio.create_task(
+                record_initial_sample(app.state.glances_url)
+            )
+
+            tasks.append(initial_sample_task)
+
+            yield  # Server runs here
+        finally:
+            # Interval changes can replace the recorder while the app is running.
+            # Drain the current task as well as any task started before a failure.
+            if (
+                app.state.history_task is not None
+                and app.state.history_task not in tasks
+            ):
+                tasks.append(app.state.history_task)
+            task: asyncio.Task[None]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if process_started:
+                # The watchdog may have replaced the original subprocess.
+                stop_glances(app.state.glances_process)
 
 
 # No /docs, /redoc, /openapi.json: nothing uses them and the service is unauthenticated.
@@ -3656,19 +3679,48 @@ async def ping() -> Response:
     )
 
 
-def services_snapshot(now: float) -> dict[str, Any]:
+async def services_snapshot(now: float) -> dict[str, Any]:
+    """Capture state on the loop, then count successful checks in a worker.
+
+    Round dictionaries are never mutated after publication by _note_service_round;
+    copying the deque is enough to isolate append/prune operations. Latest results
+    are small and copied too, so the worker never reads changing service state.
+    """
+    return await asyncio.to_thread(
+        _services_snapshot,
+        now,
+        tuple(HTTP_TARGETS),
+        tuple(_services_rounds),
+        {name: dict(latest) for name, latest in _services_latest.items()},
+        _services_started,
+        SERVICES_CHECK_INTERVAL,
+        SERVICES_TIMEOUT,
+        tuple(SERVICES_UPTIME_HOURS),
+    )
+
+
+def _services_snapshot(
+    now: float,
+    configured: tuple[HttpTarget, ...],
+    rounds: tuple[ServiceRound, ...],
+    latest_by_name: dict[str, dict[str, Any]],
+    started: float | None,
+    interval: int,
+    timeout: float,
+    windows: Sequence[int],
+) -> dict[str, Any]:
     """The Services card's data: each configured target's newest result and its
     uptime counts over SERVICES_UPTIME_HOURS. A target not checked yet has
     ``ok: null``."""
-    names: list[str] = [t.name for t in HTTP_TARGETS]
+    names: list[str] = [t.name for t in configured]
     uptime: dict[str, dict[str, dict[str, int]]] = services_uptime(
-        _services_rounds, names, now
+        rounds, names, now, windows
     )
-    down_since: dict[str, float | None] = services_down_since(_services_rounds, names)
+    down_since: dict[str, float | None] = services_down_since(rounds, names)
     targets: list[dict[str, Any]] = []
     target: HttpTarget
-    for target in HTTP_TARGETS:
-        latest: dict[str, Any] = _services_latest.get(target.name, {})
+    for target in configured:
+        latest: dict[str, Any] = latest_by_name.get(target.name, {})
         targets.append(
             {
                 "name": target.name,
@@ -3693,16 +3745,14 @@ def services_snapshot(now: float) -> dict[str, Any]:
     marks: list[float] = [
         t
         for t in (
-            _services_rounds[-1][0] if _services_rounds else None,
-            _services_started,
+            rounds[-1][0] if rounds else None,
+            started,
         )
         if t is not None
     ]
-    stale: bool = bool(marks) and (
-        now - max(marks) > 3 * SERVICES_CHECK_INTERVAL + 4 * SERVICES_TIMEOUT
-    )
+    stale: bool = bool(marks) and (now - max(marks) > 3 * interval + 4 * timeout)
     return {
-        "interval": SERVICES_CHECK_INTERVAL,
+        "interval": interval,
         "now": now,
         "stale": stale,
         "targets": targets,
@@ -3714,7 +3764,7 @@ async def services() -> Response:
     """Each http_targets service: up or down at the last check, and uptime over
     the last hour, day and week."""
     return Response(
-        content=json.dumps(services_snapshot(time.time())),
+        content=json.dumps(await services_snapshot(time.time())),
         media_type="application/json",
     )
 
@@ -5793,7 +5843,7 @@ async def alarms() -> Response:
         state,
         sensors,
         hw["alarm_items"],
-        services_snapshot(now),
+        await services_snapshot(now),
         _alarm_memory,
         events,
     )
@@ -7354,11 +7404,10 @@ async def text_view(
             logger.warning("/text: live sample failed, using the newest record: %s", e)
     if style == "simple":
         style, color = "ascii", "off"
-    # Read here, on the event loop: the render below runs in a thread, and the
-    # checker appends to the rounds this iterates.
+    # Capture service state before rendering; uptime counting runs in a worker.
     services_now: list[dict[str, Any]] = []
     if view != "history":
-        snapshot: dict[str, Any] = services_snapshot(time.time())
+        snapshot: dict[str, Any] = await services_snapshot(time.time())
         # Stale results draw as "?", not as the last UP or DOWN.
         services_now = [
             {**t, "ok": None} if snapshot["stale"] else t for t in snapshot["targets"]
