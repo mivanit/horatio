@@ -558,6 +558,7 @@ const historyCards = new Map(); // metric -> { card, chart }
 
 // Endpoint discovery: which API endpoints does this backend support?
 let availableEndpoints = null; // null = not yet loaded (assume all available), Set = loaded
+let availableHistoryMetrics = null; // optional backend inventory; older servers use endpoint dependencies
 
 // Map card IDs to the API endpoints they require (paths relative to /api)
 const CARD_ENDPOINT_DEPS = {
@@ -581,6 +582,7 @@ async function fetchEndpointList() {
       const data = r.data;
       if (Array.isArray(data.endpoints)) {
         availableEndpoints = new Set(data.endpoints);
+        availableHistoryMetrics = Array.isArray(data.history_metrics) ? new Set(data.history_metrics) : null;
       }
     }
   } catch (e) {
@@ -604,6 +606,10 @@ function hideUnavailableCards() {
     }
   }
 
+  document.querySelectorAll('[data-history-metric]').forEach(button => {
+    button.style.display = historyMetricAvailable(button.dataset.historyMetric) ? '' : 'none';
+  });
+
   updateConnectionStatus();
 }
 
@@ -612,6 +618,19 @@ function hideUnavailableCards() {
 function servicesConfigured() {
   return Array.isArray(dashboardConfig.http_targets) && dashboardConfig.http_targets.length > 0 &&
     (availableEndpoints === null || availableEndpoints.has('/services'));
+}
+
+// History capability is independent of whether a particular device has data.
+// Explicit inventories cover derived fields such as CPU clock; endpoint checks
+// keep older servers compatible without coupling to a backend's name.
+function historyMetricAvailable(metric) {
+  const info = HISTORY_METRICS[metric];
+  if (!info || (availableHistoryMetrics !== null && !availableHistoryMetrics.has(metric))) return false;
+  if (info.grid && !servicesConfigured()) return false;
+  if (availableEndpoints === null) return true;
+  const endpoint = info.grid ? info.grid.slice(4) : info.sideField ? '/history/field/' + info.sideField : '/history';
+  if (!availableEndpoints.has(endpoint)) return false;
+  return (CARD_ENDPOINT_DEPS[metric] || []).every(ep => availableEndpoints.has(ep));
 }
 
 // Helper to fetch with error tracking and timeout: returns {data, ok, errorType?, status?}
@@ -700,7 +719,8 @@ function getFreshSnapshot(key, maxAgeMs) {
 // "Core N" and socket 1's "Core N <index>") collapse to one min / median / mean /
 // max, for the live bars and the history band alike. `entries` are {label, value}
 // objects; returns the aggregate (null when there are no cores) and the rest.
-const CORE_TEMP_LABEL = /^Core \d+( \d+)?$/;
+// Lua history appends the physical device/channel in brackets.
+const CORE_TEMP_LABEL = /^Core \d+( \d+)?(?: \[[^\]]+\])?$/;
 // min/max/mean/median of a list of numbers (the "band" shape used for the CPU
 // cores and, in the fans history's range mode, for the fans); null when empty.
 function rangeStats(nums) {

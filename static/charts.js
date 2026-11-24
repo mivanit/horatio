@@ -478,8 +478,10 @@ function getDriveUsageColor(percent) {
 // fan, power): a display name, e.g. {"loc1": "I350 NIC", "f71889ed fan1": "CPU fan"};
 // sensor_labels wins where both name a sensor. Display only: history records keep the sensor's own
 // name, so a series does not split in two on the day it is renamed.
-function tempDisplayLabel(label) {
-  const alias = [dashboardConfig.sensor_labels?.[label], dashboardConfig.temp_labels?.[label]]
+const fanDisplayNames = new Map(); // display only; never changes a series or alarm key
+function tempDisplayLabel(label, originalLabel = fanDisplayNames.get(label) ?? label.replace(/ \[[^\]]+\]$/, '')) {
+  const alias = [dashboardConfig.sensor_labels?.[label], dashboardConfig.temp_labels?.[label],
+    dashboardConfig.sensor_labels?.[originalLabel], dashboardConfig.temp_labels?.[originalLabel]]
     .find(a => typeof a === 'string' && a);
   if (alias) return alias;
   // Stable fan identities retain the device path in records, while the label

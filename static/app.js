@@ -590,6 +590,8 @@ function renderHardware(data) {
 
   data ??= {};
   const stateKnown = data.status === 'ok' || data.status === 'stale';
+  const stateAbsent = data.status === 'missing' && data.expected === false;
+  const stateUnknown = !stateKnown && !stateAbsent;
   const stale = data.status === 'stale';
   const serverUnknown = data.sensor_status != null && data.sensor_status !== 'ok';
   const ageText = stateKnown ? snapshotAgeText(data) : '';
@@ -601,7 +603,9 @@ function renderHardware(data) {
   // fans / temps / power cards). Stale, missing, errored or never fetched means
   // its alarm list is unknown, not clear: flagged like a stale state.json.
   const sen = getFreshSnapshot('sensors', 300000);
-  const sensorsUnknown = sen?.status !== 'ok';
+  const sensorResponse = getFreshCache('sensors', 300000);
+  const sensorsAbsent = sensorResponse?.status === 'missing' && sensorResponse.expected === false;
+  const sensorsUnknown = sen?.status !== 'ok' && !sensorsAbsent;
   // Each alarm with its entry: `alarm_items` runs parallel to `alarms`, and the
   // server adds since when from its alarm history. A collector that gives its
   // alarms no keys leaves the text alone.
@@ -616,12 +620,13 @@ function renderHardware(data) {
   // host's richer diagnosis when both sources identify this exact fault.
   const hostMismatch = serverRows.some(r => r.item?.key === 'gpu/driver-mismatch');
   const keepDiagnosis = row => !hostMismatch || row.item?.key !== 'gpu/driver-mismatch';
-  const snapshots = [...(stateKnown ? [data] : []), ...(sensorsUnknown ? [] : [sen])];
+  const snapshots = [...(stateKnown ? [data] : []), ...(sen ? [sen] : [])];
   const rows = [...snapshots.flatMap(withItems).filter(keepDiagnosis), ...serverRows];
   const alarms = rows.map(r => r.text);
   // Retained faults that could not be checked are never treated as clear.
-  const unchecked = snapshots.flatMap(snap => Array.isArray(snap.alarm_held) ? snap.alarm_held : [])
-    .concat(Array.isArray(data.sensor_alarm_held) ? data.sensor_alarm_held : [])
+  const unchecked = snapshots.flatMap(snap => (Array.isArray(snap.alarm_held) ? snap.alarm_held : [])
+    .map(h => ({ ...h, source: snap === data ? 'state' : 'sensors' })))
+    .concat((Array.isArray(data.sensor_alarm_held) ? data.sensor_alarm_held : []).map(h => ({ ...h, source: 'dashboard' })))
     .filter(h => typeof h?.text === 'string' && h.unchecked_since != null &&
       (!hostMismatch || h.key !== 'gpu/driver-mismatch'));
   const info = [...snapshots.flatMap(snap => Array.isArray(snap.info) ? snap.info : []), ...serverNotes];
@@ -629,22 +634,26 @@ function renderHardware(data) {
   // Header: the verdict, and the snapshot's OWN age (not when it was fetched).
   const valueEl = document.getElementById('hardware-value');
   valueEl.textContent = alarms.length ? `${alarms.length} issue${alarms.length === 1 ? '' : 's'}` :
-    unchecked.length ? `${unchecked.length} unchecked` : !stateKnown ? 'snapshot unavailable' :
-    stale ? 'stale' : serverUnknown ? `checks ${data.sensor_status}` : sensorsUnknown ? 'sensors stale' : 'all clear';
+    unchecked.length ? `${unchecked.length} unchecked` : stateUnknown ? 'snapshot unavailable' :
+    stale ? 'stale' : serverUnknown ? `checks ${data.sensor_status}` : sensorsUnknown ? 'sensors stale' :
+    stateAbsent || sensorsAbsent ? 'no detected issues' : 'all clear';
   valueEl.className = 'value ' + (alarms.length ? 'text-error' :
-    !stateKnown || stale || serverUnknown || sensorsUnknown || unchecked.length ? 'text-warning' : 'text-success');
+    stateUnknown || stale || serverUnknown || sensorsUnknown || unchecked.length ? 'text-warning' :
+    stateAbsent || sensorsAbsent ? '' : 'text-success');
   document.querySelector('#hardware-card .cache-time').textContent = ageText;
 
   // Issues: alarms in red, then the collector's info notes in grey. A stale
   // snapshot means the alarm list is unknown, not clear: never say "no alarms".
   // Drive-specific notes ("sdb: no self-test on record") are on Drive Health.
   const issues = [];
-  if (!stateKnown) {
+  if (stateUnknown) {
     const text = data.status === 'missing'
       ? `No health snapshot yet (${data.path || ''}); is ${collector} installed?`
       : `Cannot read the ${collector} snapshot${data.detail ? ': ' + data.detail : ''}`;
     issues.push(hwRow('text-warning', text));
   }
+  if (stateAbsent) issues.push(hwRow('hw-note', 'Hardware collector not configured.'));
+  if (sensorsAbsent) issues.push(hwRow('hw-note', 'Sensors collector not configured.'));
   if (stale) issues.push(hwRow('text-warning', `${ageText} (stale); is ${collector} running?`));
   if (sensorsUnknown) {
     const why = sen ? `sensors snapshot ${sen.status}${sen.age_sec != null ? ` (${Math.round(sen.age_sec / 60)} min old)` : ''}` : 'no fresh sensors snapshot';
@@ -659,11 +668,17 @@ function renderHardware(data) {
     const hint = hwHint(text, data);
     if (hint && hint !== (i + 1 < rows.length ? hwHint(rows[i + 1].text, data) : null)) issues.push(hwRow('hw-note', `check: ${hint}`));
   });
-  unchecked.forEach(h => {
+  const retirement = getFreshCache('alarms', 300000)?.retirement;
+  unchecked.forEach((h, index) => {
     const from = sinceText(h.since), last = sinceText(h.unchecked_since);
     issues.push(hwRow('text-warning', `${h.text}: not re-checked${last ? ` since ${last}` : ''}${from ? `, alarm since ${from}` : ''}`));
+    if (retirement?.supported && typeof h.key === 'string' && Number.isFinite(h.since) && Number.isFinite(h.unchecked_since)) {
+      const enabled = retirement.password_configured === true;
+      issues.push(`<button class="history-settings-btn" data-retire-alarm="${index}" ${enabled ? '' : 'disabled'}
+        title="${enabled ? 'Retire an unchecked alarm for a device you deliberately removed' : 'Configure the settings password to retire alarms'}">Retire</button>`);
+    }
   });
-  if (stateKnown && !stale && !serverUnknown && !sensorsUnknown && alarms.length === 0 && unchecked.length === 0) issues.push(hwRow('text-success', 'no alarms'));
+  if (stateKnown && !stale && !serverUnknown && !sensorsUnknown && !sensorsAbsent && alarms.length === 0 && unchecked.length === 0) issues.push(hwRow('text-success', 'no alarms'));
   info.filter(i => !/^(sd[a-z]+|nvme\d+n\d+):/.test(i)).forEach(i => issues.push(hwRow('hw-note', i)));
 
   // Collector details are usable only with a valid snapshot timestamp.
@@ -696,12 +711,118 @@ function renderHardware(data) {
   content.innerHTML = hwSection('Issues', issues) + hwSection('Recent changes', recent) +
     hwSection('Memory', memory) + hwSection('Backup', backup) +
     '<div class="hw-note">alarm rules and the full table: collector/README.md</div>';
+  content.onclick = event => {
+    const button = event.target.closest('[data-retire-alarm]');
+    if (button && !button.disabled) {
+      const held = unchecked[Number(button.dataset.retireAlarm)];
+      if (held) openAlarmRetirement(held);
+    }
+  };
   // no-data must be cleared first: updateCardWarning bails out (stripping
   // .warning) while .no-data is set, and nothing else ever clears .no-data.
   updateCardNoData('hardware', true);
   // Any alarm is red; a stale snapshot (alarms unknown, not clear) is orange.
   updateCardCritical('hardware', alarms.length > 0);
-  updateCardWarning('hardware', !stateKnown || stale || serverUnknown || sensorsUnknown || unchecked.length ? 1 : 0, 0);
+  updateCardWarning('hardware', stateUnknown || stale || serverUnknown || sensorsUnknown || unchecked.length ? 1 : 0, 0);
+}
+
+// Explicit retirement is for intentionally removed devices, not temporary
+// read failures. The server checks both timestamps so an old dialog cannot
+// retire a fault which has since returned or changed.
+let alarmRetirementPopup = null;
+function openAlarmRetirement(alarm) {
+  closeAlarmRetirement();
+  const popup = document.createElement('div');
+  popup.className = 'history-settings-popup';
+  popup.setAttribute('role', 'dialog');
+  popup.setAttribute('aria-label', 'Retire unchecked alarm');
+  popup.style.left = '50%';
+  popup.style.top = '25%';
+  popup.style.transform = 'translateX(-50%)';
+  popup.style.maxWidth = 'min(420px, calc(100vw - 32px))';
+  popup.innerHTML = `
+    <div class="history-settings-header">Retire unchecked alarm</div>
+    <div class="hw-note" id="ar-alarm"></div>
+    <div class="hw-note">Use this for a device you deliberately removed. Its history stays, and future faults can raise new alarms.</div>
+    <label class="history-settings-row">Settings password
+      <input type="password" class="history-settings-input" id="ar-password" autocomplete="current-password">
+    </label>
+    <div class="history-settings-buttons">
+      <button class="history-settings-btn" id="ar-cancel">Cancel</button>
+      <button class="history-settings-btn" id="ar-confirm">Retire alarm</button>
+    </div>
+    <div class="history-settings-status" id="ar-status" role="status"></div>`;
+  popup.alarm = { source: alarm.source, key: alarm.key, since: alarm.since, unchecked_since: alarm.unchecked_since };
+  popup.querySelector('#ar-alarm').textContent = alarm.text;
+  popup.querySelector('#ar-cancel').addEventListener('click', () => closeAlarmRetirement(popup));
+  popup.querySelector('#ar-confirm').addEventListener('click', () => submitAlarmRetirement(popup));
+  popup.querySelector('#ar-password').addEventListener('keydown', event => {
+    if (event.key === 'Enter') submitAlarmRetirement(popup);
+  });
+  popup.addEventListener('keydown', event => { if (event.key === 'Escape') closeAlarmRetirement(popup); });
+  document.body.appendChild(popup);
+  alarmRetirementPopup = popup;
+  popup.querySelector('#ar-password').focus();
+}
+
+function closeAlarmRetirement(popup = alarmRetirementPopup) {
+  if (popup && alarmRetirementPopup === popup) {
+    popup.querySelector('#ar-password').value = '';
+    popup.remove();
+    alarmRetirementPopup = null;
+  }
+}
+
+async function refreshAlarmViews() {
+  const requests = [['alarms', '/api/alarms'], ['sensors', '/api/sensors'], ['storageHealth', '/api/storage-health']];
+  const results = await Promise.all(requests.map(async ([key, url]) => {
+    const result = await safeFetch(url, {});
+    if (result.ok) updateCache(key, result.data);
+    return result;
+  }));
+  if (results[2].ok) renderHardware(results[2].data);
+  return results.every(result => result.ok);
+}
+
+async function submitAlarmRetirement(popup = alarmRetirementPopup) {
+  if (!popup || alarmRetirementPopup !== popup || popup.querySelector('#ar-confirm').disabled) return;
+  const password = popup.querySelector('#ar-password');
+  const confirm = popup.querySelector('#ar-confirm');
+  const status = popup.querySelector('#ar-status');
+  if (!password.value) {
+    status.textContent = 'Settings password is required';
+    password.focus();
+    return;
+  }
+  confirm.disabled = password.disabled = true;
+  status.textContent = 'Retiring alarm…';
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  let finished = false;
+  try {
+    const response = await fetch('/api/alarms/retire', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
+      body: JSON.stringify({ ...popup.alarm, password: password.value }),
+    });
+    const body = await response.json();
+    if (response.ok || response.status === 409) {
+      finished = true;
+      password.value = '';
+      const refreshed = await refreshAlarmViews();
+      if (alarmRetirementPopup !== popup) return;
+      if (response.ok && refreshed) { closeAlarmRetirement(popup); return; }
+      status.textContent = response.ok ? 'Alarm retired. Refresh failed; the next poll will retry.' :
+        'This alarm changed. Close this dialog and review its current state before retiring it.';
+      popup.querySelector('#ar-cancel').textContent = 'Close';
+    } else if (alarmRetirementPopup === popup) {
+      status.textContent = body.error || 'Could not retire this alarm';
+    }
+  } catch (error) {
+    if (alarmRetirementPopup === popup) status.textContent = 'Could not confirm retirement. Refresh before retrying.';
+  } finally {
+    clearTimeout(timeout);
+    if (alarmRetirementPopup === popup && !finished) confirm.disabled = password.disabled = false;
+  }
 }
 
 // One line of the event log (README: "What is kept in logs/") as text, or null for a kind
@@ -716,6 +837,7 @@ function hwEventText(e) {
     case 'raised': return `${when} ${e.initial ? 'first seen' : 'raised'}: ${e.text}`;
     case 'changed': return `${when} ${e.was ?? '?'} -> ${e.value ?? '?'}: ${e.text}`;
     case 'cleared': return `${when} cleared${span(e.active_for_s)}${e.after_boot ? ' (reboot)' : ''}: ${e.text}`;
+    case 'retired': return `${when} retired by operator: ${e.text}`;
     case 'expired': return `${when} dropped, unchecked for 30 days: ${e.text}`;
     case 'boot': return `${when} booted${e.kernel ? ` ${e.kernel}` : ''}` +
       (e.previous?.clean === false ? `; the boot before ended without a shutdown${e.previous.ended ? ` at ${e.previous.ended}` : ''}` : '');
@@ -2211,7 +2333,10 @@ async function fetchDataOnce() {
         label: s.label, value: s.value,
         warning: s.warning ?? thresholds.temp_celsius, critical: s.critical ?? 90
       }));
-      sensors.data.filter(s => s.type === 'fan_speed' && s.value != null).forEach(s => fans.push(s));
+      sensors.data.filter(s => s.type === 'fan_speed' && s.value != null).forEach(s => {
+        if (s.id) fanDisplayNames.set(s.id, s.label);
+        fans.push(s);
+      });
       // hwmon power (the server's reader; Glances and the Lua backend have none).
       // `total` is true only for a reading of the whole machine (an ACPI power meter).
       sensors.data.filter(s => s.type === 'power' && s.value != null).forEach(s =>
@@ -2362,7 +2487,7 @@ async function fetchDataOnce() {
       // dataset holds its own unit's values and null elsewhere, so every bar has
       // exactly one, measured against its own axis.
       const pct = f => f.unit === '%';
-      charts.fans.data.labels = fans.map(f => tempDisplayLabel(f.id || f.label));
+      charts.fans.data.labels = fans.map(f => tempDisplayLabel(f.id || f.label, f.label));
       charts.fans.data.datasets[0].data = fans.map(f => pct(f) ? null : f.value || 0);
       charts.fans.data.datasets[1].data = fans.map(f => pct(f) ? f.value : null);
       charts.fans.options.scales.y1.display = fans.some(pct);
@@ -3297,13 +3422,14 @@ function fetchHistoryData(hours = defaultHistoryHours, { force = false, field = 
 // Markup for a failed history fetch — visibly distinct from the "No history
 // data" empty state so a fetch failure never masquerades as "no data".
 function historyErrorHTML(errorType) {
-  const reason = errorType === 'timeout'
-    ? 'The request timed out (the range may be very large).'
+  const reason = errorType === 'unavailable'
+    ? 'This backend does not provide this history metric.'
+    : errorType === 'timeout' ? 'The request timed out (the range may be very large).'
     : 'Could not reach the server.';
   return `
     <div class="no-history-data history-error">
       <p>History unavailable</p>
-      <p class="hint">${reason} It will retry on the next refresh.</p>
+      <p class="hint">${reason}${errorType === 'unavailable' ? '' : ' It will retry on the next refresh.'}</p>
     </div>
   `;
 }
@@ -3436,7 +3562,10 @@ function powerTotalKey(record) {
 function powerStack(record) {
   if (!record?.power) return null;
   const totals = new Set(powerTotalKeys(record));
-  const parts = Object.fromEntries(Object.entries(record.power).filter(([k]) => !totals.has(k)));
+  // Older collectors recorded per-PSU inputs beside components. Keep those
+  // readings in raw history, but never stack them beside CPU/GPU consumption.
+  const parts = Object.fromEntries(Object.entries(record.power).filter(([k]) =>
+    !totals.has(k) && !/^(ps|psu|pws)[ _]?\d+.*\binput\b/i.test(k)));
   const total = powerTotalKey(record);
   if (total) {
     const measured = Object.values(parts).reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0);
@@ -4146,7 +4275,7 @@ async function createHistoryCard(metric, hours = defaultHistoryHours) {
   }
 
   const metricInfo = HISTORY_METRICS[metric];
-  if (!metricInfo) return;
+  if (!metricInfo || !historyMetricAvailable(metric)) return;
 
   const cardId = `history-${metric}-${Date.now()}`;
   const canvasId = `chart-${cardId}`;
@@ -4453,7 +4582,7 @@ function removeHistoryCard(metric) {
 
 // Show history for all metrics
 function showAllHistory() {
-  const metrics = Object.keys(HISTORY_METRICS).filter(m => !HISTORY_METRICS[m].grid || servicesConfigured());
+  const metrics = Object.keys(HISTORY_METRICS).filter(historyMetricAvailable);
   metrics.forEach(metric => {
     if (!historyCards.has(metric)) {
       createHistoryCard(metric);
@@ -4684,6 +4813,12 @@ async function loadHistorySettings(popup = historySettingsPopup) {
   }
   fillHistorySettings(popup, data);
   popup.settingsDefaults = data.defaults;
+  if (data.editable === false) {
+    setHistorySettingsDisabled(popup, true);
+    status.textContent = data.detail || 'Settings are read-only on this backend. Edit its config file to change them.';
+    status.className = 'history-settings-status';
+    return;
+  }
   setHistorySettingsDisabled(popup, false);
   status.textContent = '';
 
