@@ -748,7 +748,15 @@ part(failed_units)
 JOURNAL_MAX = 8      # distinct messages shown one by one; past that, a count
 def journal():
     JOURNAL_IGNORE = re.compile(r"ACPI Error|kernel:\s*$|pam_unix\(sudo:auth\)|a password is required")
-    ignore = [JOURNAL_IGNORE]
+    # Ubuntu's login PAM configuration can still name the removed lastlog
+    # module. Ignore only that missing-module pair, not other PAM failures.
+    lastlog = r"(?:/(?:usr/)?lib(?:64)?/(?:[^/\s:]+/)?security/)?pam_lastlog\.so"
+    LOGIN_LASTLOG = re.compile(
+        r"^\S+ \S+ login(?:\[\d+\])?:\s+PAM (?:"
+        rf"unable to dlopen\({lastlog}\): {lastlog}: cannot open shared object file: No such file or directory"
+        rf"|adding faulty module: {lastlog})\s*$"
+    )
+    ignore = [JOURNAL_IGNORE, LOGIN_LASTLOG]
     for pattern in journal_ignore if isinstance(journal_ignore, list) else [journal_ignore]:
         try:
             ignore.append(re.compile(pattern))

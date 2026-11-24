@@ -107,9 +107,10 @@ rapl > "$tmp/rapl2.txt" 2>> "$tmp/rapl.err" || echo "exit $?" >> "$tmp/rapl.err"
 # GPU headed by its PCI bus id (the CSV's pci.bus_id, which pairs the two).
 # nvidia-smi installed but the driver not loaded fails both captures: a
 # `collector:` alarm, on purpose. No nvidia-smi at all: no rows, no alarm.
+# gpu-ok records an actual successful query, including a successful retry.
 if command -v nvidia-smi > /dev/null; then
     gpu_query=index,pci.bus_id,name,temperature.gpu,temperature.memory,clocks_event_reasons.sw_thermal_slowdown,clocks_event_reasons.hw_thermal_slowdown,clocks_event_reasons.hw_slowdown,clocks_event_reasons_counters.sw_thermal_slowdown,clocks_event_reasons_counters.hw_thermal_slowdown,ecc.errors.uncorrected.volatile.total,retired_pages.pending,power.draw,power.limit
-    timeout "$GPU_TIMEOUT" nvidia-smi --query-gpu="$gpu_query" --format=csv,noheader,nounits > "$tmp/gpu.txt" 2> "$tmp/gpu.err" || {
+    timeout "$GPU_TIMEOUT" nvidia-smi --query-gpu="$gpu_query" --format=csv,noheader,nounits > "$tmp/gpu.txt" 2> "$tmp/gpu.err" && : > "$tmp/gpu-ok" || {
         rc=$?
         # Older drivers reject these optional counters instead of returning N/A.
         # Retry only that query error; ordinary driver failures remain alarms.
@@ -117,7 +118,7 @@ if command -v nvidia-smi > /dev/null; then
             gpu_query=${gpu_query//clocks_event_reasons_counters.sw_thermal_slowdown,/}
             gpu_query=${gpu_query//clocks_event_reasons_counters.hw_thermal_slowdown,/}
             : > "$tmp/gpu-no-counters"
-            timeout "$GPU_TIMEOUT" nvidia-smi --query-gpu="$gpu_query" --format=csv,noheader,nounits > "$tmp/gpu.txt" 2> "$tmp/gpu.err" || echo "exit $?" >> "$tmp/gpu.err"
+            timeout "$GPU_TIMEOUT" nvidia-smi --query-gpu="$gpu_query" --format=csv,noheader,nounits > "$tmp/gpu.txt" 2> "$tmp/gpu.err" && : > "$tmp/gpu-ok" || echo "exit $?" >> "$tmp/gpu.err"
         else
             echo "exit $rc" >> "$tmp/gpu.err"
         fi
@@ -202,6 +203,10 @@ if os.path.exists(os.path.join(tmp, "no-bmc")):
     state["info"].append("no BMC (ipmitool or /dev/ipmi0 missing): no BMC sensors")
 if os.path.exists(os.path.join(tmp, "gpu-mismatch")):
     alarm("gpu/driver-mismatch", "NVIDIA driver/library version mismatch: GPU readings are offline; finish the driver update and reboot")
+elif os.path.exists(os.path.join(tmp, "gpu-ok")) and capture_ok("gpu"):
+    # NVML answered even if there are no GPUs or a row cannot be parsed. Empty
+    # files from a missing tool are not evidence that a previous fault cleared.
+    check("gpu/driver-mismatch")
 
 # ---- IPMI sensors ------------------------------------------------------------
 def sensors(text, what):
@@ -383,18 +388,22 @@ for line in read("gpu.txt").splitlines():
 
     lim = row["limits"]
     if margin is not None:
+        current, tlimit_top = lim.get("current_tlimit"), lim.get("max_op_tlimit")
+        core_top, core_basis = lim["max_op"], "max operating"
+        if core_top is None and (current is None or tlimit_top is None):
+            core_top, core_basis = lim["slowdown"], "slowdown"
         # The memory has no throttle of its own: the core can sit under its limit
         # while the memory is already past its own.
-        for what, temp, top in (("memory", row["mem_c"], lim["mem_max_op"]), ("core", row["core_c"], lim["max_op"])):
+        for what, temp, top, basis in (("memory", row["mem_c"], lim["mem_max_op"], "max operating"),
+                                      ("core", row["core_c"], core_top, core_basis)):
             if temp is not None and top is not None and capture_ok("gpu") and capture_ok("gpu-temp"):
                 check(f"{gpu_key}/temp/{what}")
             if temp is not None and top is not None and temp >= top - margin:
-                alarm(f"{gpu_key}/temp/{what}", f"GPU {n}: {what} {deg(temp)} C >= max operating {deg(top)} C - {deg(margin)}")
-        current, top = lim.get("current_tlimit"), lim.get("max_op_tlimit")
-        if current is not None and top is not None and capture_ok("gpu-temp"):
+                alarm(f"{gpu_key}/temp/{what}", f"GPU {n}: {what} {deg(temp)} C >= {basis} {deg(top)} C - {deg(margin)}")
+        if current is not None and tlimit_top is not None and capture_ok("gpu-temp"):
             check(f"{gpu_key}/temp/tlimit")
-        if current is not None and top is not None and current <= top + margin:
-            alarm(f"{gpu_key}/temp/tlimit", f"GPU {n}: T.Limit {deg(current)} C <= max operating {deg(top)} C + {deg(margin)}")
+        if current is not None and tlimit_top is not None and current <= tlimit_top + margin:
+            alarm(f"{gpu_key}/temp/tlimit", f"GPU {n}: T.Limit {deg(current)} C <= max operating {deg(tlimit_top)} C + {deg(margin)}")
     if throttle:
         alarm(f"{gpu_key}/slowdown", f"GPU {n}: thermal slowdown active ({', '.join(r.split('_')[0] for r in throttle)})")
     if row["ecc_uncorrected"]:
@@ -406,7 +415,6 @@ for line in read("gpu.txt").splitlines():
     # check legacy gpu/<index> keys; old evidence remains held until retired.
     # Temperature rules need the second capture; an explicit disable may clear.
     if capture_ok("gpu"):
-        check("gpu/driver-mismatch")
         if all(f[k] in ("Active", "Not Active") for k in ("sw_thermal", "hw_thermal")):
             check(f"{gpu_key}/slowdown")
         if row["ecc_uncorrected"] is not None:

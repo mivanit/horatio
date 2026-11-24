@@ -27,6 +27,9 @@ if [ "${1:-}" = "--uninstall" ]; then
         [ -e "$f" ] && rm "$f"
     done
     [ -d /var/lib/horatio ] && rm --recursive /var/lib/horatio
+    # Only a completed uninstall marks missing snapshots as intentional. The
+    # dashboard keeps its alarm memory and history in the checkout's logs.
+    install -D --mode 0644 --owner root --group root /dev/null /etc/horatio/collectors-disabled
     echo "    kept /etc/horatio/config.json (this box's tuning; remove it by hand if unwanted)"
     exit 0
 fi
@@ -60,6 +63,7 @@ for unit in $UNITS; do
     install --mode 0644 --owner root --group root "$S/$unit" "/etc/systemd/system/$unit"
 done
 systemctl daemon-reload
+rm --force /etc/horatio/collectors-disabled
 # Synchronous for a oneshot; a python crash fails the job and stops the install
 # here with the traceback. Sensors first: the full run alarms on a missing
 # sensors.json. The timers come AFTER: `enable --now` on an installed box fires
