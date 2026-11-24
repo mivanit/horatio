@@ -94,7 +94,10 @@ class TestGPUSensors:
         extended: dict[str, str | int] | None = None,
         basic: dict[str, str | int] | None = None,
         config: dict[str, Any] | None = None,
+        files: dict[str, str] | None = None,
     ) -> tuple[dict[str, Any], list[list[str]]]:
+        """`files` are written into the stage after the real GPU capture has run,
+        so a test can supply BMC tables or overwrite a capture's .err sidecar."""
         folder: str
         with tempfile.TemporaryDirectory(prefix="horatio-sensors-test-") as folder:
             stage: Path = Path(folder)
@@ -143,6 +146,9 @@ class TestGPUSensors:
                 capture_output=True,
                 timeout=10,
             )
+            text: str
+            for name, text in (files or {}).items():
+                (stage / name).write_text(text)
             out: Path = stage / "sensors.json"
             subprocess.run(
                 [sys.executable, "-", str(stage), str(out)],
@@ -154,6 +160,10 @@ class TestGPUSensors:
                 timeout=10,
             )
             state: dict[str, Any] = json.loads(out.read_text())
+            # Every run: alarm_items is `alarms` with a unique key on each line.
+            items: list[dict[str, Any]] = state["alarm_items"]
+            assert [i["text"] for i in items] == state["alarms"]
+            assert len({i["key"] for i in items}) == len(items), items
             calls: list[list[str]] = [
                 json.loads(line)
                 for line in (stage / "calls.jsonl").read_text().splitlines()
@@ -358,3 +368,85 @@ class TestGPUSensors:
         state, _ = self.collect(csv=csv, temperature=temperature)
         assert state["alarms"] == ["GPU 0: T.Limit 1 C <= max operating 0 C + 3"]
         assert [gpu["limits"]["current_tlimit"] for gpu in state["gpus"]] == [1, 9]
+
+    # ---- identity: a stable key per alarm, and what was really checked -------
+
+    def test_keys_name_the_sensor_by_entity_and_the_gpu_by_index(
+        self: TestGPUSensors,
+    ) -> None:
+        temps: str = (
+            "Temp | 0Eh | ok | 3.1 | 32 degrees C\n"
+            "Temp | 0Fh | cr | 3.2 | 99 degrees C\n"
+            "Inlet Temp | 04h | nc | 7.1 | 45 degrees C\n"
+        )
+        state: dict[str, Any]
+        state, _ = self.collect(
+            csv=gpu_csv(sw="Active", ecc=2),
+            files={
+                "temp.txt": temps,
+                "fan.txt": "Fan1 | 30h | ok | 7.1 | 17640 RPM\n",
+            },
+            config={"fan_rpm_alarm_above": 15000},
+        )
+        assert state["schema"] == 1
+        assert state["alarm_items"] == [
+            # The label gains "(3.2)" only because two sensors share the name;
+            # the key carries the entity whether or not they do.
+            {"key": "bmc/temp/Temp@3.2", "text": "Temp (3.2): status cr"},
+            {"key": "bmc/temp/Inlet Temp@7.1", "text": "Inlet Temp: status nc"},
+            {
+                "key": "fans/ceiling",
+                "text": "fans: 1 over 15000 RPM (boost back on, manual override, or box hot), e.g. Fan1 17640",
+            },
+            {"key": "gpu/0/slowdown", "text": "GPU 0: thermal slowdown active (sw)"},
+            {
+                "key": "gpu/0/ecc",
+                "text": "GPU 0: 2 uncorrected ECC errors since driver load",
+                "value": 2,
+            },
+        ]
+
+    def test_a_failed_capture_leaves_its_alarms_unchecked(
+        self: TestGPUSensors,
+    ) -> None:
+        def covered(state: dict[str, Any], key: str) -> bool:
+            return any(
+                key == prefix or key.startswith(prefix + "/")
+                for prefix in state["checked"]
+            )
+
+        state: dict[str, Any]
+        state, _ = self.collect()
+        key: str
+        for key in (
+            "bmc/fan/Fan1@7.1",
+            "bmc/temp/Temp@3.1",
+            "fans/ceiling",
+            "gpu/0/temp/memory",
+            "gpu/0/slowdown",
+            "capture/gpu",
+            "unparsed/fan",
+        ):
+            assert covered(state, key), key
+
+        # The BMC timed out on the fans; nvidia-smi answered the query but not -q.
+        state, _ = self.collect(
+            files={"fan.err": "exit 124\n", "gpu-temp.err": "exit 124\n"}
+        )
+        assert state["alarms"] == [
+            "collector: fan: exit 124",
+            "collector: gpu-temp: exit 124",
+        ]
+        for key in ("bmc/fan/Fan1@7.1", "fans/ceiling", "gpu/0/temp/memory"):
+            assert not covered(state, key), key
+        for key in ("bmc/temp/Temp@3.1", "gpu/0/slowdown", "gpu/0/ecc"):
+            assert covered(state, key), key
+        # With the temperature rules switched off there is nothing left to check.
+        state, _ = self.collect(
+            files={"gpu-temp.err": "exit 124\n"},
+            config={"gpu_temp_alarm_margin_c": None},
+        )
+        assert covered(state, "gpu/0/temp/memory")
+        # No BMC at all: its alarms are neither raised nor cleared.
+        state, _ = self.collect(files={"no-bmc": ""})
+        assert not covered(state, "bmc/temp/Temp@3.1")

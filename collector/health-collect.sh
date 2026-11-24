@@ -173,6 +173,41 @@ BACKUP_MAX_AGE_H = 30   # nightly timer; 30 h allows one late/skipped fire
 SEL_RECENT_DAYS = 7
 
 alarms, info = [], []
+# Identity for each alarm, parallel to `alarms` (same order, same text): the
+# strings carry counts and ages that change from run to run, so a reader cannot
+# tell "the same alarm, still there" from a new one without a key.
+alarm_items = []
+# Key prefixes this run really evaluated, with a clean capture. An alarm that is
+# gone and whose prefix is NOT listed is unknown, not cleared: a crashed section,
+# a timed-out tool, a drive left in standby or gone from /dev lists nothing.
+# A prefix P covers key K when K == P or K starts with P + "/".
+checked = []
+
+def alarm(key, text, value=None):
+    """Raise one alarm. `text` is what readers print and is all `alarms` holds.
+    `key` is its stable identity: no counts, ages or device letters that move
+    (drives go by serial). `value` only for a fault counter that never falls on
+    its own (reallocated sectors, grown defects, ECC counts), so a reader can
+    report 8 -> 9; temperatures and ages get none. A key raised twice in one
+    run gets #2, #3. Never raises: it is called from part()'s except handler."""
+    alarms.append(text)
+    item = {"key": f"unkeyed/{len(alarm_items)}", "text": text}
+    try:
+        used = {i["key"] for i in alarm_items}
+        k, n = str(key), 2
+        while k in used:
+            k, n = f"{key}#{n}", n + 1
+        item["key"] = k
+        if value is not None:
+            item["value"] = value
+    except Exception:
+        traceback.print_exc()
+    alarm_items.append(item)
+
+def check(*prefixes):
+    for p in prefixes:
+        if p not in checked:
+            checked.append(p)
 
 def read(name):
     # Every file read here was written by a redirection in the bash stage above,
@@ -188,7 +223,15 @@ def sysread(*parts):
     except OSError:
         return None
 
-state = {"ts": int(time.time())}
+def capture_ok(name):
+    """True when the bash stage's capture <name> ran clean (empty .err sidecar)."""
+    text = read(f"{name}.err").strip()
+    return not text or text == "SEL has no entries"
+
+# schema: bumped when the meaning of alarm_items / checked changes. boot_id tells
+# a reader that counters which reset at boot (ECC, failed units) did so.
+state = {"schema": 1, "ts": int(time.time()),
+         "boot_id": sysread(os.environ.get("HEALTH_BOOT_ID", "/proc/sys/kernel/random/boot_id"))}
 crashed = []
 
 def part(section):
@@ -199,13 +242,16 @@ def part(section):
     value anywhere left the whole snapshot stale, every other alarm with it."""
     try:
         section()
+        check(f"collector/{section.__name__}")
     except Exception as e:
         crashed.append(section.__name__)
-        alarms.append(f"collector: {section.__name__} crashed: {type(e).__name__}: {e}")
+        alarm(f"collector/{section.__name__}", f"collector: {section.__name__} crashed: {type(e).__name__}: {e}")
         traceback.print_exc()
 
 if os.path.exists(os.path.join(tmp, "no-smartctl")):
-    alarms.append("smartmontools not installed: drives are not monitored")
+    alarm("smart-tools", "smartmontools not installed: drives are not monitored")
+else:
+    check("smart-tools")
 if os.path.exists(os.path.join(tmp, "no-bmc")):
     info.append("no BMC (ipmitool or /dev/ipmi0 missing): no event log")
 
@@ -266,13 +312,19 @@ def sel_recent(line):
     when = sel_when(line)
     return when is not None and state["ts"] - when < SEL_RECENT_DAYS * 86400
 
+def sel_read():
+    """True when the SEL was really read this run: there is a BMC and ipmitool ran clean."""
+    return not os.path.exists(os.path.join(tmp, "no-bmc")) and capture_ok("sel")
+
 def sel_memory():
     sel_lines = read("sel.txt").splitlines()
     mem = [l.strip() for l in sel_lines if "mem" in l.lower() or "ecc" in l.lower()]
     recent = [l for l in mem if sel_recent(l)]
     state["sel_memory"] = {"count": len(mem), "recent": recent}
     if recent:
-        alarms.append(f"SEL: {len(recent)} memory events in {SEL_RECENT_DAYS}d ({len(mem)} total), latest: {recent[-1]}")
+        alarm("sel/memory", f"SEL: {len(recent)} memory events in {SEL_RECENT_DAYS}d ({len(mem)} total), latest: {recent[-1]}")
+    if sel_read():
+        check("sel/memory")
 part(sel_memory)
 
 # ---- SEL, hardware faults (PSU / fan / drive / thermal) ----------------------
@@ -301,14 +353,16 @@ def sel_hardware():
     hw_recent = [l for l in hw if sel_recent(l)]
     state["sel_hardware"] = {"count": len(hw), "recent": hw_recent}
     if hw_recent:
-        alarms.append(f"SEL: {len(hw_recent)} hardware events in {SEL_RECENT_DAYS}d ({len(hw)} total), latest: {hw_recent[-1]}")
+        alarm("sel/hardware", f"SEL: {len(hw_recent)} hardware events in {SEL_RECENT_DAYS}d ({len(hw)} total), latest: {hw_recent[-1]}")
 
     # A dated-looking line whose date did not parse is a format change (locale, ipmitool
     # version), not a hardware event: say so instead of silently under-counting.
     unparsed = [l.strip() for l in sel_lines
                 if "|" in l and "Pre-Init" not in l and "OEM record" not in l and sel_when(l) is None]
     if unparsed:
-        alarms.append(f"collector: {len(unparsed)} SEL lines with unrecognised date format, e.g. {unparsed[-1]}")
+        alarm("sel/dates", f"collector: {len(unparsed)} SEL lines with unrecognised date format, e.g. {unparsed[-1]}")
+    if sel_read():
+        check("sel/hardware", "sel/dates")
 part(sel_hardware)
 
 # ---- EDAC per-DIMM (no privileges needed; counters RESET EVERY BOOT) ---------
@@ -334,10 +388,14 @@ def edac():
         "ce_total": ce_total,
         "ue_total": ue_total,
     }
+    check("ecc/uncorrectable")
     if ue_total > 0:
-        alarms.append(f"ECC: {ue_total} uncorrectable errors since boot")
-    elif ce_total >= CE_WARN:
-        alarms.append(f"ECC: {ce_total} correctable errors since boot")
+        # The correctable count is not judged while this one shows, so it is not `checked`.
+        alarm("ecc/uncorrectable", f"ECC: {ue_total} uncorrectable errors since boot", ue_total)
+    else:
+        check("ecc/correctable")
+        if ce_total >= CE_WARN:
+            alarm("ecc/correctable", f"ECC: {ce_total} correctable errors since boot", ce_total)
 part(edac)
 
 # ---- drives ------------------------------------------------------------------
@@ -365,10 +423,13 @@ def smart():
             why = read(f"smart_{name}.err").strip() or "; ".join(m for m in msgs if m) \
                   or f"smartctl exit {rc}, no JSON"
             drives.append({"device": name, "error": why})
-            alarms.append(f"{name}: unreadable ({why})")
+            alarm(f"smart/dev:{name}/unreadable", f"{name}: unreadable ({why})")
             return
 
         serial = s.get("serial_number")
+        # Alarm keys go by serial: device letters move between boots. A drive that
+        # gave no serial, or no report at all (above), can only go by its letter.
+        did = f"smart/{serial}" if serial else f"smart/dev:{name}"
         entry = {
             "device": name,
             "model": s.get("model_name"),
@@ -383,7 +444,7 @@ def smart():
             "size_bytes": (s.get("user_capacity") or {}).get("bytes"),
         }
         if entry["passed"] is False:
-            alarms.append(f"{name}: SMART health FAILED")
+            alarm(f"{did}/health", f"{name}: SMART health FAILED")
         # NVMe has no attribute table; its health log is the whole story. `passed`
         # already covers critical_warning (spare below threshold, over temperature,
         # read-only, ...); media errors and wear-out are separate counters.
@@ -392,13 +453,13 @@ def smart():
             entry["media_errors"] = nvme.get("media_errors")
             entry["percentage_used"] = nvme.get("percentage_used")
             if (nvme.get("media_errors") or 0) > 0:
-                alarms.append(f"{name}: media_errors={nvme['media_errors']}")
+                alarm(f"{did}/media_errors", f"{name}: media_errors={nvme['media_errors']}", nvme["media_errors"])
             if (nvme.get("percentage_used") or 0) >= 100:
-                alarms.append(f"{name}: percentage_used={nvme['percentage_used']} (endurance spent)")
+                alarm(f"{did}/percentage_used", f"{name}: percentage_used={nvme['percentage_used']} (endurance spent)")
         if rc & 128:    # bit 7: the self-test log has errors. ATA drops entries outdated by
                         # a later successful extended test; SCSI alarms while any failed
                         # entry is in its 20-entry log.
-            alarms.append(f"{name}: self-test log has errors")
+            alarm(f"{did}/selftest", f"{name}: self-test log has errors")
         # smartd's `-n standby` skips scheduled tests on a sleeping drive, so one that
         # is never awake at test time is never tested. Info, not alarm: nothing is
         # wrong with the drive, it is just unexercised. ATA keeps a count in the
@@ -417,7 +478,7 @@ def smart():
         if trip is not None:
             entry["drive_trip_c"] = trip
             if entry["temperature_c"] is not None and entry["temperature_c"] >= trip - 5:
-                alarms.append(f"{name}: {entry['temperature_c']}C, trip point {trip}C")
+                alarm(f"{did}/temperature", f"{name}: {entry['temperature_c']}C, trip point {trip}C")
 
         # SAS: the grown defect list is the signal that matters. A SAS drive can
         # fail with every error counter at zero to the end; only this number and
@@ -428,7 +489,7 @@ def smart():
             base = grown_defect_baseline.get(serial, 0)
             entry["grown_defect_baseline"] = base
             if grown > base:
-                alarms.append(f"{name} ({serial}): grown defects {grown} > baseline {base}")
+                alarm(f"{did}/grown_defects", f"{name} ({serial}): grown defects {grown} > baseline {base}", grown)
 
         # SATA: the attributes that actually indicate media failure.
         got = {}
@@ -439,9 +500,12 @@ def smart():
             entry["attrs"] = got
             bad = [f"{k}={v}" for k, v in got.items() if k in ATA_ALARM and (v or 0) > 0]
             if bad:
-                alarms.append(f"{name}: {', '.join(bad)}")
+                alarm(f"{did}/attrs", f"{name}: {', '.join(bad)}")
 
         drives.append(entry)
+        # Everything about this drive was judged: its own alarms, and any earlier
+        # "unreadable" or crash under this device letter, may now count as gone.
+        check(did, f"smart/dev:{name}", f"collector/smart/dev:{name}")
 
     # One drive at a time: a crash on one must not leave the drives after it
     # unchecked, so it is that drive's alarm and error row and the loop goes on.
@@ -452,7 +516,7 @@ def smart():
         except Exception as e:
             why = f"{type(e).__name__}: {e}"
             crashed.append("smart")
-            alarms.append(f"collector: smart crashed: {name}: {why}")
+            alarm(f"collector/smart/dev:{name}", f"collector: smart crashed: {name}: {why}")
             drives.append({"device": name, "error": f"collector crashed ({why})"})
             traceback.print_exc()
 part(smart)
@@ -495,9 +559,9 @@ def md_arrays():
             members.append({"name": member, "state": flags, "errors": merrs})
             for f in flags:
                 if f in MD_BAD_STATES:
-                    alarms.append(f"{name}: {member} state {f}")
+                    alarm(f"md/{name}/member/{member}/state/{f}", f"{name}: {member} state {f}")
             if merrs:
-                alarms.append(f"{name}: {member} errors={merrs}")
+                alarm(f"md/{name}/member/{member}/errors", f"{name}: {member} errors={merrs}", merrs)
         degraded = int(sysread(md, "degraded") or 0)
         sync_action = sysread(md, "sync_action")
         array_state = sysread(md, "array_state")
@@ -508,12 +572,15 @@ def md_arrays():
         mds.append({"name": name, "level": sysread(md, "level"), "degraded": degraded,
                     "sync_action": sync_action, "array_state": array_state,
                     "mismatch_cnt": mismatch, "members": members})
-        if mismatch and sync_action == "idle":
-            alarms.append(f"{name}: mismatch_cnt={mismatch}")
+        check(f"md/{name}/member", f"md/{name}/degraded", f"md/{name}/array_state")
+        if sync_action == "idle":      # not judged while a check or resync runs
+            check(f"md/{name}/mismatch")
+            if mismatch:
+                alarm(f"md/{name}/mismatch", f"{name}: mismatch_cnt={mismatch}", mismatch)
         if degraded:
-            alarms.append(f"{name}: DEGRADED ({degraded} missing)")
+            alarm(f"md/{name}/degraded", f"{name}: DEGRADED ({degraded} missing)")
         if array_state in ("inactive", "readonly"):
-            alarms.append(f"{name}: array_state {array_state}")
+            alarm(f"md/{name}/array_state", f"{name}: array_state {array_state}")
         if sync_action in ("check", "resync", "repair", "recover", "reshape"):
             info.append(f"{name}: {sync_action} in progress")
     state["md"] = mds
@@ -536,12 +603,14 @@ def backup():
             uptime_h = float(open(os.environ.get("HEALTH_UPTIME", "/proc/uptime")).read().split()[0]) / 3600
             if uptime_h < BACKUP_MAX_AGE_H:
                 info.append(f"backup: {backup_timer} has not fired since boot ({int(uptime_h)}h ago)")
-            else:
-                alarms.append(f"backup: {backup_timer} has never fired")
+                return               # nothing known yet: an earlier backup alarm is not cleared
+            alarm("backup/never", f"backup: {backup_timer} has never fired")
         elif age_h > BACKUP_MAX_AGE_H:
-            alarms.append(f"backup: last trigger {int(age_h)}h ago")
+            alarm("backup/overdue", f"backup: last trigger {int(age_h)}h ago")
     else:
         state["backup"] = None       # config says this box has no backup timer
+    if capture_ok("backup-timer"):
+        check("backup")
 part(backup)
 
 # ---- the 60 s sensors snapshot (health-sensors.sh) ---------------------------
@@ -555,9 +624,10 @@ def sensors_snapshot():
     except FileNotFoundError:
         sensors_age = None
     if sensors_age is None:
-        alarms.append("collector: no sensors snapshot (horatio-sensors.timer never ran?)")
+        alarm("sensors-snapshot/missing", "collector: no sensors snapshot (horatio-sensors.timer never ran?)")
     elif sensors_age > 300:
-        alarms.append(f"collector: sensors snapshot {sensors_age}s old (horatio-sensors.timer stuck?)")
+        alarm("sensors-snapshot/stale", f"collector: sensors snapshot {sensors_age}s old (horatio-sensors.timer stuck?)")
+    check("sensors-snapshot")
 part(sensors_snapshot)
 
 # ---- failed systemd units ----------------------------------------------------
@@ -565,7 +635,9 @@ part(sensors_snapshot)
 def failed_units():
     state["failed_units"] = [l.split()[0] for l in read("failed.txt").splitlines() if l.strip()]
     for unit in state["failed_units"]:
-        alarms.append(f"unit failed: {unit}")
+        alarm(f"unit/{unit}", f"unit failed: {unit}")
+    if capture_ok("failed"):
+        check("unit")
 part(failed_units)
 
 # ---- journal errors (last 24 h) ----------------------------------------------
@@ -587,7 +659,9 @@ def journal():
     state["journal_errors"] = {"hours": 24, "count": len(msgs), "distinct": sorted(distinct)}
     if msgs:
         # One transient error keeps this line for 24 h: intended, errors are surfaced.
-        alarms.append(f"journal: {len(msgs)} error-level messages ({len(distinct)} distinct) in 24h, latest: {msgs[-1]}")
+        alarm("journal", f"journal: {len(msgs)} error-level messages ({len(distinct)} distinct) in 24h, latest: {msgs[-1]}")
+    if capture_ok("journal-err"):
+        check("journal")
 part(journal)
 
 # ---- collection failures (any non-empty .err sidecar) ------------------------
@@ -603,10 +677,14 @@ def err_sidecars():
             continue
         text = read(os.path.basename(path)).strip()
         if text and text != "SEL has no entries":
-            alarms.append(f"collector: {os.path.basename(path)[:-4]}: {text}")
+            name = os.path.basename(path)[:-4]
+            alarm(f"capture/{name}", f"collector: {name}: {text}")
+    check("capture")
 part(err_sidecars)
 
 state["alarms"] = alarms
+state["alarm_items"] = alarm_items
+state["checked"] = checked
 state["info"] = info
 
 tmp_out = f"{out}.{os.getpid()}.tmp"     # per-pid so two runs cannot truncate each other

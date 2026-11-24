@@ -125,16 +125,58 @@ else
 fi
 
 python3 - "$tmp" "$OUT" <<'PY'
-import glob, json, os, sys, time
+import glob, json, os, sys, time, traceback
 
 tmp, out = sys.argv[1], sys.argv[2]
 alarms = []
+# Same contract as health-collect.sh: `alarm_items` gives each alarm string a
+# stable key (parallel to `alarms`), and `checked` lists the key prefixes this
+# run really evaluated with a clean capture. An alarm that is gone and whose
+# prefix is not listed is unknown, not cleared (a hung BMC, nvidia-smi failing).
+# A prefix P covers key K when K == P or K starts with P + "/".
+alarm_items = []
+checked = []
+
+def alarm(key, text, value=None):
+    """Raise one alarm; see health-collect.sh. Never raises."""
+    alarms.append(text)
+    item = {"key": f"unkeyed/{len(alarm_items)}", "text": text}
+    try:
+        used = {i["key"] for i in alarm_items}
+        k, n = str(key), 2
+        while k in used:
+            k, n = f"{key}#{n}", n + 1
+        item["key"] = k
+        if value is not None:
+            item["value"] = value
+    except Exception:
+        traceback.print_exc()
+    alarm_items.append(item)
+
+def check(*prefixes):
+    for p in prefixes:
+        if p not in checked:
+            checked.append(p)
 
 def read(name):
     # Every file read here was written by a redirection in the bash stage above,
     # so a missing one is a bug in this script and should crash into the journal.
     with open(os.path.join(tmp, name)) as f:
         return f.read()
+
+def capture_ok(name):
+    """True when the bash stage's capture <name> ran clean (no or empty .err sidecar)."""
+    try:
+        return not read(f"{name}.err").strip()
+    except FileNotFoundError:
+        return True
+
+def boot_id():
+    try:
+        with open(os.environ.get("HEALTH_BOOT_ID", "/proc/sys/kernel/random/boot_id")) as f:
+            return f.read().strip()
+    except OSError:
+        return None
 
 # Same per-machine config file as health-collect.sh; only fan_rpm_alarm_above
 # and gpu_temp_alarm_margin_c are read here. A missing file means defaults; malformed JSON crashes on purpose.
@@ -144,7 +186,7 @@ try:
 except FileNotFoundError:
     config = {}
 
-state = {"ts": int(time.time()), "info": []}
+state = {"schema": 1, "ts": int(time.time()), "boot_id": boot_id(), "info": []}
 if os.path.exists(os.path.join(tmp, "no-bmc")):
     state["info"].append("no BMC (ipmitool or /dev/ipmi0 missing): no BMC sensors")
 
@@ -163,7 +205,7 @@ def sensors(text, what):
             continue
         parts = [p.strip() for p in line.split("|")]
         if len(parts) != 5:
-            alarms.append(f"collector: {what}: unparsed line: {line.strip()!r}")
+            alarm(f"unparsed/{what}", f"collector: {what}: unparsed line: {line.strip()!r}")
             continue
         name, _, status, entity, reading = parts
         # "17640 RPM" / "23 degrees C" -> number; "No Reading", "Fully Redundant" -> None.
@@ -175,7 +217,7 @@ def sensors(text, what):
         rows.append({"name": name, "status": status, "entity": entity, "reading": reading, "value": value})
     return rows
 
-def sensor_alarms(rows):
+def sensor_alarms(rows, what):
     # Two sensors can share a name (Dell BMCs expose several plain "Temp"); the
     # entity id (e.g. 3.1) tells them apart. The label is stored on the row so
     # the dashboard keys its charts and history by the same string.
@@ -187,14 +229,19 @@ def sensor_alarms(rows):
         # PS Redundancy) are only ever ok/ns: "Redundancy Lost" shows in their
         # reading column and reaches alarms through the SEL patterns, not here.
         if r["status"] not in ("ok", "ns"):
-            alarms.append(f"{r['label']}: status {r['status']}")
+            # The key always carries the entity: the label gains it only while
+            # two sensors share a name in this very capture.
+            alarm(f"bmc/{what}/{r['name']}@{r['entity']}", f"{r['label']}: status {r['status']}")
+    if has_bmc and capture_ok(what):
+        check(f"bmc/{what}")
 
+has_bmc = not os.path.exists(os.path.join(tmp, "no-bmc"))
 state["fans"] = sensors(read("fan.txt"), "fan")
 state["temps"] = sensors(read("temp.txt"), "temp")
 state["power"] = sensors(read("power.txt"), "power")
-sensor_alarms(state["fans"])
-sensor_alarms(state["temps"])
-sensor_alarms(state["power"])
+sensor_alarms(state["fans"], "fan")
+sensor_alarms(state["temps"], "temp")
+sensor_alarms(state["power"], "power")
 
 # `fan_rpm_alarm_above` in the config, for a BMC fan profile changed by hand
 # (e.g. Dell's third-party PCIe fan boost turned off): the setting may not
@@ -205,8 +252,10 @@ ceiling = config.get("fan_rpm_alarm_above")
 if ceiling is not None:
     over = [r for r in state["fans"] if r["value"] is not None and r["value"] > ceiling]
     if over:
-        alarms.append(f"fans: {len(over)} over {ceiling} RPM (boost back on, manual override, or box hot), "
-                      f"e.g. {over[0]['label']} {int(over[0]['value'])}")
+        alarm("fans/ceiling", f"fans: {len(over)} over {ceiling} RPM (boost back on, manual override, or box hot), "
+                              f"e.g. {over[0]['label']} {int(over[0]['value'])}")
+if has_bmc and capture_ok("fan"):
+    check("fans/ceiling")      # also when the ceiling is off: the rule no longer applies
 
 # ---- GPUs (nvidia-smi) ---------------------------------------------------------
 # The --query-gpu fields of the bash stage, in order.
@@ -263,7 +312,7 @@ for line in read("gpu.txt").splitlines():
     if no_counters:
         parts[8:8] = ["N/A", "N/A"]
     if len(parts) != len(GPU_FIELDS) or num(parts[0]) is None:
-        alarms.append(f"collector: gpu: unparsed line: {line.strip()!r}")
+        alarm("unparsed/gpu", f"collector: gpu: unparsed line: {line.strip()!r}")
         continue
     f = dict(zip(GPU_FIELDS, parts))
     n = int(num(f["index"]))
@@ -289,16 +338,24 @@ for line in read("gpu.txt").splitlines():
         # while the memory is already past its own.
         for what, temp, top in (("memory", row["mem_c"], lim["mem_max_op"]), ("core", row["core_c"], lim["max_op"])):
             if temp is not None and top is not None and temp >= top - margin:
-                alarms.append(f"GPU {n}: {what} {deg(temp)} C >= max operating {deg(top)} C - {deg(margin)}")
+                alarm(f"gpu/{n}/temp/{what}", f"GPU {n}: {what} {deg(temp)} C >= max operating {deg(top)} C - {deg(margin)}")
         current, top = lim.get("current_tlimit"), lim.get("max_op_tlimit")
         if current is not None and top is not None and current <= top + margin:
-            alarms.append(f"GPU {n}: T.Limit {deg(current)} C <= max operating {deg(top)} C + {deg(margin)}")
+            alarm(f"gpu/{n}/temp/tlimit", f"GPU {n}: T.Limit {deg(current)} C <= max operating {deg(top)} C + {deg(margin)}")
     if throttle:
-        alarms.append(f"GPU {n}: thermal slowdown active ({', '.join(r.split('_')[0] for r in throttle)})")
+        alarm(f"gpu/{n}/slowdown", f"GPU {n}: thermal slowdown active ({', '.join(r.split('_')[0] for r in throttle)})")
     if row["ecc_uncorrected"]:
-        alarms.append(f"GPU {n}: {row['ecc_uncorrected']} uncorrected ECC errors since driver load")
+        alarm(f"gpu/{n}/ecc", f"GPU {n}: {row['ecc_uncorrected']} uncorrected ECC errors since driver load",
+              row["ecc_uncorrected"])
     if row["retired_pending"]:
-        alarms.append(f"GPU {n}: retired pages pending")
+        alarm(f"gpu/{n}/retired_pages", f"GPU {n}: retired pages pending")
+    # The GPU index is nvidia-smi's, which follows PCI bus order: stable for a
+    # given set of cards. The temperature rules need the limits from the second
+    # capture; with the margin off they no longer apply and may clear.
+    if capture_ok("gpu"):
+        check(f"gpu/{n}/slowdown", f"gpu/{n}/ecc", f"gpu/{n}/retired_pages")
+        if margin is None or capture_ok("gpu-temp"):
+            check(f"gpu/{n}/temp")
 
 # ---- RAPL: CPU and DRAM watts per socket --------------------------------------
 # Emitted in the same row shape as the IPMI power rows, so the dashboard's
@@ -311,7 +368,7 @@ def rapl(name):
     for line in lines[1:]:
         parts = line.split()
         if len(parts) != 4:
-            alarms.append(f"collector: rapl: unparsed line: {line.strip()!r}")
+            alarm("unparsed/rapl", f"collector: rapl: unparsed line: {line.strip()!r}")
             continue
         rows[parts[0]] = parts
     return float(lines[0]), rows
@@ -340,9 +397,13 @@ if t1 is not None and t2 is not None and t2 > t1:
 for path in sorted(glob.glob(os.path.join(tmp, "*.err"))):
     text = read(os.path.basename(path)).strip()
     if text:
-        alarms.append(f"collector: {os.path.basename(path)[:-4]}: {text}")
+        name = os.path.basename(path)[:-4]
+        alarm(f"capture/{name}", f"collector: {name}: {text}")
+check("capture", "unparsed")     # every sidecar and every line was looked at
 
 state["alarms"] = alarms
+state["alarm_items"] = alarm_items
+state["checked"] = checked
 
 tmp_out = f"{out}.{os.getpid()}.tmp"     # per-pid so two runs cannot truncate each other
 with open(tmp_out, "w") as f:

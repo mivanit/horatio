@@ -5,6 +5,14 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- Hardware collector: every alarm now has a stable identity. Both snapshots carry
+  `alarm_items` (a `key` for each alarm string, plus a `value` for fault counters such as
+  reallocated sectors and ECC counts) and `checked` (what this run really evaluated, so a
+  reader can tell an alarm that cleared from one that was merely not looked at: a drive in
+  standby, a BMC that timed out, a section that crashed). Drives are keyed by serial, since
+  `sdX` letters move between boots. The alarm strings are unchanged. Also new: `schema`
+  and `boot_id`. Keys are listed in `collector/README.md`.
+
 ## [0.2.1] - 2026-11-18
 
 - History cards line up: every chart and the Services grid show the whole requested

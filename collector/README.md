@@ -68,6 +68,45 @@ value it cannot handle is a `collector: <part> crashed: …` alarm; the other pa
 and the run still exits 1. Nothing is mailed for an alarm: only a failed
 15-min run mails root (its unit's `ExecStopPost=`); the 60 s unit never mails.
 
+## Alarm identity: `alarm_items` and `checked`
+
+The alarm strings carry counts and ages (`journal: 3 … latest: …`, `backup: last trigger 31h
+ago`), so two snapshots cannot be compared by text. Each snapshot therefore also has
+(`schema: 1`):
+
+- `alarm_items`: one `{"key", "text"}` per alarm, in the same order as `alarms` and with the
+  same text. The key is the alarm's identity and never contains a count, an age or a device
+  letter: drives go by serial (`sdX` letters move between boots), BMC sensors by name and
+  entity. A fault counter that never falls on its own (reallocated sectors, grown defects, ECC
+  counts) also has `"value"`, so a reader can report `8 -> 9`; temperatures and ages have none.
+  A key raised twice in one run gets `#2`, `#3`.
+- `checked`: the key prefixes this run really evaluated, with a clean capture. A prefix `P`
+  covers key `K` when `K == P` or `K` starts with `P/`. **An alarm that is gone and whose
+  prefix is not listed is unknown, not cleared**: a section that crashed, a tool that timed
+  out, a drive left in standby or gone from `/dev`, a box whose BMC stopped answering, a rule
+  that is not judged right now (`mismatch_cnt` during a resync, the correctable ECC count
+  while an uncorrectable one shows) list nothing.
+- `boot_id`: the kernel's boot id. Counters that reset at boot (ECC, failed units, GPU ECC
+  since driver load) make their alarms disappear at a reboot.
+
+| key | alarm |
+|---|---|
+| `smart/<serial>/health`, `/selftest`, `/temperature`, `/grown_defects`, `/media_errors`, `/percentage_used`, `/attrs` | per drive; `smart/dev:<name>/…` for a drive that gave no serial |
+| `smart/dev:<name>/unreadable` | nothing readable came back, so there is no serial to go by |
+| `smart-tools` | smartmontools not installed |
+| `sel/memory`, `sel/hardware`, `sel/dates` | BMC event log |
+| `ecc/uncorrectable`, `ecc/correctable` | EDAC counters since boot |
+| `md/<array>/degraded`, `/array_state`, `/mismatch`, `/member/<dev>/state/<flag>`, `/member/<dev>/errors` | md arrays |
+| `backup/never`, `backup/overdue` | the backup timer |
+| `unit/<unit>` | a failed systemd unit |
+| `journal` | error-level journal messages |
+| `sensors-snapshot/missing`, `/stale` | the 60 s file, judged by the 15-min run |
+| `bmc/<fan\|temp\|power>/<name>@<entity>` | a BMC sensor whose status is not ok |
+| `fans/ceiling` | `fan_rpm_alarm_above` |
+| `gpu/<index>/temp/<memory\|core\|tlimit>`, `/slowdown`, `/ecc`, `/retired_pages` | per GPU, by nvidia-smi index (PCI bus order) |
+| `capture/<name>`, `unparsed/<name>` | a capture that failed, a line that did not parse |
+| `collector/<part>`, `collector/smart/dev:<name>` | a part of the 15-min run that crashed |
+
 | alarm starts with | first move |
 |---|---|
 | `SEL: N memory events in 7d` / `ECC: N uncorrectable\|correctable errors since boot` | `sudo ipmitool sel elist \| grep -i ecc` names the DIMM; `sudo ras-mc-ctl --errors` for the OS-time trend. Before any `ipmitool sel clear`: `ipmitool sel save <file>` — the SEL is the only record of POST-time errors |

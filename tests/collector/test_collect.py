@@ -30,6 +30,7 @@ CAPTURES: dict[str, str] = {
     "tmp/backup-timer.txt": "",
     "tmp/backup-timer.err": "",
     "uptime": "3600.25 7200.50\n",
+    "boot_id": "boot-1\n",
     "config.json": "{}",
     "out/sensors.json": "{}",
 }
@@ -57,6 +58,7 @@ def collect(
         HEALTH_CONFIG=str(stage / "config.json"),
         HEALTH_EDAC=str(stage / "edac"),
         HEALTH_UPTIME=str(stage / "uptime"),
+        HEALTH_BOOT_ID=str(stage / "boot_id"),
         HEALTH_SYSBLOCK=str(stage / "block"),
     )
     done: subprocess.CompletedProcess[str] = subprocess.run(
@@ -68,7 +70,23 @@ def collect(
         timeout=30,
     )
     state: dict[str, Any] = json.loads(out.read_text()) if out.exists() else {}
+    if state:
+        # Every run: alarm_items is `alarms` with a unique key on each line.
+        items: list[dict[str, Any]] = state["alarm_items"]
+        assert [i["text"] for i in items] == state["alarms"], done.stderr
+        assert len({i["key"] for i in items}) == len(items), items
     return state, done.returncode, done.stderr
+
+
+def covered(state: dict[str, Any], key: str) -> bool:
+    """True when `checked` says this run really evaluated the key."""
+    return any(
+        key == prefix or key.startswith(prefix + "/") for prefix in state["checked"]
+    )
+
+
+def keys(state: dict[str, Any]) -> list[str]:
+    return [i["key"] for i in state["alarm_items"]]
 
 
 def sel_line(id_: str, sensor: str, event: str, direction: str = "Asserted") -> str:
@@ -358,3 +376,114 @@ def test_a_drive_that_crashes_the_check_costs_only_itself(tmp_path: Path) -> Non
         ["collector", "smart crashed", "sdb"],
         ["sdc", "SMART health FAILED"],
     ]
+
+
+# ---- identity: a stable key per alarm, and what was really checked -----------
+
+
+def test_each_alarm_has_a_stable_key_and_counters_a_value(tmp_path: Path) -> None:
+    state: dict[str, Any] = collect(
+        tmp_path,
+        {
+            "tmp/failed.txt": "x.service loaded failed failed X\n" * 2,
+            "tmp/lsblk.err": "exit 124\n",
+            "edac/mc0/dimm0/dimm_label": "DIMM#0\n",
+            "edac/mc0/dimm0/dimm_ue_count": "2\n",
+            **smart(
+                tmp_path,
+                "sda",
+                0,
+                {"serial_number": "S1", "smart_status": {"passed": False}},
+            ),
+        },
+    )[0]
+    assert (state["schema"], state["boot_id"]) == (1, "boot-1")
+    assert state["alarm_items"] == [
+        {
+            "key": "ecc/uncorrectable",
+            "text": "ECC: 2 uncorrectable errors since boot",
+            "value": 2,
+        },
+        {"key": "smart/S1/health", "text": "sda: SMART health FAILED"},
+        {"key": "unit/x.service", "text": "unit failed: x.service"},
+        # The same key twice in one run stays unique.
+        {"key": "unit/x.service#2", "text": "unit failed: x.service"},
+        {"key": "capture/lsblk", "text": "collector: lsblk: exit 124"},
+    ]
+
+
+def test_a_drive_keeps_its_key_when_its_letter_moves(tmp_path: Path) -> None:
+    report: dict[str, Any] = {"serial_number": "S1", "smart_status": {"passed": False}}
+    first: dict[str, Any] = collect(
+        tmp_path / "a", {**smart(tmp_path, "sda", 0, report)}
+    )[0]
+    second: dict[str, Any] = collect(
+        tmp_path / "b", {**smart(tmp_path, "sdb", 0, report)}
+    )[0]
+    assert keys(first) == keys(second) == ["smart/S1/health"]
+    assert (first["alarms"], second["alarms"]) == (
+        ["sda: SMART health FAILED"],
+        ["sdb: SMART health FAILED"],
+    )
+
+
+def test_only_what_was_really_evaluated_is_checked(tmp_path: Path) -> None:
+    ok: dict[str, Any] = {"serial_number": "S1", "smart_status": {"passed": True}}
+    quiet: dict[str, Any] = collect(
+        tmp_path / "quiet", {**smart(tmp_path, "sda", 0, ok)}
+    )[0]
+    key: str
+    for key in (
+        "sel/memory",
+        "sel/hardware",
+        "ecc/correctable",
+        "smart/S1/attrs",
+        "smart/dev:sda/unreadable",
+        "backup/overdue",
+        "unit/x.service",
+        "journal",
+        "capture/sel",
+        "collector/backup",
+        "smart-tools",
+    ):
+        assert covered(quiet, key), key
+
+    # A drive left asleep, a BMC that timed out, a missing BMC, a section that
+    # crashed: none of them proves an earlier alarm is gone.
+    state: dict[str, Any] = collect(
+        tmp_path / "partial",
+        {
+            **smart(tmp_path, "sda", 0, ok),
+            **smart(tmp_path, "sdc", 3, {}),
+            "tmp/sel.err": "exit 124\n",
+            "tmp/backup-timer.name": "b.timer\n",
+            "tmp/backup-timer.txt": "Tue 2026-11-17 03:10:05 UTC\n",
+            "tmp/journal-err.err": "exit 1\n",
+        },
+    )[0]
+    assert covered(state, "smart/S1/health")
+    for key in (
+        "smart/dev:sdc/unreadable",
+        "sel/memory",
+        "sel/hardware",
+        "backup/overdue",
+        "collector/backup",
+        "journal",
+    ):
+        assert not covered(state, key), key
+    no_bmc: dict[str, Any] = collect(tmp_path / "no-bmc", {"tmp/no-bmc": ""})[0]
+    assert not covered(no_bmc, "sel/memory")
+    # An uncorrectable count hides the correctable rule; a resync hides mismatch_cnt.
+    hidden: dict[str, Any] = collect(
+        tmp_path / "hidden",
+        {
+            "edac/mc0/dimm0/dimm_label": "DIMM#0\n",
+            "edac/mc0/dimm0/dimm_ue_count": "1\n",
+            "block/md0/md/sync_action": "resync\n",
+            "block/md0/md/mismatch_cnt": "8\n",
+        },
+    )[0]
+    assert covered(hidden, "ecc/uncorrectable") and not covered(
+        hidden, "ecc/correctable"
+    )
+    assert covered(hidden, "md/md0/degraded") and not covered(hidden, "md/md0/mismatch")
