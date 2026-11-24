@@ -562,6 +562,78 @@ function testSensorFreshness() {
   assert.deepEqual(context.errors, []);
 }
 
+// The Hardware card says since when each alarm has been there (the collector's
+// alarm_items), keeps showing one that could not be re-checked, and lists the
+// newest lines of the alarm log.
+function testHardwareSince() {
+  const context = liveContext(['hardware-content', 'hardware-value', 'snapshot-age']);
+  const now = Date.UTC(2026, 10, 24, 8, 0, 0);
+  context.Date = class extends Date { static now() { return now; } };
+  context.escapeHtml = String;
+  context.hwHint = text => text.startsWith('journal:') ? 'journalctl' : text.startsWith('sd') ? 'smartctl' : '';
+  context.updateCardCritical = (id, bad) => { context.statuses.critical = bad; };
+  context.updateCardWarning = (id, value) => { context.statuses.warning = value > 0; };
+  context.document.querySelector = () => context.elements.get('snapshot-age');
+  evaluate(context, between(app, 'function renderHardware', '// Power bar segment colours'));
+  const html = () => context.elements.get('hardware-content').innerHTML;
+  const header = () => context.elements.get('hardware-value').textContent;
+  const t = Math.floor(now / 1000);
+  const item = (key, text, since, extra = {}) => ({ key, text, since, ...extra });
+  const journal = ['journal: serverus-fans: failsafe (1 in 24h, at 2026-11-23 15:28)', 'journal: kernel: NVRM (1 in 24h, at 2026-11-24 01:24)'];
+  const state = { status: 'ok', age_sec: 30,
+    alarms: ['sde: reallocated=8', ...journal],
+    alarm_items: [item('smart/S/reallocated', 'sde: reallocated=8', t - 2 * 86400 - 3600, { value: 8, initial: true }),
+      item('journal/aaaa', journal[0], t - 5 * 3600), item('journal/bbbb', journal[1], t - 120)],
+    alarm_held: [item('smart/S2/health', 'sdb: SMART health FAILED', t - 86400 * 9, { unchecked_since: t - 1800 }),
+      item('x', 'absent for one run: flap damping, not shown', t, { absent: 1 })] };
+  context.dataCache.sensors = { lastUpdate: now, data: { status: 'ok', age_sec: 5,
+    alarms: ['GPU 1: thermal slowdown active (sw)'], alarm_items: [item('gpu/1/slowdown', 'GPU 1: thermal slowdown active (sw)', t - 59)] } };
+
+  context.renderHardware(state);
+  assert.equal(header(), '4 issues');
+  assert(html().includes(`seen since ${context.sinceText(t - 2 * 86400 - 3600)}`) && html().includes('(2 d)'), 'an alarm older than the history says so');
+  assert(html().includes(`>since ${context.sinceText(t - 5 * 3600)}<`) && html().includes('(5 h)') && html().includes('(2 min)') && html().includes('(0 min)'));
+  assert.equal(html().split('check: journalctl').length - 1, 1, 'two journal lines in a row share one hint');
+  assert(html().indexOf('check: journalctl') > html().indexOf('NVRM'), 'after the last of them');
+  assert(html().includes('check: smartctl'));
+  assert(html().includes(`sdb: SMART health FAILED: not re-checked since ${context.sinceText(t - 1800)}, alarm since ${context.sinceText(t - 86400 * 9)}`));
+  assert(!html().includes('flap damping') && !html().includes('Recent changes'));
+
+  // Nothing wrong that could be checked, but one alarm that could not: not "all clear".
+  context.dataCache.sensors.data = { status: 'ok', age_sec: 5, alarms: [] };
+  context.renderHardware({ ...state, alarms: [], alarm_items: [] });
+  assert.deepEqual([header(), context.elements.get('hardware-value').className, context.statuses.warning, context.statuses.critical],
+    ['1 unchecked', 'value text-warning', true, false]);
+  assert(!html().includes('no alarms') && html().includes('not re-checked'));
+
+  // A collector from before alarm_items, or an entry that is not for this line: the text alone.
+  context.renderHardware({ status: 'ok', age_sec: 30, alarms: ['md0: DEGRADED (1 missing)'] });
+  assert.equal(header(), '1 issue');
+  assert(!html().includes('since '));
+  context.renderHardware({ status: 'ok', age_sec: 30, alarms: ['a'], alarm_items: [item('k', 'another text', t)] });
+  assert(!html().includes('since '));
+
+  // The newest five lines of the alarm log, newest first; gaps and junk are left out.
+  const at = seconds => new Date((t - seconds) * 1000).toISOString();
+  context.dataCache.alarms = { lastUpdate: now, data: { recent: [
+    { timestamp: at(9000), event: 'raised', text: 'too old to show' },
+    { timestamp: at(8000), event: 'raised', text: 'sde: reallocated=8', initial: true },
+    { timestamp: at(7000), event: 'gap', from: 'x', to: 'y' },
+    { timestamp: at(6000), event: 'changed', text: 'sde: reallocated=9', was: 8, value: 9 },
+    { timestamp: at(5000), event: 'boot', kernel: '6.8.0-149-generic', previous: { clean: false, ended: '2026-11-24T01:21:26+00:00' } },
+    { timestamp: 'not a time', event: 'raised', text: 'unreadable line' }, null,
+    { timestamp: at(4000), event: 'raised', text: 'GPU 1: thermal slowdown active (sw)' },
+    { timestamp: at(2800), event: 'cleared', text: 'GPU 1: thermal slowdown active (sw)', active_for_s: 1200 },
+  ] } };
+  context.renderHardware({ status: 'ok', age_sec: 30, alarms: [] });
+  const recent = html().slice(html().indexOf('Recent changes'), html().indexOf('alarm rules'));
+  const order = ['cleared after 20 min: GPU 1', 'raised: GPU 1', 'booted 6.8.0-149-generic; the boot before ended without a shutdown at 2026-11-24T01:21:26+00:00',
+    '8 -> 9: sde: reallocated=9', 'first seen: sde: reallocated=8'].map(text => recent.indexOf(text));
+  assert(order.every(i => i > 0) && order.every((i, n) => n === 0 || i > order[n - 1]), `newest first: ${order}`);
+  assert(!recent.includes('too old') && !recent.includes('unreadable') && !recent.includes('gap'));
+  assert.deepEqual(context.errors, []);
+}
+
 async function testPausedStatus() {
   for (const ok of [true, false]) {
     const dom = makeDOM(['status', 'status-text', 'spinner', 'status-tooltip', 'toggle-btn']);
@@ -1428,6 +1500,12 @@ function testServicesCard() {
   assert.equal(elements.get('services-value').textContent, '1 down');
   assert.equal(flags.critical, true);
   assert(elements.get('services-content').innerHTML.includes('down (timeout)'));
+  assert(!elements.get('services-content').innerHTML.includes(' since '), 'a backend that does not say since when');
+  // When the outage began, from the server; never on a target that is up.
+  const began = Date.now() / 1000 - 3 * 3600 - 60;
+  context.renderServices({ targets: [target('pages', true, { down_since: began }), target('immich', false, { down_since: began })] });
+  assert.equal(elements.get('services-content').innerHTML.split(`down (timeout) since ${context.sinceText(began)}`).length - 1, 2, 'in the cell and its tooltip, once each');
+  assert(elements.get('services-content').innerHTML.includes('(3 h)'));
 
   // The checker stopped: the last results are not shown as the present.
   context.renderServices({ stale: true, targets: [target('pages', true), target('immich', false)] });
@@ -1476,7 +1554,7 @@ function testServicesCard() {
 
 (async () => {
   for (const test of [testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
-    testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
+    testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testHardwareSince, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testCapturePendingAndHiddenTab, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
     testVersionFooter]) {
     await test();

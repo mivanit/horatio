@@ -10,6 +10,14 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
   of the collectors' alarm log. Until now the two snapshots each had their own `alarms`
   list and a reader of one missed the other. `GET /api/services` gains `down_since` per
   target: when its current outage began.
+- Dashboard: the Hardware health card says since when each issue has been there
+  (`since 2026-11-21 17:50 (2 d)`, or `seen since …` when it predates the collector's
+  history), keeps showing an alarm that could not be re-checked (`not re-checked since
+  …`; the header then reads `N unchecked` instead of `all clear`), and lists the last
+  five alarm changes under "Recent changes". Several lines of one kind in a row share
+  one `check:` hint. The Services card shows when an outage began
+  (`down (timeout) since …`). All of it appears once the collectors and the server are
+  updated; an older one of either simply shows what it showed before.
 - Hardware collector: every alarm now has a stable identity. Both snapshots carry
   `alarm_items` (a `key` for each alarm string, plus a `value` for fault counters such as
   reallocated sectors and ECC counts) and `checked` (what this run really evaluated, so a

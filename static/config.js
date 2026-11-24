@@ -660,6 +660,7 @@ const dataCache = {
   mail: { ttl: 10000, data: null, lastUpdate: null },
   storageHealth: { ttl: 10000, data: null, lastUpdate: null },
   sensors: { ttl: 10000, data: null, lastUpdate: null },
+  alarms: { ttl: 10000, data: null, lastUpdate: null },
   services: { ttl: 10000, data: null, lastUpdate: null }
 };
 

@@ -576,7 +576,7 @@ function renderMail(data) {
   updateCacheDisplay('mail', 'mail');
 }
 
-// Hardware card. `data` is the HTTP 200 body of /api/storage-health: the
+// Hardware card (alarms, since when, and what changed lately). `data` is the HTTP 200 body of /api/storage-health: the
 // collector's state.json (collector/health-collect.sh)
 // merged with `status` (ok / stale / missing / error), `detail` and `age_sec`.
 // The alarm rules live in the collector only; this prints its `alarms` /
@@ -613,15 +613,27 @@ function renderHardware(data) {
   // its alarm list is unknown, not clear: flagged like a stale state.json.
   const sen = getFreshSnapshot('sensors', 300000);
   const sensorsUnknown = sen?.status !== 'ok';
-  const alarms = [...(Array.isArray(data?.alarms) ? data.alarms : []),
-                  ...(!sensorsUnknown && Array.isArray(sen.alarms) ? sen.alarms : [])];
+  // Each alarm with the collector's entry for it: `alarm_items` runs parallel to
+  // `alarms` and says since when. A collector without it gives the text alone.
+  const withItems = snap => (Array.isArray(snap?.alarms) ? snap.alarms : []).map((text, i) => {
+    const item = Array.isArray(snap.alarm_items) ? snap.alarm_items[i] : null;
+    return { text, item: item?.text === text ? item : null };
+  });
+  const rows = [...withItems(data), ...(sensorsUnknown ? [] : withItems(sen))];
+  const alarms = rows.map(r => r.text);
+  // Alarms the collector could not look at again this run (a failing drive that
+  // is asleep, a BMC that timed out): not in `alarms`, and not known to be gone.
+  const unchecked = [data, ...(sensorsUnknown ? [] : [sen])]
+    .flatMap(snap => Array.isArray(snap?.alarm_held) ? snap.alarm_held : [])
+    .filter(h => typeof h?.text === 'string' && h.unchecked_since != null);
   const info = Array.isArray(data?.info) ? data.info : [];
 
   // Header: the verdict, and the snapshot's OWN age (not when it was fetched).
   const valueEl = document.getElementById('hardware-value');
   valueEl.textContent = stale ? 'stale' : alarms.length ? `${alarms.length} issue${alarms.length === 1 ? '' : 's'}` :
-    sensorsUnknown ? 'sensors stale' : 'all clear';
-  valueEl.className = 'value ' + (stale ? 'text-warning' : alarms.length ? 'text-error' : sensorsUnknown ? 'text-warning' : 'text-success');
+    sensorsUnknown ? 'sensors stale' : unchecked.length ? `${unchecked.length} unchecked` : 'all clear';
+  valueEl.className = 'value ' + (stale ? 'text-warning' : alarms.length ? 'text-error' :
+    sensorsUnknown || unchecked.length ? 'text-warning' : 'text-success');
   document.querySelector('#hardware-card .cache-time').textContent = ageText;
 
   // Issues: alarms in red, then the collector's info notes in grey. A stale
@@ -633,12 +645,20 @@ function renderHardware(data) {
     const why = sen ? `sensors snapshot ${sen.status}${sen.age_sec != null ? ` (${Math.round(sen.age_sec / 60)} min old)` : ''}` : 'no fresh sensors snapshot';
     issues.push(hwRow('text-warning', `${why}: fan / GPU alarms unknown; is horatio-sensors.timer running?`));
   }
-  alarms.forEach(a => {
-    issues.push(hwRow('text-error', a));
-    const hint = hwHint(a, data);
-    if (hint) issues.push(hwRow('hw-note', `check: ${hint}`));
+  rows.forEach(({ text, item }, i) => {
+    issues.push(hwRow('text-error', text));
+    // `initial`: already there when the collector's history began, so it may be older.
+    const since = sinceText(item?.since);
+    if (since) issues.push(hwRow('hw-note', `${item.initial ? 'seen since' : 'since'} ${since}`));
+    // Several lines of one kind in a row (journal messages) share one hint, after the last.
+    const hint = hwHint(text, data);
+    if (hint && hint !== (i + 1 < rows.length ? hwHint(rows[i + 1].text, data) : null)) issues.push(hwRow('hw-note', `check: ${hint}`));
   });
-  if (!stale && !sensorsUnknown && alarms.length === 0) issues.push(hwRow('text-success', 'no alarms'));
+  unchecked.forEach(h => {
+    const from = sinceText(h.since), last = sinceText(h.unchecked_since);
+    issues.push(hwRow('text-warning', `${h.text}: not re-checked${last ? ` since ${last}` : ''}${from ? `, alarm since ${from}` : ''}`));
+  });
+  if (!stale && !sensorsUnknown && alarms.length === 0 && unchecked.length === 0) issues.push(hwRow('text-success', 'no alarms'));
   info.filter(i => !/^(sd[a-z]+|nvme\d+n\d+):/.test(i)).forEach(i => issues.push(hwRow('hw-note', i)));
 
   const memory = [];
@@ -657,14 +677,38 @@ function renderHardware(data) {
     backup.push(hwRow('hw-note', `check: systemctl list-timers ${b.timer}; journalctl --unit ${backupService(b.timer)} --since -2days`));
   }
 
-  content.innerHTML = hwSection('Issues', issues) + hwSection('Memory', memory) + hwSection('Backup', backup) +
+  // The newest lines of the collectors' alarm log (/api/alarms), newest first;
+  // nothing on a backend or collector without it.
+  const recent = (Array.isArray(dataCache.alarms?.data?.recent) ? dataCache.alarms.data.recent : [])
+    .map(hwEventText).filter(Boolean).slice(-5).reverse().map(t => hwRow('hw-note', t));
+
+  content.innerHTML = hwSection('Issues', issues) + hwSection('Recent changes', recent) +
+    hwSection('Memory', memory) + hwSection('Backup', backup) +
     '<div class="hw-note">alarm rules and the full table: collector/README.md</div>';
   // no-data must be cleared first: updateCardWarning bails out (stripping
   // .warning) while .no-data is set, and nothing else ever clears .no-data.
   updateCardNoData('hardware', true);
   // Any alarm is red; a stale snapshot (alarms unknown, not clear) is orange.
   updateCardCritical('hardware', alarms.length > 0);
-  updateCardWarning('hardware', stale || sensorsUnknown ? 1 : 0, 0);
+  updateCardWarning('hardware', stale || sensorsUnknown || unchecked.length ? 1 : 0, 0);
+}
+
+// One line of the alarm log (collector/README.md) as text, or null for a kind
+// not shown here (a gap in the snapshots) or a line that cannot be read.
+function hwEventText(e) {
+  const at = Date.parse(e?.timestamp);
+  if (!Number.isFinite(at)) return null;
+  const when = sinceText(at / 1000);
+  const span = s => !Number.isFinite(s) ? '' : s < 7200 ? ` after ${Math.round(s / 60)} min` : s < 172800 ? ` after ${Math.round(s / 3600)} h` : ` after ${Math.round(s / 86400)} d`;
+  switch (e.event) {
+    case 'raised': return `${when} ${e.initial ? 'first seen' : 'raised'}: ${e.text}`;
+    case 'changed': return `${when} ${e.was} -> ${e.value}: ${e.text}`;
+    case 'cleared': return `${when} cleared${span(e.active_for_s)}${e.after_boot ? ' (reboot)' : ''}: ${e.text}`;
+    case 'expired': return `${when} dropped, unchecked for 30 days: ${e.text}`;
+    case 'boot': return `${when} booted${e.kernel ? ` ${e.kernel}` : ''}` +
+      (e.previous?.clean === false ? `; the boot before ended without a shutdown at ${e.previous.ended}` : '');
+    default: return null;
+  }
 }
 
 // The non-snapshot branches and a failed fetch reset what the last good snapshot
@@ -678,8 +722,8 @@ function resetHardwareHeader() {
 }
 
 // Services card. `data` is /api/services: each config.json http_targets entry
-// with its newest check (`ok` null until the first one finishes) and its
-// {up, checks} counts over the last 1, 24 and 168 hours. The server decides
+// with its newest check (`ok` null until the first one finishes), when its
+// current outage began, and its {up, checks} counts over the last 1, 24 and 168 hours. The server decides
 // what counts as up; this only prints it.
 function renderServices(data) {
   const targets = Array.isArray(data?.targets) ? data.targets : [];
@@ -693,7 +737,9 @@ function renderServices(data) {
   valueEl.className = 'value ' + (stale ? 'text-warning' : down ? 'text-error' : pending === targets.length ? '' : 'text-success');
 
   const rows = targets.map(t => {
-    const last = t.ok == null ? 'pending' : t.ok ? 'up' : `down (${t.error || 'error'})`;
+    // down_since: the first failed check of this outage (at most a week back).
+    const since = t.ok === false ? sinceText(t.down_since) : '';
+    const last = t.ok == null ? 'pending' : t.ok ? 'up' : `down (${t.error || 'error'})${since ? ` since ${since}` : ''}`;
     const state = stale && t.ok != null ? `stale, was ${last}` : last;
     const cls = stale || t.ok == null ? 'svc-unknown' : t.ok ? 'svc-up' : 'svc-down';
     const uptime = [1, 24, 168].map(h => {
@@ -720,6 +766,17 @@ function resetServicesHeader() {
   const valueEl = document.getElementById('services-value');
   valueEl.textContent = '--';
   valueEl.className = 'value';
+}
+
+// "2026-11-21 17:50 (2 d)" for an epoch in seconds, in the browser's time zone;
+// '' when there is none (an older backend or collector does not say since when).
+// Shared by the Services and Hardware health cards.
+function sinceText(epoch) {
+  if (!Number.isFinite(epoch)) return '';
+  const d = new Date(epoch * 1000), p = n => String(n).padStart(2, '0');
+  const secs = Math.max(0, Math.floor(Date.now() / 1000 - epoch));
+  const age = secs < 3600 ? `${Math.floor(secs / 60)} min` : secs < 172800 ? `${Math.floor(secs / 3600)} h` : `${Math.floor(secs / 86400)} d`;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())} (${age})`;
 }
 
 // One uptime cell from {up, checks}: text, colour class and a tooltip with the
@@ -1469,6 +1526,11 @@ async function fetchSlowData() {
   const gpuInfoPromise = isCacheValid('gpuInfo')
     ? Promise.resolve({ data: getCache('gpuInfo'), ok: true, cached: true })
     : safeFetch('/api/gpu-info', []);
+  // The alarm log's newest lines, for the Hardware card's "Recent changes".
+  // safeFetch asks nothing of a backend that does not list the endpoint.
+  const alarmsPromise = isCacheValid('alarms')
+    ? Promise.resolve({ data: getCache('alarms'), ok: true, cached: true })
+    : safeFetch('/api/alarms', {});
   // No http_targets: the card is hidden and nothing is fetched.
   const servicesPromise = !servicesConfigured()
     ? Promise.resolve({ data: null, ok: false, errorType: 'unavailable' })
@@ -1533,10 +1595,11 @@ async function fetchSlowData() {
     }
   });
 
-  const [fs, mail, storageHealth, sensorsSnap, services] = await Promise.all([
-    drivesPromise, mailPromise, storageHealthPromise, sensorsPromise, servicesPromise, infoPromise
+  const [fs, mail, storageHealth, sensorsSnap, services, alarmsLog] = await Promise.all([
+    drivesPromise, mailPromise, storageHealthPromise, sensorsPromise, servicesPromise, alarmsPromise, infoPromise
   ]);
   if (sensorsSnap.ok && !sensorsSnap.cached) updateCache('sensors', sensorsSnap.data);
+  if (alarmsLog.ok && !alarmsLog.cached) updateCache('alarms', alarmsLog.data);
 
   // === PROCESS FAST RESULTS IMMEDIATELY ===
 
