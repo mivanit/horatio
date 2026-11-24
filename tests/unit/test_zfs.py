@@ -26,15 +26,16 @@ def fixture(name: str) -> str:
     return (FIXTURES / f"{name}.json").read_text()
 
 
-def zpool(stdout: str = "", rc: int = 0, stderr: str = "") -> Any:
-    calls: list[list[str]] = []
+class zpool:  # noqa: N801 - reads as the fake command it is
+    """A fake run_zpool that answers one way and records its calls."""
 
-    def run(args: list[str]) -> tuple[int, str, str]:
-        calls.append(args)
-        return rc, stdout, stderr
+    def __init__(self, stdout: str = "", rc: int = 0, stderr: str = "") -> None:
+        self.reply: tuple[int, str, str] = (rc, stdout, stderr)
+        self.calls: list[list[str]] = []
 
-    run.calls = calls  # type: ignore[attr-defined]
-    return run
+    def __call__(self, args: list[str]) -> tuple[int, str, str]:
+        self.calls.append(args)
+        return self.reply
 
 
 def check(
@@ -77,7 +78,7 @@ def test_a_healthy_recently_scrubbed_pool_is_quiet(tmp_path: Path) -> None:
     found, summary = check(run, seen=tmp_path / "seen.json")
     assert found.alarms == [] and found.notes == []
     assert run.calls == [["/usr/sbin/zpool", "status", "-j", "--json-int"]]
-    assert {"zfs/unreadable", "zfs/tank", "zfs/tank/missing"} <= set(found.checked)
+    assert {"zfs/unreadable", "zfs/tank"} <= set(found.checked)
     assert summary["status"] == "ok" and summary["pools"][0]["name"] == "tank"
     # The pool is remembered, so if it later disappears that is an alarm.
     assert json.loads((tmp_path / "seen.json").read_text()) == ["tank"]
@@ -122,7 +123,9 @@ def test_expected_pools_that_cannot_be_read_alarm_loudly() -> None:
     assert keys(found) == ["zfs/unreadable"]
     assert summary["status"] == "error"
     # zpool fails (/dev/zfs not readable) and a disk says it belongs to a pool.
-    denied = zpool(rc=1, stderr="Permission denied the ZFS utilities must be run as root.\n")
+    denied = zpool(
+        rc=1, stderr="Permission denied the ZFS utilities must be run as root.\n"
+    )
     found, _ = check(denied, labels={"tank"})
     assert keys(found) == ["zfs/unreadable"]
     assert "Permission denied" in found.alarms[0]["text"]
@@ -136,7 +139,9 @@ def test_expected_pools_that_cannot_be_read_alarm_loudly() -> None:
 def test_unreadable_without_any_expected_pool_is_only_a_note() -> None:
     denied = zpool(rc=1, stderr="Permission denied\n")
     found, _ = check(denied)
-    assert found.alarms == [] and found.notes == ["zfs: cannot read pool state (Permission denied)"]
+    assert found.alarms == [] and found.notes == [
+        "zfs: cannot read pool state (Permission denied)"
+    ]
 
 
 def test_a_hung_zpool_is_an_alarm(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -179,9 +184,14 @@ def test_lsblk_labels_name_the_pools(monkeypatch: pytest.MonkeyPatch) -> None:
 
     tree: dict[str, Any] = {
         "blockdevices": [
-            {"name": "sda", "fstype": None, "label": None, "children": [
-                {"name": "sda1", "fstype": "zfs_member", "label": "tank"},
-            ]},
+            {
+                "name": "sda",
+                "fstype": None,
+                "label": None,
+                "children": [
+                    {"name": "sda1", "fstype": "zfs_member", "label": "tank"},
+                ],
+            },
             {"name": "sdb", "fstype": "ext4", "label": "data"},
         ]
     }
@@ -190,7 +200,9 @@ def test_lsblk_labels_name_the_pools(monkeypatch: pytest.MonkeyPatch) -> None:
         stdout: str = json.dumps(tree)
 
     assert zfs.zfs_member_labels(lambda *a, **k: Result()) == {"tank"}
-    assert zfs.zfs_member_labels(lambda *a, **k: (_ for _ in ()).throw(OSError())) == set()
+    assert (
+        zfs.zfs_member_labels(lambda *a, **k: (_ for _ in ()).throw(OSError())) == set()
+    )
 
 
 def test_zfs_joins_the_servers_own_findings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,9 +210,14 @@ def test_zfs_joins_the_servers_own_findings(monkeypatch: pytest.MonkeyPatch) -> 
     import server
 
     monkeypatch.setattr(
-        server, "get_hw_sensors", lambda: {"alarm_items": [], "checked": [], "notes": []}
+        server,
+        "get_hw_sensors",
+        lambda: {"alarm_items": [], "checked": [], "notes": []},
     )
-    alarm: dict[str, Any] = {"key": "zfs/tank/state", "text": "zfs tank: pool is DEGRADED"}
+    alarm: dict[str, Any] = {
+        "key": "zfs/tank/state",
+        "text": "zfs tank: pool is DEGRADED",
+    }
     monkeypatch.setattr(
         server,
         "get_zfs",

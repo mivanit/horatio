@@ -871,17 +871,26 @@ def test_the_servers_own_findings_failing_cost_nothing_else(
     assert "dashboard" not in server._alarm_memory
 
 
-def test_api_alarms_carries_the_servers_own_notes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_api_alarms_carries_the_servers_own_notes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import server
 
     monkeypatch.setattr(
-        server, "_get_storage_health", lambda path=server.STATE_PATH, stale=0: {"status": "missing"}
+        server,
+        "_get_storage_health",
+        lambda path=server.STATE_PATH, stale=0: {"status": "missing"},
     )
     monkeypatch.setattr(
         server,
         "server_findings",
-        lambda: {"alarms": [], "alarm_items": [], "checked": [], "notes": ["reboot required"]},
+        lambda: {
+            "alarms": [],
+            "alarm_items": [],
+            "checked": [],
+            "notes": ["reboot required"],
+        },
     )
     monkeypatch.setattr(server, "_read_events", lambda: [])
-    body: dict[str, Any] = json.loads(asyncio.run(server.alarms()).body)
+    body: dict[str, Any] = json.loads(bytes(asyncio.run(server.alarms()).body))
     assert body["notes"] == ["reboot required"] and body["active"] == []

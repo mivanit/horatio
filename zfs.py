@@ -42,7 +42,14 @@ ZPOOL_TIMEOUT_SEC: Final[float] = 10.0
 # Ubuntu's cron scrubs on the second Sunday of each month: gaps of 28 or 35 days,
 # so 35 would alarm for hours in some months. Config: zfs_scrub_max_days.
 SCRUB_MAX_DAYS: Final[float] = 38.0
-VDEV_GROUPS: Final[tuple[str, ...]] = ("vdevs", "logs", "special", "dedup", "l2cache", "spares")
+VDEV_GROUPS: Final[tuple[str, ...]] = (
+    "vdevs",
+    "logs",
+    "special",
+    "dedup",
+    "l2cache",
+    "spares",
+)
 
 _lock: threading.Lock = threading.Lock()
 _running: subprocess.Popen[str] | None = None
@@ -52,7 +59,9 @@ class Hung(Exception):
     """zpool did not answer in time (or an earlier run is still stuck)."""
 
 
-def run_zpool(args: list[str], timeout: float = ZPOOL_TIMEOUT_SEC) -> tuple[int, str, str]:
+def run_zpool(
+    args: list[str], timeout: float = ZPOOL_TIMEOUT_SEC
+) -> tuple[int, str, str]:
     """(returncode, stdout, stderr) of zpool, or Hung. See the module docstring."""
     global _running
     with _lock:
@@ -78,6 +87,7 @@ def run_zpool(args: list[str], timeout: float = ZPOOL_TIMEOUT_SEC) -> tuple[int,
     reader.join(timeout)
     if reader.is_alive():
         proc.kill()  # never waited for: a process in D state would block us too
+        reader.join(1.0)  # an ordinary hang dies and is reaped here at once
         raise Hung(f"zpool did not answer within {timeout:g} s (a suspended pool?)")
     return proc.returncode, out.get("stdout", ""), out.get("stderr", "")
 
@@ -100,7 +110,9 @@ def zfs_member_labels(run: Any = subprocess.run) -> set[str]:
         node: Any
         for node in nodes if isinstance(nodes, list) else []:
             if isinstance(node, dict):
-                if node.get("fstype") == "zfs_member" and isinstance(node.get("label"), str):
+                if node.get("fstype") == "zfs_member" and isinstance(
+                    node.get("label"), str
+                ):
                     names.add(node["label"])
                 walk(node.get("children"))
 
@@ -147,7 +159,8 @@ def vdev_errors(pool: dict[str, Any]) -> int:
         for vdev in vdevs.values() if isinstance(vdevs, dict) else []:
             if isinstance(vdev, dict):
                 total += sum(
-                    _int(vdev.get(k)) for k in ("read_errors", "write_errors", "checksum_errors")
+                    _int(vdev.get(k))
+                    for k in ("read_errors", "write_errors", "checksum_errors")
                 )
                 walk(vdev.get("vdevs"))
 
@@ -165,7 +178,11 @@ def pool_findings(
     state: str = str(pool.get("state", "UNKNOWN"))
     if state != "ONLINE":
         found.alarms.append(
-            {"key": f"zfs/{name}/state", "text": f"zfs {name}: pool is {state}", "value": state}
+            {
+                "key": f"zfs/{name}/state",
+                "text": f"zfs {name}: pool is {state}",
+                "value": state,
+            }
         )
     errors: int = vdev_errors(pool)
     data: int = _int(pool.get("error_count"))
@@ -224,7 +241,8 @@ def zfs_findings(
     now = time.time() if now is None else now
     max_days: float = (
         float(scrub_max_days)
-        if isinstance(scrub_max_days, (int, float)) and not isinstance(scrub_max_days, bool)
+        if isinstance(scrub_max_days, (int, float))
+        and not isinstance(scrub_max_days, bool)
         else SCRUB_MAX_DAYS
     )
     configured: set[str] = (
@@ -293,17 +311,19 @@ def zfs_findings(
                 "errors": vdev_errors(pool),
                 "data_errors": _int(pool.get("error_count")),
                 "scan": {
-                    k: scan.get(k) for k in ("function", "state", "start_time", "end_time")
+                    k: scan.get(k)
+                    for k in ("function", "state", "start_time", "end_time")
                 }
                 if isinstance(scan, dict)
                 else None,
             }
         )
-    _missing(expected, set(pools), found)
+    names: set[str] = {str(n) for n in pools}
+    _missing(expected, names, found)
     if not pools and not expected:
         found.notes.append("zfs: installed, no pools imported")
-    if set(pools) - seen:
-        _write_seen(seen_file, seen | set(pools))
+    if names - seen:
+        _write_seen(seen_file, seen | names)
     return found, {"status": "ok", "pools": summary}
 
 
@@ -313,7 +333,10 @@ def _missing(expected: set[str], present: set[str], found: Findings) -> None:
         found.checked.append(f"zfs/{name}/missing")
         if name not in present:
             found.alarms.append(
-                {"key": f"zfs/{name}/missing", "text": f"zfs {name}: pool is not imported"}
+                {
+                    "key": f"zfs/{name}/missing",
+                    "text": f"zfs {name}: pool is not imported",
+                }
             )
 
 
@@ -339,14 +362,17 @@ def _health_only(
     present: set[str] = set()
     line: str
     for line in stdout.splitlines():
-        parts: list[str] = line.split("\t")
+        parts: list[str] = [str(p) for p in line.split("\t")]
         if len(parts) == 2:
             name, health = parts
             present.add(name)
             found.checked.append(f"zfs/{name}/state")
             if health != "ONLINE":
                 found.alarms.append(
-                    {"key": f"zfs/{name}/state", "text": f"zfs {name}: pool is {health}"}
+                    {
+                        "key": f"zfs/{name}/state",
+                        "text": f"zfs {name}: pool is {health}",
+                    }
                 )
     _missing(expected, present, found)
     return found, {"status": "ok", "pools": [{"name": n} for n in sorted(present)]}

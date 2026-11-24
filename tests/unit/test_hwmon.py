@@ -295,11 +295,9 @@ def test_server_applies_fan_rules_and_hints_in_one_place(
         bytes(asyncio.run(server.hw_sensors()).body)
     )
     assert [r["label"] for r in rows] == ["f71889ed fan1"]  # fan2: empty header, hidden
-    body: dict[str, Any] = json.loads(bytes(asyncio.run(server.sensor_alarms()).body))
-    assert body == {
-        "alarms": ["fan f71889ed fan1: 0 RPM, below its 300 RPM minimum"],
-        "notes": ["a hint"],
-    }
+    found: dict[str, Any] = server.server_findings()
+    assert found["alarms"] == ["fan f71889ed fan1: 0 RPM, below its 300 RPM minimum"]
+    assert found["notes"] == ["a hint"]
 
 
 def test_collector_power_rows_read_new_and_old_snapshots() -> None:
