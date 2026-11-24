@@ -90,15 +90,48 @@ jobs:
       - name: Exercise the real handler over HTTP
         run: LUA_RUNTIME="$RUNNER_TEMP/horatio-lua-runtime" uv run --locked pytest tests/lua/test_runtime.py
 
-  openwrt-container:
-    # Real OpenWrt (the official rootfs, booted with procd): a fresh install of
-    # this commit must serve the dashboard, and --update must install the newest
-    # release over it (skipped until one exists).
-    name: OpenWrt install and update in a container
+  systemd-install:
+    name: ${{ matrix.backend }} installation under systemd
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [python, lua]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: scripts/openwrt-container-test.sh
+          fetch-depth: 0 # the Python upgrade starts at the published v0.2.1 tag
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.4"
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install deployment prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config curl ca-certificates libcrypt-dev wget smartmontools
+      - name: Exercise installed services on the disposable runner
+        env:
+          HORATIO_SYSTEMD_TEST: "1"
+          # Keep the interpreter under home, exercising ProtectHome and its bind.
+          UV_PYTHON_INSTALL_DIR: /home/runner/.local/share/horatio-test-python
+          UV_PYTHON_PREFERENCE: only-managed
+        run: uv run --locked pytest -v tests/deployment/test_systemd.py -k '${{ matrix.backend }}'
+
+  openwrt-container:
+    name: OpenWrt ${{ matrix.scenario }} in a container
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [fresh, migrate]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # migration installs the actual published source first
+      - run: scripts/openwrt-container-test.sh '${{ matrix.scenario }}'
