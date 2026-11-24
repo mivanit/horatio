@@ -3780,26 +3780,35 @@ async def services_history(hours: float = 24) -> Response:
     bucket: int
     count: int
     start, bucket, count = services_bucket_plan(hours, now, SERVICES_CHECK_INTERVAL)
-    rounds: Iterable[ServiceRound] = _services_rounds
+    # Published round dictionaries are immutable (see services_snapshot). Capture
+    # the deque and target names before yielding, including the fallback on a
+    # failed disk read, so the worker never traverses changing live state.
+    rounds: Iterable[ServiceRound] = tuple(_services_rounds)
+    names: tuple[str, ...] = tuple(t.name for t in HTTP_TARGETS)
     truncated: bool = False
-    if HTTP_TARGETS and hours > SERVICES_UPTIME_HOURS[-1]:
+    if names and hours > SERVICES_UPTIME_HOURS[-1]:
         e: Exception
         try:
             rounds, truncated = await asyncio.to_thread(_read_service_rounds, start)
         except Exception as e:
             logger.error("Service history: cannot read %s: %s", SERVICES_FILE, e)
             truncated = True
-    body: dict[str, Any] = {
-        "start": start,
-        "bucket_sec": bucket,
-        "count": count,
-        "now": now,
-        "truncated": truncated,
-        "targets": bucket_services(
-            rounds, [t.name for t in HTTP_TARGETS], start, bucket, count
-        ),
-    }
-    return Response(content=json.dumps(body), media_type="application/json")
+
+    def encode() -> str:
+        return json.dumps(
+            {
+                "start": start,
+                "bucket_sec": bucket,
+                "count": count,
+                "now": now,
+                "truncated": truncated,
+                "targets": bucket_services(rounds, names, start, bucket, count),
+            }
+        )
+
+    return Response(
+        content=await asyncio.to_thread(encode), media_type="application/json"
+    )
 
 
 _cuda_version: str = ""  # nvidia-smi's CUDA version once read (see _get_gpu_info)

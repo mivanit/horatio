@@ -7,7 +7,8 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 
 - Service uptime counting runs off the event loop for the services, alarms, and
   terminal endpoints. Uptime remains successful checks divided by total checks;
-  periods without checks do not count as downtime.
+  periods without checks do not count as downtime. Service-history bucketing and
+  JSON encoding also run in a worker using a consistent snapshot of the checks.
 - History recording uses a separate persistent Glances connection pool from
   interactive requests. Startup, scheduled, and manual records share that pool;
   clients close after background tasks finish, including on startup failure.

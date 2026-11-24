@@ -428,6 +428,94 @@ def test_services_snapshot_does_not_block_or_mix_rounds(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("source", ["memory", "disk", "disk-error"])
+def test_service_history_stays_responsive_and_uses_captured_rounds(
+    monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    import server
+
+    now = time.time()
+    monkeypatch.setattr(
+        server, "HTTP_TARGETS", [server.HttpTarget("site", "http://site/", None, False)]
+    )
+    for age, ok in ((30, True), (10, False)):
+        server._note_service_round(
+            {"timestamp": str(now - age), "targets": {"site": {"ok": ok}}}, now - age
+        )
+    archived = [(now - 200 * 3600, {"site": True}), *server._services_rounds]
+    original_bucket, original_dumps = server.bucket_services, json.dumps
+    release = threading.Event()
+    encoding_threads: list[int] = []
+
+    def encode(value: Any, *args: Any, **kwargs: Any) -> str:
+        if isinstance(value, dict) and "bucket_sec" in value:
+            encoding_threads.append(threading.get_ident())
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(server.json, "dumps", encode)
+
+    async def run() -> None:
+        entered = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        loop_thread = threading.get_ident()
+
+        def hold() -> None:
+            assert threading.get_ident() != loop_thread
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5), "history work blocked the event loop"
+
+        def read_rounds(cutoff: float) -> tuple[list[Any], bool]:
+            if source == "disk-error":
+                hold()
+                raise OSError("history unavailable")
+            return archived, False
+
+        def bucket(*args: Any) -> dict[str, list[list[int]]]:
+            if source != "disk-error":
+                hold()
+            return original_bucket(*args)
+
+        monkeypatch.setattr(server, "_read_service_rounds", read_rounds)
+        monkeypatch.setattr(server, "bucket_services", bucket)
+        hours = 168 if source == "memory" else 240
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=server.APP), base_url="http://dashboard"
+        ) as client:
+            pending = asyncio.create_task(
+                client.get(f"/api/services/history?hours={hours}")
+            )
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                response = await asyncio.wait_for(client.get("/api/version"), 2)
+                assert response.status_code == 200 and not pending.done()
+                # New checks prune the live window while the worker is paused.
+                server._note_service_round(
+                    {"timestamp": "later", "targets": {"site": {"ok": False}}},
+                    now + 200 * 3600,
+                )
+                assert len(server._services_rounds) == 1
+                server.HTTP_TARGETS.append(
+                    server.HttpTarget("later", "http://later/", None, False)
+                )
+            finally:
+                release.set()
+                response = await asyncio.wait_for(pending, 5)
+        assert response.status_code == 200
+        body = response.json()
+        assert set(body["targets"]) == {"site"}
+        assert (
+            len(body["targets"]["site"]) == body["count"] <= server.SERVICES_MAX_BUCKETS
+        )
+        assert sum(up for up, _ in body["targets"]["site"]) == (
+            2 if source == "disk" else 1
+        )
+        assert sum(down for _, down in body["targets"]["site"]) == 1
+        assert body["truncated"] is (source == "disk-error")
+        assert len(encoding_threads) == 1 and encoding_threads[0] != loop_thread
+
+    asyncio.run(run())
+
+
 def test_uptime_is_fraction_of_checks_at_window_boundaries() -> None:
     import server
 
