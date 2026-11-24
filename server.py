@@ -76,6 +76,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 import hostcheck
 import hwmon
+import zfs
 
 STATIC_DIR: Final[Path] = Path(__file__).parent / "static"
 INDEX_FILE: Final[Path] = Path(__file__).parent / "index.html"
@@ -4745,6 +4746,8 @@ async def storage_health() -> Response:
         for row in held_rows("dashboard", None, _alarm_memory)
     ]
     result["sensor_notes"] = hw["notes"]
+    # ZFS pools as the server read them: {status ok|error|absent, error?, pools}.
+    result["zfs"] = (await asyncio.to_thread(get_zfs))[1]
     return Response(content=json.dumps(result), media_type="application/json")
 
 
@@ -4843,13 +4846,37 @@ def _host_findings() -> hostcheck.Findings:
         return data
 
 
+ZFS_CACHE_SEC: Final[float] = 60.0
+# Pools this server has seen, so one that disappears is an alarm (zfs.py).
+ZFS_SEEN_FILE: Final[Path] = LOGS_DIR / "zfs-pools.json"
+_zfs_lock: _thread.LockType = threading.Lock()
+_zfs_cache: dict[str, Any] = {"at": -math.inf, "data": None}
+
+
+def get_zfs() -> tuple[hostcheck.Findings, dict[str, Any]]:
+    """zfs.zfs_findings with config.json zfs_pools / zfs_scrub_max_days, cached
+    (sync): zpool runs at most once a minute."""
+    with _zfs_lock:
+        now: float = time.monotonic()
+        if now - _zfs_cache["at"] < ZFS_CACHE_SEC and _zfs_cache["data"]:
+            return _zfs_cache["data"]
+        data: tuple[hostcheck.Findings, dict[str, Any]] = zfs.zfs_findings(
+            _CONFIG.get("zfs_pools"),
+            _CONFIG.get("zfs_scrub_max_days"),
+            ZFS_SEEN_FILE,
+        )
+        _zfs_cache.update(at=now, data=data)
+        return data
+
+
 def server_findings() -> dict[str, Any]:
     """Everything the server decides itself, as one alarm source ("dashboard"):
     the hwmon fan rules and setup hints (get_hw_sensors) plus the host checks
-    (hostcheck: a pending reboot, an NVIDIA driver/library mismatch). The same
+    (hostcheck: a pending reboot, an NVIDIA driver/library mismatch; zfs: pool
+    health and scrubs). The same
     shape as get_hw_sensors without ``rows`` (sync)."""
     hw: dict[str, Any] = get_hw_sensors()
-    host: hostcheck.Findings = _host_findings()
+    host: hostcheck.Findings = _host_findings().merge(get_zfs()[0])
     items: list[dict[str, Any]] = [*hw["alarm_items"], *host.alarms]
     return {
         "alarms": [item["text"] for item in items],

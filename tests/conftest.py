@@ -18,6 +18,7 @@ def copy_application(destination: Path) -> Path:
         "server.py",
         "hwmon.py",
         "hostcheck.py",
+        "zfs.py",
         "tui.py",
         "index.html",
         "VERSION",

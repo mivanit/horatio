@@ -15,7 +15,7 @@ import pytest
 def isolated_app(app_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     name: str
     # hwmon first: server imports it, and must get the copy, not the checkout's.
-    for name in ("hwmon", "hostcheck", "server", "tui"):
+    for name in ("hwmon", "hostcheck", "zfs", "server", "tui"):
         spec: importlib.machinery.ModuleSpec | None = (
             importlib.util.spec_from_file_location(name, app_dir / f"{name}.py")
         )
@@ -27,3 +27,9 @@ def isolated_app(app_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # them call hostcheck's functions with a fake tree instead.
     hostcheck: ModuleType = sys.modules["hostcheck"]
     monkeypatch.setattr(hostcheck, "host_findings", hostcheck.Findings)
+    # Likewise zpool and lsblk; tests/unit/test_zfs.py calls zfs.zfs_findings itself.
+    monkeypatch.setattr(
+        sys.modules["server"],
+        "get_zfs",
+        lambda: (hostcheck.Findings(), {"status": "absent", "pools": []}),
+    )
