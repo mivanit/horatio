@@ -8,7 +8,7 @@ static/chart.umd.min.js
 .build
 # per-machine configs: created from the *.example.json files by install.sh
 config.json
-# Lua web root: copies made by lua/install.sh plus the real config
+# Lua web root: copies made by lua/install-openwrt.sh plus the real config
 www/
 # the demo site, built by docs/build-demo.sh: CI's _site/, and `make demo`'s copies in docs/
 _site/

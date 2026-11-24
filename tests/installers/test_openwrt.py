@@ -119,7 +119,7 @@ class TestOpenWrtInstaller:
             "ping_targets": [{"address": "8.8.8.8"}],
         }
         (self.root / "config.example.json").write_text(json.dumps(self.example))
-        script: str = (ROOT / "lua/install.sh").read_text()
+        script: str = (ROOT / "lua/install-openwrt.sh").read_text()
         # Redirect system paths to fixtures. The actual installer control flow,
         # checksum utility, temporary file and mv run.
         script = script.replace("/etc/init.d/uhttpd", "test-uhttpd-service")
@@ -130,7 +130,7 @@ class TestOpenWrtInstaller:
             r'CHARTJS_SHA256="[a-f0-9]+"', f'CHARTJS_SHA256="{ASSET_HASH}"', helper
         )
         (self.root / "lua/prepare-web.sh").write_text(helper)
-        self.script: Path = self.root / "lua/install.sh"
+        self.script: Path = self.root / "lua/install-openwrt.sh"
         self.script.write_text(script)
         mock: Path = self.bin / "mock"
         mock.write_text(MOCK)

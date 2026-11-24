@@ -10,9 +10,18 @@ metrics/history implementation. It provides core CPU, memory, network, filesyste
 temperature and history data; it does not collect the Python backend's GPU, fan,
 power, host-alarm or root-collector data.
 
+| Platform | Installer | Prerequisites |
+|---|---|---|
+| Linux with systemd | `sh lua/install-linux.sh` | sudo, wget, a C toolchain and the build packages below; dependencies built privately |
+| OpenWrt | `sh lua/install-openwrt.sh` | UCI, uhttpd, apk or opkg; Lua modules installed from OpenWrt packages |
+
+Neither installer needs Python, uv, or Glances. The Linux installer runs as your
+user and uses sudo; the OpenWrt installer runs as root on the router.
+
 ## Linux
 
-On ordinary Linux with systemd, run as the user who owns the checkout:
+Clone the repository onto an ordinary Linux host with systemd, then run these
+commands from its root as the user who owns the checkout:
 
 ```bash
 # Build prerequisites on Debian/Ubuntu (use equivalent packages on other distros):
@@ -44,18 +53,19 @@ use a trusted network or an authenticated reverse proxy for access beyond loopba
 
 ## OpenWrt
 
-On OpenWrt, use its separate installer:
+Copy or extract the repository onto the router. As root, run its OpenWrt installer
+from the checkout root (no git or C compiler is needed):
 
 ```bash
-cd lua
-sh install.sh             # install and start on port 8080 (LAN only)
-sh install.sh --update    # to the newest release (or --update vX.Y.Z), then reinstall
-sh install.sh --uninstall
+sh lua/install-openwrt.sh             # install and start on port 8080 (LAN only)
+sh lua/install-openwrt.sh --update    # newest release (or --update vX.Y.Z), then reinstall
+sh lua/install-openwrt.sh --uninstall
 ```
 
-The old `openwrt/install.sh` path forwards to `lua/install.sh` so existing
-installations can upgrade. Updates select the installer shipped by the target
-release, including older releases that used the old directory.
+The old `lua/install.sh` and `openwrt/install.sh` paths forward to
+`lua/install-openwrt.sh` so existing installations can upgrade. Updates select
+the installer shipped by the target release, including older releases that used
+either old path.
 
 `--update` needs no git: it reads the newest version from `main`'s `VERSION` on GitHub,
 downloads that release's tarball over HTTPS (needs `libustream-mbedtls` and `ca-bundle`, on

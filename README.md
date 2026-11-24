@@ -12,9 +12,20 @@ and no Python or Glances.
 
 ## Requirements
 
-The Python backend needs Linux with systemd and [uv](https://docs.astral.sh/uv/).
-Most temperatures, fan speeds, and power readings come directly from Linux hwmon
-without root. Optional features need:
+Choose a backend and installer for your platform:
+
+| Platform / backend | Requirements | Installer |
+|---|---|---|
+| Linux / Python | systemd, [uv](https://docs.astral.sh/uv/), Python 3.10+ managed through uv; full metrics and optional hardware collector | `./install.sh` |
+| Linux / Lua | systemd, sudo, and a C build toolchain; builds a private Lua/uhttpd runtime, no Python or Glances | `sh lua/install-linux.sh` |
+| OpenWrt / Lua | OpenWrt with UCI and uhttpd; installer adds Lua modules using apk or opkg, no build toolchain needed | `sh lua/install-openwrt.sh` |
+
+Both Lua versions provide CPU, memory, network, filesystems, temperatures, and
+history. GPU, fan/power, process, service-check, and hardware-alarm features need
+the Python backend. See [Lua requirements](lua/README.md) for platform packages.
+
+On Python, most temperatures, fan speeds, and power readings come directly from
+Linux hwmon without root. Optional features need:
 
 | Feature | Needs |
 |---|---|
@@ -28,6 +39,8 @@ See [optional tools](docs/operations.md#optional-tools) for packages, mail setup
 and sensor-driver troubleshooting.
 
 ## Install
+
+### Linux: Python
 
 For the Python backend, run as your user; the installer calls sudo where needed:
 
@@ -49,13 +62,38 @@ The installer offers to install nethogs and sysstat using `apt-get`, but grants
 no extra permissions by default. `--no-optional` silences the offers; on other
 distros install `nethogs`, `libcap2-bin`, and `sysstat` yourself.
 
-### Process permissions
+#### Process permissions
 
 By default, Network Processes shows an error and Disk I/O Processes shows only
 the service user's processes. `./install.sh --grant-capabilities` enables both
 tools to see other users' activity. These capabilities apply to **every local
 user** running those binaries, and a bug in either could allow reading any file.
 See [permissions and removal](docs/operations.md#process-permissions) before enabling.
+
+### Linux: Lua
+
+Clone the repository as above, install the [build prerequisites](lua/README.md#linux),
+then run as your user from the checkout root:
+
+```bash
+sh lua/install-linux.sh
+```
+
+Open `http://localhost:8080`. It listens on loopback by default; see the
+[Linux Lua guide](lua/README.md#linux) for a LAN address. Edit `www/config.json`
+and restart with `sudo systemctl restart horatio-lua.service`.
+
+### OpenWrt: Lua
+
+Copy or extract the repository onto the router, then run as root from the checkout root:
+
+```sh
+sh lua/install-openwrt.sh
+```
+
+Open `http://<router-LAN-IP>:8080`. Edit `www/config.json`; see the
+[OpenWrt guide](lua/README.md#openwrt) for dependencies and updates. The Python
+and systemd installers above are for ordinary Linux, not OpenWrt.
 
 ## Security
 
@@ -74,6 +112,8 @@ sandbox and process-data privacy details.
 
 ## Update and uninstall
 
+For the Python backend:
+
 ```bash
 ./install.sh --update      # newest release
 ./install.sh --uninstall
@@ -87,6 +127,9 @@ A checkout following `main` can use `git pull && ./install.sh`. Release checkout
 use `--update`, since they have a detached HEAD. See [versions and updates](docs/operations.md#versions-and-updates)
 for selecting an older release and update restrictions, and [CHANGELOG.md](CHANGELOG.md)
 for release notes.
+
+Lua uses its platform installer: [Linux updates/removal](lua/README.md#linux)
+or [OpenWrt updates/removal](lua/README.md#openwrt).
 
 ## Terminal
 
@@ -106,8 +149,9 @@ address filled in.
 
 ## Configuration
 
-Set the title, ping/HTTP targets, history recording, thresholds, and sensor rules
-in `config.json`. Restart the Python service after editing. Poll interval, chart
+Set the title, targets, history recording, thresholds, and supported sensor rules
+in `config.json` (Python) or `www/config.json` (Lua). HTTP service checks are
+Python-only. Restart the Python service after editing its config. Poll interval, chart
 length, grid layout, card order, and theme live in the browser. Password-protected
 recording settings changed through the page revert to config on restart.
 

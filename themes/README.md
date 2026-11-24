@@ -10,7 +10,7 @@ in the toolbar lists every theme here; each browser remembers its own choice
   before any script runs, because the scripts read colors from CSS once at
   startup. Choosing a theme therefore reloads the page.
 - **Adding one**: on Linux, drop the file here; it shows up in the picker
-  straight away. On OpenWrt, add it here and rerun `openwrt/install.sh`, which
+  straight away. On OpenWrt, add it here and rerun `lua/install-openwrt.sh`, which
   copies themes into `www/themes/` and writes the list (symlinks are copied as
   files, since uhttpd won't serve them).
 - **Iterating**: a plain reload shows an edit. The Linux server sends themes

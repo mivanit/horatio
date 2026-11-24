@@ -1,4 +1,4 @@
-"""`lua/install.sh --update`: wget is mocked to serve main's VERSION and a
+"""`lua/install-openwrt.sh --update`: wget is mocked to serve main's VERSION and a
 local release tarball.
 
 The release's own installer is a stub that leaves a marker, standing in for
@@ -39,7 +39,9 @@ class Router:
         self.tmp: Path = tmp_path
         self.box: Path = tmp_path / "horatio"
         (self.box / "lua").mkdir(parents=True)
-        (self.box / "lua/install.sh").write_text((ROOT / "lua/install.sh").read_text())
+        (self.box / "lua/install-openwrt.sh").write_text(
+            (ROOT / "lua/install-openwrt.sh").read_text()
+        )
         (self.box / "VERSION").write_text("0.1.0\n")
         (self.box / "www").mkdir()
         (self.box / "www/config.json").write_text('{"title": "mine"}\n')
@@ -48,12 +50,19 @@ class Router:
         (self.bin / "wget").write_text(MOCK)
         (self.bin / "wget").chmod(0o755)
 
-    def release(self: Router, version: str, installer: str = "lua/install.sh") -> None:
+    def release(
+        self: Router, version: str, installer: str = "lua/install-openwrt.sh"
+    ) -> None:
         """The GitHub archive of v<version>: one horatio-<version>/ directory."""
         with tarfile.open(self.tmp / "release.tar.gz", "w:gz") as tar:
             for path, text in (
                 ("VERSION", version + "\n"),
                 (installer, STUB),
+                *[
+                    (legacy, "#!/bin/sh\nexit 99\n")
+                    for legacy in ("lua/install.sh", "openwrt/install.sh")
+                    if installer == "lua/install-openwrt.sh"
+                ],
             ):
                 data: bytes = text.encode()
                 info: tarfile.TarInfo = tarfile.TarInfo(f"horatio-{version}/{path}")
@@ -69,7 +78,7 @@ class Router:
         with tarfile.open(fileobj=raw, mode="w") as tar:
             for path, text in (
                 ("VERSION", version + "\n"),
-                ("lua/install.sh", STUB),
+                ("lua/install-openwrt.sh", STUB),
                 ("static/app.js", "// the part that never arrived\n"),
             ):
                 data: bytes = text.encode()
@@ -88,7 +97,7 @@ class Router:
         self: Router, *args: str, main: str = "0.2.0", **env: str
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["sh", str(self.box / "lua/install.sh"), "--update", *args],
+            ["sh", str(self.box / "lua/install-openwrt.sh"), "--update", *args],
             env=dict(
                 os.environ,
                 PATH=f"{self.bin}:{os.environ['PATH']}",
@@ -113,9 +122,12 @@ class Router:
         )
 
 
-def test_update_can_run_an_older_release_installer(tmp_path: Path) -> None:
+@pytest.mark.parametrize("installer", ["lua/install.sh", "openwrt/install.sh"])
+def test_update_can_run_an_older_release_installer(
+    tmp_path: Path, installer: str
+) -> None:
     router = Router(tmp_path)
-    router.release("0.2.0", installer="openwrt/install.sh")
+    router.release("0.2.0", installer=installer)
     result = router.update("v0.2.0")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (router.box / "ran").read_text() == "ran\n"
@@ -132,17 +144,18 @@ def test_missing_release_installer_does_not_modify_checkout(tmp_path: Path) -> N
     assert not (router.box / "unrelated.sh").exists()
 
 
-def test_legacy_install_path_delegates_to_new_backend(tmp_path: Path) -> None:
-    # Older deployed updaters re-exec this path after copying a new release.
-    old = tmp_path / "openwrt"
-    new = tmp_path / "lua"
-    old.mkdir()
-    new.mkdir()
-    (old / "install.sh").write_text((ROOT / "openwrt/install.sh").read_text())
-    (new / "install.sh").write_text(
-        '#!/bin/sh\nprintf "%s\\n" "$@" > "$(dirname "$0")/../args"\n'
-    )
-    subprocess.run(["sh", str(old / "install.sh"), "--update", "v0.2.0"], check=True)
+@pytest.mark.parametrize("entrypoint", ["lua/install.sh", "openwrt/install.sh"])
+def test_legacy_install_path_delegates_to_new_backend(
+    tmp_path: Path, entrypoint: str
+) -> None:
+    # Older deployed updaters re-exec these paths after copying a new release.
+    old = tmp_path / entrypoint
+    new = tmp_path / "lua/install-openwrt.sh"
+    old.parent.mkdir(parents=True, exist_ok=True)
+    new.parent.mkdir(parents=True, exist_ok=True)
+    old.write_text((ROOT / entrypoint).read_text())
+    new.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$(dirname "$0")/../args"\n')
+    subprocess.run(["sh", str(old), "--update", "v0.2.0"], check=True)
     assert (tmp_path / "args").read_text().splitlines() == ["--update", "v0.2.0"]
 
 

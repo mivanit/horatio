@@ -84,7 +84,7 @@ ROOT_DIR: Final[Path] = SOURCE_DIR.parent
 STATIC_DIR: Final[Path] = ROOT_DIR / "static"
 INDEX_FILE: Final[Path] = ROOT_DIR / "index.html"
 THEMES_DIR: Final[Path] = ROOT_DIR / "themes"
-# Theme names as the page's loader (index.html) and lua/install.sh accept them;
+# Theme names as the page's loader (index.html) and lua/install-openwrt.sh accept them;
 # "default" is the picker's no-theme entry, so a default.css could never be chosen.
 THEME_NAME_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9_-]+")
 LOGS_DIR: Final[Path] = ROOT_DIR / "logs"
@@ -116,7 +116,7 @@ def _read_stamp(path: Path) -> str | None:
         return None
 
 
-# VERSION is the release (README: Versions and updates); .build is the commit
+# VERSION is the release (docs/operations.md: Versions and updates); .build is the commit
 # install.sh saw (`git describe`), so a box tracking main tells its pulls apart.
 VERSION: Final[str] = _read_stamp(ROOT_DIR / "VERSION") or "unknown"
 BUILD: Final[str | None] = _read_stamp(ROOT_DIR / ".build")

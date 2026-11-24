@@ -53,7 +53,7 @@ demo-docs:
 demo: demo-docs
 	python3 -m http.server -d docs 8000
 
-# Cut a release: make release V=1.2.0 (README: Versions and updates). VERSION changes
+# Cut a release: make release V=1.2.0 (docs/operations.md: Versions and updates). VERSION changes
 # only here, so main's VERSION is always the newest release.
 release:
 	@test -n "$(V)" || { echo "usage: make release V=X.Y.Z"; exit 1; }
