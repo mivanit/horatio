@@ -39,9 +39,7 @@ class Router:
         self.tmp: Path = tmp_path
         self.box: Path = tmp_path / "horatio"
         (self.box / "lua").mkdir(parents=True)
-        (self.box / "lua/install.sh").write_text(
-            (ROOT / "lua/install.sh").read_text()
-        )
+        (self.box / "lua/install.sh").write_text((ROOT / "lua/install.sh").read_text())
         (self.box / "VERSION").write_text("0.1.0\n")
         (self.box / "www").mkdir()
         (self.box / "www/config.json").write_text('{"title": "mine"}\n')
@@ -113,6 +111,37 @@ class Router:
             and not (self.box / "ran").exists()
             and not list(self.box.glob(".update.*"))
         )
+
+
+def test_update_can_run_an_older_release_installer(tmp_path: Path) -> None:
+    router = Router(tmp_path)
+    router.release("0.2.0", installer="openwrt/install.sh")
+    result = router.update("v0.2.0")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (router.box / "ran").read_text() == "ran\n"
+
+
+def test_missing_release_installer_does_not_modify_checkout(tmp_path: Path) -> None:
+    router = Router(tmp_path)
+    router.release("0.2.0", installer="unrelated.sh")
+    result = router.update("v0.2.0")
+    assert result.returncode != 0 and "no Lua installer" in result.stderr
+    assert (router.box / "VERSION").read_text() == "0.1.0\n"
+    assert not (router.box / "unrelated.sh").exists()
+
+
+def test_legacy_install_path_delegates_to_new_backend(tmp_path: Path) -> None:
+    # Older deployed updaters re-exec this path after copying a new release.
+    old = tmp_path / "openwrt"
+    new = tmp_path / "lua"
+    old.mkdir()
+    new.mkdir()
+    (old / "install.sh").write_text((ROOT / "openwrt/install.sh").read_text())
+    (new / "install.sh").write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "$(dirname "$0")/../args"\n'
+    )
+    subprocess.run(["sh", str(old / "install.sh"), "--update", "v0.2.0"], check=True)
+    assert (tmp_path / "args").read_text().splitlines() == ["--update", "v0.2.0"]
 
 
 @pytest.fixture

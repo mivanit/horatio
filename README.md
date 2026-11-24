@@ -233,7 +233,7 @@ sandboxes it: everything is read-only except the checkout's `logs/` (`ProtectSys
 and `/home`, `/root` and `/run/user` are empty (`ProtectHome=tmpfs`) except the checkout and the
 venv's Python, bound back in read-only. The checkout itself is read-only to the service because
 root runs code from it (`collector/install.sh` copies the collector scripts, `install.sh`), and
-`.password` is written only by `server.py --set-password`, run by hand. The IP card and each history record ask `api.ipify.org` for the public address.
+`.password` is written only by `python/server.py --set-password`, run by hand. The IP card and each history record ask `api.ipify.org` for the public address.
 
 Process labels retain recognized script paths or Python module names, but omit inline code
 and unrecognized interpreter options. This protects live data and new history records;
@@ -445,7 +445,7 @@ The appropriate environment depends on the claim being tested:
 
 | What is being checked | Environment | What it does not cover |
 |---|---|---|
-| Linux APIs and history, frontend logic, mocked installers/collectors | `make test-linux` on Linux with the locked Python environment and Node.js | Actual router services or GPU hardware |
+| Linux APIs and history, frontend logic, mocked installers/collectors | `make test-python` on Linux with the locked Python environment and Node.js | Actual router services or GPU hardware |
 | Lua recording locks, interrupted writes, and rotation | `make test-lua` on Linux with real Lua 5.1/Nixio and gzip | OpenWrt's service lifecycle or flash storage |
 | Router install, `--update` and the dashboard answering | `make test-openwrt-container`: the official OpenWrt rootfs booted with procd in docker or podman, with its own UCI, uhttpd, apk feeds and BusyBox; CI runs it on every push | The nginx/LuCI port handoff, real network interfaces, flash storage |
 | Router installation and service readiness | A disposable, booted OpenWrt VM with its own UCI, procd, uhttpd, nginx, and BusyBox | Every custom router configuration or physical flash behavior |

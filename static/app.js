@@ -1848,7 +1848,7 @@ async function fetchDataOnce() {
       spreadValueEl.textContent = coreMin.toFixed(0) + '–' + coreMax.toFixed(0) + '%';
       updateCardNoData('cpu-cores-spread', true);
     } else {
-      // Covers both a failed fetch and ok-but-empty (OpenWrt returns "[]" with
+      // Covers both a failed fetch and ok-but-empty (Lua returns "[]" with
       // HTTP 200 when /proc/stat is unreadable) — otherwise the cards keep
       // showing stale cores with no no-data marker.
       updateCardNoData('cpu-cores', false);
@@ -3233,7 +3233,7 @@ function fetchHistoryData(hours = defaultHistoryHours, { force = false, field = 
   // cached window; Refresh still refetches it in full.
   if (!force && base && typeof base.now !== 'number') return Promise.resolve(base);
   // Top up a cached window. Fetch in full when there is none, when the backend
-  // doesn't report its clock (`now`: the OpenWrt one), or when the window has
+  // doesn't report its clock (`now`: the Lua one), or when the window has
   // corrupt lines (their count is only right for a whole-window read).
   const since = base && typeof base.now === 'number' && !(base.skipped_lines > 0)
     ? new Date((base.now - HISTORY_SINCE_OVERLAP_SEC) * 1000).toISOString() : null;
