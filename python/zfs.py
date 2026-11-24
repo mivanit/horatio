@@ -8,6 +8,7 @@ Alarms (keys under ``zfs/``):
   zfs/<pool>/missing        an expected pool is not imported
   zfs/<pool>/state          the pool is not ONLINE
   zfs/<pool>/errors         read + write + checksum errors on any vdev, plus data errors
+  zfs/<pool>/spare/<guid>/state  a spare is unavailable or unhealthy
   zfs/<pool>/never-scrubbed no scan on record
   zfs/<pool>/scrub-overdue  the last finished scrub ended more than ``scrub_max_days`` ago
 Notes: a scrub or resilver in progress, a last scan that was a resilver or was
@@ -223,6 +224,35 @@ def pool_findings(
                 "value": errors + (data or 0),
             }
         )
+    # Idle spares have state but no I/O counters. Check them separately, using
+    # their GUID so renamed paths cannot inherit or resolve another disk's alarm.
+    spares: Any = pool.get("spares", {})
+    if not isinstance(spares, dict):
+        found.notes.append(f"zfs {name}: spare inventory unreadable")
+        spares = {}
+    for label, spare in spares.items():
+        if not isinstance(spare, dict):
+            found.notes.append(f"zfs {name}: spare {label} unreadable")
+            continue
+        guid: int | None = _counter(spare.get("guid"))
+        spare_state: Any = spare.get("state")
+        if not guid:
+            found.notes.append(f"zfs {name}: spare {label} identity unreadable")
+            continue
+        key: str = f"zfs/{name}/spare/{guid}/state"
+        if spare_state in ("AVAIL", "INUSE"):
+            found.checked.append(key)
+        elif spare_state in ("DEGRADED", "FAULTED", "OFFLINE", "UNAVAIL", "REMOVED"):
+            found.checked.append(key)
+            found.alarms.append(
+                {
+                    "key": key,
+                    "text": f"zfs {name}: spare {label} is {spare_state}",
+                    "value": spare_state,
+                }
+            )
+        else:
+            found.notes.append(f"zfs {name}: spare {label} state unreadable")
     scan: Any = pool.get("scan_stats")
     if scan is None:
         found.checked.append(f"zfs/{name}/never-scrubbed")

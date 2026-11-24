@@ -479,15 +479,30 @@ function getDriveUsageColor(percent) {
 // sensor_labels wins where both name a sensor. Display only: history records keep the sensor's own
 // name, so a series does not split in two on the day it is renamed.
 const fanDisplayNames = new Map(); // display only; never changes a series or alarm key
-function tempDisplayLabel(label, originalLabel = fanDisplayNames.get(label) ?? label.replace(/ \[[^\]]+\]$/, '')) {
+function sensorOriginalLabel(label) {
+  return fanDisplayNames.get(label) ?? label.replace(/ \[[^\]]+\]$/, '');
+}
+function tempDisplayLabel(label, originalLabel = sensorOriginalLabel(label)) {
   const alias = [dashboardConfig.sensor_labels?.[label], dashboardConfig.temp_labels?.[label],
     dashboardConfig.sensor_labels?.[originalLabel], dashboardConfig.temp_labels?.[originalLabel]]
     .find(a => typeof a === 'string' && a);
   if (alias) return alias;
-  // Stable fan identities retain the device path in records, while the label
-  // shows only the chip, channel and final device component.
+  if (originalLabel !== label) return originalLabel;
+  // Old records may have an id without a current inventory label.
   const fan = /^@(.+)\/([^/]+)\/(fan\d+)$/.exec(label);
   return fan ? `${fan[2]} ${fan[3]} (${fan[1].split('/').at(-1)})` : label;
+}
+
+// Qualify only colliding display names. History values remain keyed by identity.
+function sensorDisplayLabels(keys, originals = []) {
+  const labels = keys.map((key, i) => tempDisplayLabel(key, originals[i]));
+  const counts = new Map();
+  labels.forEach(label => counts.set(label, (counts.get(label) ?? 0) + 1));
+  return labels.map((label, i) => {
+    if (counts.get(label) === 1 || keys[i] === label) return label;
+    const identity = / \[([^\]]+)\]$/.exec(keys[i])?.[1] ?? keys[i].replace(/^@/, '');
+    return `${label} [${identity}]`;
+  });
 }
 
 // config.json temp_thresholds: a sensor's own limit in °C, by its own name or
@@ -496,14 +511,14 @@ function tempLimitFor(label) {
   const limits = dashboardConfig.temp_thresholds;
   const valid = v => typeof v === 'number' && Number.isFinite(v);
   // A junk entry under one name must not hide a valid one under the other.
-  const own = [limits?.[label], limits?.[tempDisplayLabel(label)]].find(valid);
+  const own = [limits?.[label], limits?.[sensorOriginalLabel(label)], limits?.[tempDisplayLabel(label)]].find(valid);
   return own ?? null;
 }
 
 function abbreviateSensorLabel(label) {
-  const alias = tempDisplayLabel(label);
-  if (alias !== label) return alias;
-  return label.replace(/^Package id \d+$/i, 'Pkg').replace(/^Core (\d+)$/i, 'C$1').replace(/^Composite$/i, 'NVMe');
+  const display = tempDisplayLabel(label);
+  if (display !== sensorOriginalLabel(label)) return display;
+  return display.replace(/^Package id \d+$/i, 'Pkg').replace(/^Core (\d+)$/i, 'C$1').replace(/^Composite$/i, 'NVMe');
 }
 
 function abbreviateGpuName(name) {

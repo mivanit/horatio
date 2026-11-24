@@ -34,6 +34,7 @@ import re
 import secrets
 import shlex
 import socket
+import stat
 import statistics
 import subprocess
 import sys
@@ -4855,19 +4856,19 @@ COLLECTOR_UNIT_DIRS: Final[tuple[Path, ...]] = tuple(
         "/lib/systemd/system",
     )
 )
+COLLECTORS_DISABLED_FILE: Final[Path] = Path("/etc/horatio/collectors-disabled")
 _collectors_seen: set[str] = set()
 
 
 def _collector_expected(source: str, snapshot: dict[str, Any]) -> bool:
-    """An optional collector is absent only when there is no evidence of it.
+    """Missing collectors remain expected unless never installed or removed.
 
-    Once observed (including persisted tracker state), losing its snapshot is an
-    outage. Installed or masked units also remain expected; failed discovery is
-    unknown, never proof that monitoring was deliberately left out.
+    Intentional uninstall leaves a marker without deleting remembered faults.
+    Current snapshots and installed units take precedence over that marker;
+    failed discovery is unknown, never proof that monitoring was removed.
     """
     if snapshot.get("status") != "missing":
         _collectors_seen.add(source)
-    if source in _collectors_seen or source in _alarm_memory:
         return True
     unit: str = "horatio-collect" if source == "state" else "horatio-sensors"
     for directory in COLLECTOR_UNIT_DIRS:
@@ -4879,7 +4880,16 @@ def _collector_expected(source: str, snapshot: dict[str, Any]) -> bool:
                 continue
             except OSError:
                 return True
-    return False
+    try:
+        if not stat.S_ISREG(COLLECTORS_DISABLED_FILE.lstat().st_mode):
+            return True
+        with COLLECTORS_DISABLED_FILE.open("rb") as marker:
+            marker.read(1)
+        return False
+    except FileNotFoundError:
+        return source in _collectors_seen or source in _alarm_memory
+    except OSError:
+        return True
 
 
 @APP.get("/api/storage-health")
@@ -5552,11 +5562,26 @@ def _server_findings_or_none() -> dict[str, Any] | None:
 
 async def _finish_alarm_update(operation: asyncio.Task[_T]) -> _T:
     """Keep the writer lock until disk work finishes, even during cancellation."""
-    try:
-        return await asyncio.shield(operation)
-    except asyncio.CancelledError:
-        await operation
-        raise
+    cancelled: asyncio.CancelledError | None = None
+    while not operation.done():
+        try:
+            await asyncio.shield(operation)
+        except asyncio.CancelledError as error:
+            if cancelled is None:
+                cancelled = error
+        except Exception:
+            break
+    if cancelled is not None:
+        # Retrieve failures even if the operation finished as cancellation arrived.
+        # A failed save must not turn shutdown into another tracker iteration.
+        try:
+            operation.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Alarm update failed while cancellation was pending")
+        raise cancelled
+    return operation.result()
 
 
 async def track_alarms_once() -> None:
