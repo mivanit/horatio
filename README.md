@@ -192,7 +192,7 @@ each gives in `alarm_items`) and the server's own fan rules. Each line has `time
 | `raised` | an alarm appears | `key`, `text`, `value`, `since`; `initial: true` when it was already there the first time its source was seen |
 | `changed` | its `value` differs from the last snapshot (reallocated sectors `8 -> 9`) | the same, plus `was` |
 | `cleared` | it is gone, and the snapshot says it `checked` for it | the same, plus `active_for_s`; `after_boot: true` when the box rebooted in between (counters that reset at boot) |
-| `expired` | it could not be re-checked for 30 days (a drive that is gone) | the same, plus `unchecked_since` |
+| `expired` | it could not be re-checked for 30 days and at least 3 snapshots (a drive that is gone) | the same, plus `unchecked_since` |
 | `boot` | the 15-min snapshot shows a new boot | `id`, `kernel`, `previous: {clean, ended, kernel}` |
 | `gap` | a source was not seen for more than three of its intervals (box off, timer stopped), or the server itself was not running | `from`, `to` |
 

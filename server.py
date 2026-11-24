@@ -4722,6 +4722,12 @@ async def storage_health() -> Response:
         {k: v for k, v in row.items() if k != "source" and v is not None}
         for row in alarm_rows("dashboard", hw["alarm_items"], _alarm_memory)
     ]
+    # The server's own alarms it could not look at again (a ruled fan whose chip
+    # stopped answering, a pool zpool could not read): unchecked, not clear.
+    result["sensor_alarm_held"] = [
+        {k: v for k, v in row.items() if k != "source" and v is not None}
+        for row in held_rows("dashboard", None, _alarm_memory)
+    ]
     result["sensor_notes"] = hw["notes"]
     return Response(content=json.dumps(result), media_type="application/json")
 
@@ -4867,8 +4873,11 @@ ALARM_SOURCES: Final[dict[str, tuple[float | None, int]]] = {
     "dashboard": (None, 3),
 }
 # An alarm that could not be re-checked (a failing drive that is asleep or gone)
-# is held this long, then dropped with an ``expired`` line.
+# is held this long, then dropped with an ``expired`` line. It also takes this
+# many unchecked snapshots in a row, so one snapshot stamped by a clock that was
+# far ahead (an RTC before NTP) cannot expire a held alarm.
 ALARM_HELD_EXPIRE_SEC: Final[int] = 30 * 86400
+ALARM_HELD_EXPIRE_SNAPSHOTS: Final[int] = 3
 # No pass for this long means the tracker itself was not running.
 ALARM_TRACKER_GAP_SEC: Final[float] = 10 * ALARM_TRACK_INTERVAL
 EVENTS_RECENT: Final[int] = 50
@@ -4909,9 +4918,15 @@ def _epoch(value: Any) -> bool:
     return _number(value) and 0 < value < 4102444800
 
 
+_SUFFIX: Final[re.Pattern[str]] = re.compile(r"#\d+$")
+
+
 def _covered(key: str, checked: Sequence[str] | None) -> bool:
     """True when a snapshot says it really evaluated this key (collector/README.md,
-    ``checked``). None means the source evaluates everything every time."""
+    ``checked``). None means the source evaluates everything every time. A ``#2``
+    suffix (the collector's mark on a repeated key, e.g. two drives reporting one
+    serial) is covered by whatever covers the key without it."""
+    key = _SUFFIX.sub("", key)
     return checked is None or any(
         key == prefix or key.startswith(prefix + "/") for prefix in checked
     )
@@ -4998,7 +5013,11 @@ def track_alarms(
             event("cleared", gone, **more)
         else:
             unchecked_since: float = old.get("unchecked_since", now)
-            if now - unchecked_since > ALARM_HELD_EXPIRE_SEC:
+            unchecked: int = int(old.get("unchecked", 0)) + 1
+            if (
+                now - unchecked_since > ALARM_HELD_EXPIRE_SEC
+                and unchecked >= ALARM_HELD_EXPIRE_SNAPSHOTS
+            ):
                 event("expired", gone, unchecked_since=unchecked_since)
             else:
                 # The absences counted so far are kept: a source that checks a key
@@ -5006,6 +5025,7 @@ def track_alarms(
                 after[key] = {
                     **gone,
                     "unchecked_since": unchecked_since,
+                    "unchecked": unchecked,
                     **({"absent": absent} if absent else {}),
                 }
     return after, events
@@ -5083,6 +5103,7 @@ def _load_alarm_memory(path: Path = ALARM_MEMORY_FILE) -> dict[str, Any]:
             and _epoch(entry.get("since"))
             and ("absent" not in entry or isinstance(entry["absent"], int))
             and ("unchecked_since" not in entry or _epoch(entry["unchecked_since"]))
+            and ("unchecked" not in entry or isinstance(entry["unchecked"], int))
         )
 
     out: dict[str, Any] = {}
@@ -5152,6 +5173,15 @@ def _append_events(events: list[dict[str, Any]], path: Path = EVENTS_FILE) -> No
         f.flush()
 
 
+def _server_findings_or_none() -> dict[str, Any] | None:
+    """get_hw_sensors for the tracker (sync): None, logged, when it fails."""
+    try:
+        return get_hw_sensors()
+    except Exception:
+        logger.exception("alarm history: cannot read the server's own findings")
+        return None
+
+
 async def track_alarms_once() -> None:
     """One pass: every source that has something new since the last pass.
 
@@ -5163,11 +5193,11 @@ async def track_alarms_once() -> None:
     global _alarm_memory, _alarm_memory_saved
     state: dict[str, Any]
     sensors: dict[str, Any]
-    hw: dict[str, Any]
+    hw: dict[str, Any] | None
     state, sensors, hw = await asyncio.gather(
         asyncio.to_thread(_get_storage_health),
         asyncio.to_thread(_get_storage_health, SENSORS_PATH, SENSORS_STALE_SEC),
-        asyncio.to_thread(get_hw_sensors),
+        asyncio.to_thread(_server_findings_or_none),
     )
     memory: dict[str, Any] = json.loads(json.dumps(_alarm_memory))
     now: float = time.time()
@@ -5202,9 +5232,15 @@ async def track_alarms_once() -> None:
             )
         except Exception:
             logger.exception("alarm history: cannot follow the %s snapshot", source)
-    events += observe_alarms(
-        memory, "dashboard", hw["alarm_items"], hw["checked"], now, _BOOT_ID
-    )
+    # The server's own findings: when they cannot be read the pass goes on without
+    # them (nothing of theirs is cleared), so they never cost the collectors' events.
+    if hw is not None:
+        try:
+            events += observe_alarms(
+                memory, "dashboard", hw["alarm_items"], hw["checked"], now, _BOOT_ID
+            )
+        except Exception:
+            logger.exception("alarm history: cannot follow the server's own findings")
     await asyncio.to_thread(_append_events, events)
     collectors_moved: bool = any(
         memory.get(s, {}).get("ts") != _alarm_memory.get(s, {}).get("ts")
@@ -5298,13 +5334,14 @@ def alarm_rows(
 
 
 def held_rows(
-    source: str, snapshot: dict[str, Any], memory: dict[str, Any]
+    source: str, snapshot: dict[str, Any] | None, memory: dict[str, Any]
 ) -> list[dict[str, Any]]:
     """The alarms of a source that are absent from its newest snapshot only
     because it could not check them: still alarms as far as anyone knows. None
     when the snapshot is one the tracker does not follow (missing, or from a
-    collector whose alarms it cannot read): what it remembers is then old."""
-    if _collector_alarms(snapshot) is None:
+    collector whose alarms it cannot read): what it remembers is then old.
+    ``snapshot`` None is the server's own source, which is always followed."""
+    if snapshot is not None and _collector_alarms(snapshot) is None:
         return []
     return [
         {"source": source, **{k: entry.get(k) for k in _ALARM_FIELDS}}
@@ -5363,6 +5400,7 @@ def alarms_snapshot(
         )
         held += held_rows("sensors", sensors, memory)
     active += alarm_rows("dashboard", dashboard, memory)
+    held += held_rows("dashboard", None, memory)
     target: dict[str, Any]
     for target in [] if services["stale"] else services["targets"]:
         if target["ok"] is False:

@@ -649,6 +649,7 @@ function renderHardware(data) {
   // BMC that timed out): not in `alarms`, and not known to be gone. From the server.
   const unchecked = [data, ...(sensorsUnknown ? [] : [sen])]
     .flatMap(snap => Array.isArray(snap?.alarm_held) ? snap.alarm_held : [])
+    .concat(Array.isArray(data?.sensor_alarm_held) ? data.sensor_alarm_held : [])
     .filter(h => typeof h?.text === 'string' && h.unchecked_since != null);
   const info = [...(Array.isArray(data?.info) ? data.info : []), ...serverNotes];
 

@@ -111,6 +111,7 @@ def test_gone_is_cleared_only_when_checked() -> None:
             "text": "smart/S1/health",
             "since": 100,
             "unchecked_since": 1000,
+            "unchecked": 1,
         }
     }
     # Still asleep: the first unchecked time stays. Awake and failing: the same alarm.
@@ -761,3 +762,110 @@ def test_services_down_since_is_the_start_of_the_current_run_of_failures() -> No
     rounds.append((60, {"a": True, "b": False, "c": False}))
     assert server.services_down_since(rounds, ["a", "b"]) == {"a": None, "b": 40}
     assert server.services_down_since([], ["a"]) == {"a": None}
+
+
+# ---- review fixes (2026-11-24) ------------------------------------------------------
+
+
+def test_a_repeated_key_is_covered_like_the_first() -> None:
+    import server
+
+    first: str = "smart/0000/reallocated"
+    # Two drives behind one bridge report the same serial: the collector marks the
+    # second key "#2". Checking the rule covers both, so both can clear.
+    assert server._covered(first + "#2", [first])
+    assert not server._covered(first + "x#2", [first])
+    memory: dict[str, Any] = {}
+    server.observe_alarms(
+        memory,
+        "state",
+        [item(first, "sdb", 8), item(first + "#2", "sdc", 3)],
+        [first],
+        1000,
+    )
+    events: list[dict[str, Any]] = server.observe_alarms(
+        memory, "state", [], [first], 1900
+    )
+    assert sorted(kinds(events)) == [("cleared", first), ("cleared", first + "#2")]
+    assert memory["state"]["alarms"] == {}
+
+
+def test_one_snapshot_from_a_clock_far_ahead_does_not_expire_a_held_alarm() -> None:
+    import server
+
+    t: float = 1_790_000_000
+    failed: dict[str, Any] = item("smart/S1/health", "sdb: SMART health FAILED")
+    memory: dict[str, Any] = {}
+    server.observe_alarms(memory, "state", [failed], ["smart/S1"], t)
+    server.observe_alarms(memory, "state", [], [], t + 900)  # the drive is asleep
+    # One snapshot stamped 40 days ahead (an RTC before NTP set the clock).
+    ahead: list[dict[str, Any]] = server.observe_alarms(
+        memory, "state", [], [], t + 40 * 86400
+    )
+    assert "expired" not in [e["event"] for e in ahead]
+    # The clock is right again and the drive wakes: the same alarm, the same since.
+    server.observe_alarms(memory, "state", [failed], ["smart/S1"], t + 2700)
+    assert memory["state"]["alarms"]["smart/S1/health"]["since"] == t
+    # Really unchecked for 30 days, over several snapshots: it does expire.
+    events: list[dict[str, Any]] = []
+    for n in range(1, 5):
+        events += server.observe_alarms(
+            memory, "state", [], [], t + 2700 + n * (server.ALARM_HELD_EXPIRE_SEC // 2)
+        )
+    assert ("expired", "smart/S1/health") in kinds(events)
+
+
+def test_the_servers_own_alarm_it_cannot_recheck_is_held_and_served(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import server
+
+    fan: dict[str, Any] = item("fan/cpu", "fan cpu: 0 RPM, below its 300 RPM minimum")
+    world: dict[str, Any] = {"hw": {"alarm_items": [fan], "checked": ["fan/cpu"]}}
+    monkeypatch.setattr(
+        server,
+        "_get_storage_health",
+        lambda path=server.STATE_PATH, stale=0: {"status": "missing"},
+    )
+    monkeypatch.setattr(server, "get_hw_sensors", lambda: world["hw"])
+    asyncio.run(server.track_alarms_once())
+    # The fan's chip stops answering and nothing says it was looked at.
+    world["hw"] = {"alarm_items": [], "checked": []}
+    asyncio.run(server.track_alarms_once())
+    body: dict[str, Any] = server.alarms_snapshot(
+        time.time(),
+        {"status": "missing"},
+        {"status": "missing"},
+        [],
+        services(stale=True),
+        server._alarm_memory,
+        [],
+    )
+    assert body["active"] == []
+    assert [(r["source"], r["key"]) for r in body["held"]] == [("dashboard", "fan/cpu")]
+    assert body["held"][0]["unchecked_since"] is not None
+
+
+def test_the_servers_own_findings_failing_cost_nothing_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import server
+
+    unit: dict[str, Any] = item("unit/x.service")
+    monkeypatch.setattr(
+        server,
+        "_get_storage_health",
+        lambda path=server.STATE_PATH, stale=0: (
+            {"status": "missing"}
+            if path == server.SENSORS_PATH
+            else snapshot(time.time() - 5, [unit], ["unit"])
+        ),
+    )
+
+    def broken() -> dict[str, Any]:
+        raise TypeError("a sensor nobody expected")
+
+    monkeypatch.setattr(server, "get_hw_sensors", broken)
+    asyncio.run(server.track_alarms_once())
+    assert "unit/x.service" in server._alarm_memory["state"]["alarms"]
+    assert "dashboard" not in server._alarm_memory
