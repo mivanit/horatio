@@ -6,8 +6,8 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 ## [Unreleased]
 
 - New `GET /api/alarms`: everything wrong right now in one list (both collector
-  snapshots and any service that is down), each with since when, plus the newest lines
-  of the collectors' alarm log. Until now the two snapshots each had their own `alarms`
+  snapshots, the server's own fan rules and any service that is down), each with since
+  when, plus the newest lines of the event log. Until now the two snapshots each had their own `alarms`
   list and a reader of one missed the other. `GET /api/services` gains `down_since` per
   target: when its current outage began.
 - Dashboard: the Hardware health card says since when each issue has been there
@@ -32,14 +32,15 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
   standby, a BMC that timed out, a section that crashed). Drives are keyed by serial, since
   `sdX` letters move between boots. The alarm strings are unchanged. Also new: `schema`
   and `boot_id`. Keys are listed in `collector/README.md`.
-- Hardware collector: alarms now have a history. Each collector reads its own previous
-  snapshot to carry `since` on every alarm (`initial` when the alarm predates the
-  history), and appends a line to `/var/lib/horatio/alarms.jsonl` when an alarm is
-  `raised`, `changed` in value (`8 -> 9` reallocated sectors) or `cleared`; nothing is
-  written while it just stays. An alarm that could not be re-checked (a failing drive that
-  is asleep) is kept in `alarm_held` instead of being reported as gone, and the 60 s
-  snapshot waits three runs before clearing, so a value on its threshold does not flap.
-  The log also records a `gap` when no snapshot was taken for a while and a `boot`.
+- Alarms have a history. The server follows every alarm, whoever decides it (the two
+  collectors' by their keys, and its own fan rules), and appends a line to
+  `logs/events.jsonl` when one is `raised`, `changed` in value (`8 -> 9` reallocated
+  sectors) or `cleared`; nothing is written while it just stays. An alarm that could not
+  be re-checked (a failing drive that is asleep) is kept instead of being reported as
+  gone, and the 60 s snapshot's alarms and the fan rules must be absent three times in a
+  row to clear, so a value on its threshold does not flap. The log also records a `boot`
+  and a `gap` when a source, or the server itself, was not running. The collectors keep
+  no state, as before. README: "What is kept in `logs/`".
 - Hardware collector: the journal alarm is now one line per distinct error-level message,
   `journal: <unit>: <message> (N in 24h, first …, last …)`, oldest first and at most 8,
   instead of `journal: N error-level messages … latest: <one of them>`, which could hide

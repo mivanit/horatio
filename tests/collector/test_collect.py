@@ -94,29 +94,6 @@ def keys(state: dict[str, Any]) -> list[str]:
     return [i["key"] for i in state["alarm_items"]]
 
 
-def identity(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """alarm_items without what the memory step adds (`since`, `initial`)."""
-    return [
-        {k: v for k, v in item.items() if k not in ("since", "initial")}
-        for item in state["alarm_items"]
-    ]
-
-
-def events(stage: Path) -> list[dict[str, Any]]:
-    """The lines of alarms.jsonl beside the snapshot, without their timestamps."""
-    log: Path = stage / "out/alarms.jsonl"
-    if not log.exists():
-        return []
-    out: list[dict[str, Any]] = [
-        json.loads(line) for line in log.read_text().splitlines()
-    ]
-    entry: dict[str, Any]
-    for entry in out:
-        assert entry.pop("timestamp").endswith("+00:00")
-        assert entry.pop("source") == "state"
-    return out
-
-
 def sel_line(id_: str, sensor: str, event: str, direction: str = "Asserted") -> str:
     return f"  {id_} | {TODAY} | 03:04:05 UTC | {sensor} | {event} | {direction}\n"
 
@@ -466,7 +443,7 @@ def test_each_alarm_has_a_stable_key_and_counters_a_value(tmp_path: Path) -> Non
         },
     )[0]
     assert (state["schema"], state["boot_id"]) == (1, "boot-1")
-    assert identity(state) == [
+    assert state["alarm_items"] == [
         {
             "key": "ecc/uncorrectable",
             "text": "ECC: 2 uncorrectable errors since boot",
@@ -557,121 +534,14 @@ def test_only_what_was_really_evaluated_is_checked(tmp_path: Path) -> None:
     assert covered(hidden, "md/md0/degraded") and not covered(hidden, "md/md0/mismatch")
 
 
-# ---- memory: when each alarm started, and the event log ----------------------
-
-FAILED: dict[str, Any] = {"serial_number": "S1", "smart_status": {"passed": False}}
-PASSED: dict[str, Any] = {"serial_number": "S1", "smart_status": {"passed": True}}
+# ---- how the previous boot ended ----------------------------------------------
 
 
-def test_since_is_carried_and_the_log_gets_one_line_per_change(tmp_path: Path) -> None:
-    quiet: dict[str, Any] = collect(tmp_path)[0]
-    assert (quiet["alarm_items"], quiet["alarm_held"]) == ([], [])
-    assert events(tmp_path) == []
-
-    first: dict[str, Any] = collect(tmp_path, {**smart(tmp_path, "sda", 0, FAILED)})[0]
-    (item,) = first["alarm_items"]
-    assert item == {
-        "key": "smart/S1/health",
-        "text": "sda: SMART health FAILED",
-        "since": first["ts"],
-    }
-    raised: dict[str, Any] = {
-        "event": "raised",
-        "key": "smart/S1/health",
-        "text": "sda: SMART health FAILED",
-        "since": first["ts"],
-    }
-    assert events(tmp_path) == [raised]
-
-    # Still failing, now as sdb: the same alarm, so the same start and no new line.
-    (tmp_path / "tmp/smart_sda.rc").unlink()
-    second: dict[str, Any] = collect(tmp_path, {**smart(tmp_path, "sdb", 0, FAILED)})[0]
-    assert second["alarms"] == ["sdb: SMART health FAILED"]
-    assert second["alarm_items"][0]["since"] == first["ts"]
-    assert events(tmp_path) == [raised]
-
-    third: dict[str, Any] = collect(tmp_path, {**smart(tmp_path, "sdb", 0, PASSED)})[0]
-    assert (third["alarms"], third["alarm_held"]) == ([], [])
-    (cleared,) = events(tmp_path)[1:]
-    assert cleared.pop("active_for_s") >= 0
-    assert cleared == {**raised, "event": "cleared", "text": "sdb: SMART health FAILED"}
-
-
-def test_alarms_already_there_at_the_first_run_are_marked_initial(
-    tmp_path: Path,
-) -> None:
-    files: dict[str, str | None] = {**smart(tmp_path, "sda", 0, FAILED)}
-    state: dict[str, Any] = collect(tmp_path, files)[0]
-    assert state["alarm_items"][0]["initial"] is True
-    assert events(tmp_path)[0]["initial"] is True
-    # ... and stay so, since the real start is still unknown.
-    assert collect(tmp_path, files)[0]["alarm_items"][0]["initial"] is True
-    # The same when the previous snapshot came from a collector without keys.
-    old: Path = tmp_path / "old"
-    (old / "out").mkdir(parents=True)
-    (old / "out/state.json").write_text(
-        '{"ts": 1, "alarms": ["sda: SMART health FAILED"]}'
-    )
-    assert collect(old, files)[0]["alarm_items"][0]["initial"] is True
-    assert [e["event"] for e in events(old)] == ["raised"]
-
-
-def test_an_alarm_that_was_not_checked_is_held_not_cleared(tmp_path: Path) -> None:
-    collect(tmp_path)
-    collect(tmp_path, {**smart(tmp_path, "sda", 0, FAILED)})
-    # The drive is asleep: nothing is known about it now.
-    asleep: dict[str, Any] = collect(tmp_path, {**smart(tmp_path, "sda", 3, {})})[0]
-    assert asleep["alarms"] == []
-    (held,) = asleep["alarm_held"]
-    assert (held["key"], held["unchecked_since"]) == ("smart/S1/health", asleep["ts"])
-    assert [e["event"] for e in events(tmp_path)] == ["raised"]
-    # Awake and still failing: the same alarm, the same start.
-    back: dict[str, Any] = collect(tmp_path, {**smart(tmp_path, "sda", 0, FAILED)})[0]
-    assert back["alarm_items"][0]["since"] == held["since"]
-    assert back["alarm_held"] == []
-    assert [e["event"] for e in events(tmp_path)] == ["raised"]
-    # Asleep for more than 30 days: dropped, and the log says why.
-    asleep = collect(tmp_path, {**smart(tmp_path, "sda", 3, {})})[0]
-    path: Path = tmp_path / "out/state.json"
-    asleep["alarm_held"][0]["unchecked_since"] -= 31 * 86400
-    path.write_text(json.dumps(asleep))
-    assert collect(tmp_path)[0]["alarm_held"] == []
-    assert [e["event"] for e in events(tmp_path)] == ["raised", "expired"]
-
-
-def test_a_counter_that_moves_is_logged_as_changed(tmp_path: Path) -> None:
-    def ecc(count: int) -> dict[str, str | None]:
-        return {
-            "edac/mc0/dimm0/dimm_label": "DIMM#0\n",
-            "edac/mc0/dimm0/dimm_ue_count": f"{count}\n",
-        }
-
-    collect(tmp_path)
-    collect(tmp_path, ecc(1))
-    state: dict[str, Any] = collect(tmp_path, ecc(2))[0]
-    assert state["alarm_items"][0]["value"] == 2
-    assert [(e["event"], e.get("was"), e.get("value")) for e in events(tmp_path)] == [
-        ("raised", None, 1),
-        ("changed", 1, 2),
-    ]
-
-
-def test_a_gap_and_a_reboot_are_logged(tmp_path: Path) -> None:
-    ecc: dict[str, str | None] = {
-        "edac/mc0/dimm0/dimm_label": "DIMM#0\n",
-        "edac/mc0/dimm0/dimm_ue_count": "1\n",
-    }
-    collect(tmp_path, ecc)
-    path: Path = tmp_path / "out/state.json"
-    previous: dict[str, Any] = json.loads(path.read_text())
-    previous["ts"] -= 3 * 3600
-    path.write_text(json.dumps(previous))
-    # Three hours later, on a new boot whose EDAC counters start from zero. The
-    # boot before it stopped mid-sentence.
+def test_boot_record_says_how_the_previous_boot_ended(tmp_path: Path) -> None:
+    # A power cut: the previous boot's journal stops mid-sentence.
     state: dict[str, Any] = collect(
-        tmp_path,
+        tmp_path / "cut",
         {
-            "edac/mc0/dimm0/dimm_ue_count": "0\n",
             "boot_id": "boot-2\n",
             "tmp/prev-boot.txt": (
                 "2026-11-24T01:21:24+00:00 serverus tailscaled[2068]: open-conn-track: timeout\n"
@@ -680,6 +550,7 @@ def test_a_gap_and_a_reboot_are_logged(tmp_path: Path) -> None:
             "tmp/prev-boot-kernel.txt": "Linux version 6.8.0-147-generic (buildd@x) (gcc)\n",
         },
     )[0]
+    assert state["boot"]["id"] == state["boot_id"] == "boot-2"
     assert state["boot"]["previous"] == {
         "clean": False,
         "ended": "2026-11-24T01:21:26+00:00",
@@ -688,17 +559,6 @@ def test_a_gap_and_a_reboot_are_logged(tmp_path: Path) -> None:
     assert state["info"] == [
         "boot: the previous boot ended without a shutdown, last log line 2026-11-24T01:21:26+00:00"
     ]
-    gap: dict[str, Any]
-    boot: dict[str, Any]
-    cleared: dict[str, Any]
-    _, gap, boot, cleared = events(tmp_path)
-    assert (gap["event"], set(gap)) == ("gap", {"event", "from", "to"})
-    assert (boot["event"], boot["id"], boot["previous"]["clean"]) == (
-        "boot",
-        "boot-2",
-        False,
-    )
-    assert (cleared["event"], cleared["after_boot"]) == ("cleared", True)
 
 
 def test_previous_boot_clean_old_or_unknown(tmp_path: Path) -> None:
@@ -724,34 +584,6 @@ def test_previous_boot_clean_old_or_unknown(tmp_path: Path) -> None:
     assert (state["boot"]["previous"]["clean"], state["info"]) == (False, [])
     # A journal that holds only this boot.
     assert collect(tmp_path / "none")[0]["boot"]["previous"] is None
-
-
-def test_a_broken_previous_snapshot_costs_only_the_history(tmp_path: Path) -> None:
-    (tmp_path / "out").mkdir()
-    (tmp_path / "out/state.json").write_text("{not json")
-    state: dict[str, Any]
-    rc: int
-    state, rc, _ = collect(tmp_path, {**smart(tmp_path, "sda", 0, FAILED)})
-    assert rc == 0
-    assert state["alarms"] == ["sda: SMART health FAILED"]
-    assert identity(state) == state["alarm_items"], "no since without a history"
-    assert state["alarm_held"] == []
-    assert [i.split(":")[1] for i in state["info"]] == [
-        " alarm history not kept this run"
-    ]
-    # The next run starts the history again.
-    state = collect(tmp_path, {**smart(tmp_path, "sda", 0, FAILED)})[0]
-    assert state["alarm_items"][0]["initial"] is True and state["info"] == []
-
-
-def test_both_collectors_carry_the_same_memory_code() -> None:
-    def block(script: str) -> str:
-        text: str = (ROOT / "collector" / script).read_text()
-        return text[
-            text.index("# ---- memory (") : text.index("# ---- end memory ----")
-        ]
-
-    assert block("health-collect.sh") == block("health-sensors.sh")
 
 
 # ---- journal: one alarm per message; drives: one per attribute, with a baseline ----
@@ -852,7 +684,7 @@ def test_each_ata_attribute_is_its_own_alarm_with_its_own_baseline(
     state: dict[str, Any] = collect(tmp_path, {**smart(tmp_path, "sde", 0, ata(8, 2))})[
         0
     ]
-    assert identity(state) == [
+    assert state["alarm_items"] == [
         {"key": "smart/S1/reallocated", "text": "sde: reallocated=8", "value": 8},
         {"key": "smart/S1/pending", "text": "sde: pending=2", "value": 2},
     ]
@@ -871,14 +703,10 @@ def test_each_ata_attribute_is_its_own_alarm_with_its_own_baseline(
             },
         )[0]
 
-    # Eight remapped sectors accepted for this drive: quiet, and the log says cleared.
+    # Eight remapped sectors accepted for this drive: quiet.
     state = with_baseline(ata(8), {"S1": {"reallocated": 8}})
     assert state["alarms"] == []
     assert state["drives"][0]["attrs_baseline"] == {"reallocated": 8}
-    assert [(e["event"], e["key"]) for e in events(tmp_path)][-2:] == [
-        ("cleared", "smart/S1/reallocated"),
-        ("cleared", "smart/S1/pending"),
-    ]
     # One more, and it is back, saying what it is measured against.
     state = with_baseline(ata(9), {"S1": {"reallocated": 8}})
     assert state["alarms"] == ["sde: reallocated=9 (baseline 8)"]

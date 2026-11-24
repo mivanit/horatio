@@ -625,18 +625,20 @@ function renderHardware(data) {
   // its alarm list is unknown, not clear: flagged like a stale state.json.
   const sen = getFreshSnapshot('sensors', 300000);
   const sensorsUnknown = sen?.status !== 'ok';
-  // Each alarm with the collector's entry for it: `alarm_items` runs parallel to
-  // `alarms` and says since when. A collector without it gives the text alone.
+  // Each alarm with its entry: `alarm_items` runs parallel to `alarms`, and the
+  // server adds since when from its alarm history. A collector that gives its
+  // alarms no keys leaves the text alone.
   const withItems = snap => (Array.isArray(snap?.alarms) ? snap.alarms : []).map((text, i) => {
     const item = Array.isArray(snap.alarm_items) ? snap.alarm_items[i] : null;
     return { text, item: item?.text === text ? item : null };
   });
-  // The server's own alarms (hwmon fan rules) are text alone: it keeps no history of them.
+  // The server's own alarms (hwmon fan rules) come with the same kind of entry.
+  const serverItems = Array.isArray(data?.sensor_alarm_items) ? data.sensor_alarm_items : [];
   const rows = [...withItems(data), ...(sensorsUnknown ? [] : withItems(sen)),
-                ...serverAlarms.map(text => ({ text, item: null }))];
+                ...serverAlarms.map((text, i) => ({ text, item: serverItems[i]?.text === text ? serverItems[i] : null }))];
   const alarms = rows.map(r => r.text);
-  // Alarms the collector could not look at again this run (a failing drive that
-  // is asleep, a BMC that timed out): not in `alarms`, and not known to be gone.
+  // Alarms a collector could not look at again (a failing drive that is asleep, a
+  // BMC that timed out): not in `alarms`, and not known to be gone. From the server.
   const unchecked = [data, ...(sensorsUnknown ? [] : [sen])]
     .flatMap(snap => Array.isArray(snap?.alarm_held) ? snap.alarm_held : [])
     .filter(h => typeof h?.text === 'string' && h.unchecked_since != null);
@@ -694,8 +696,8 @@ function renderHardware(data) {
     backup.push(hwRow('hw-note', `check: systemctl list-timers ${b.timer}; journalctl --unit ${backupService(b.timer)} --since -2days`));
   }
 
-  // The newest lines of the collectors' alarm log (/api/alarms), newest first;
-  // nothing on a backend or collector without it.
+  // The newest lines of the event log (/api/alarms), newest first; nothing on a
+  // backend without it.
   const recent = (Array.isArray(dataCache.alarms?.data?.recent) ? dataCache.alarms.data.recent : [])
     .map(hwEventText).filter(Boolean).slice(-5).reverse().map(t => hwRow('hw-note', t));
 
@@ -710,7 +712,7 @@ function renderHardware(data) {
   updateCardWarning('hardware', stale || sensorsUnknown || unchecked.length ? 1 : 0, 0);
 }
 
-// One line of the alarm log (collector/README.md) as text, or null for a kind
+// One line of the event log (README: "What is kept in logs/") as text, or null for a kind
 // not shown here (a gap in the snapshots) or a line that cannot be read.
 function hwEventText(e) {
   const at = Date.parse(e?.timestamp);

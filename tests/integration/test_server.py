@@ -116,7 +116,7 @@ SCHEMAS: dict[str, Callable[[Any], bool]] = {
     "/api/alarms": lambda d: (
         isinstance(d, dict)
         and {"now", "sources", "active", "held", "recent"} <= d.keys()
-        and {"state", "sensors", "services"} <= d["sources"].keys()
+        and {"state", "sensors", "dashboard", "services"} <= d["sources"].keys()
         and all(isinstance(d[k], list) for k in ("active", "held", "recent"))
     ),
     "/config.json": lambda d: isinstance(d, dict),

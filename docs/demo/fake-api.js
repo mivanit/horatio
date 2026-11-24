@@ -439,7 +439,7 @@
     return {
       now: t,
       sources: { state: { status: 'ok', age_sec: Math.round(t % 900) }, sensors: { status: 'ok', age_sec: Math.round(t % 60) },
-                 services: { status: 'ok', targets: services.length } },
+                 dashboard: { status: 'ok' }, services: { status: 'ok', targets: services.length } },
       active: services.filter(s => s.ok === false).map(s => ({
         source: 'services', key: 'service/' + s.name, text: `${s.name}: down (${s.error})`, value: null, since: s.down_since, initial: null })),
       held: [],

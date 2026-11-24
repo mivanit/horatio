@@ -97,7 +97,8 @@ ago`), so two snapshots cannot be compared by text. Each snapshot therefore also
   that is not judged right now (`mismatch_cnt` during a resync, the correctable ECC count
   while an uncorrectable one shows) list nothing.
 - `boot_id`: the kernel's boot id. Counters that reset at boot (ECC, failed units, GPU ECC
-  since driver load) make their alarms disappear at a reboot.
+  since driver load) make their alarms disappear at a reboot; a reader that sees the id
+  change knows why.
 
 | key | alarm |
 |---|---|
@@ -118,52 +119,27 @@ ago`), so two snapshots cannot be compared by text. Each snapshot therefore also
 | `capture/<name>`, `unparsed/<name>` | a capture that failed, a line that did not parse |
 | `collector/<part>`, `collector/smart/dev:<name>` | a part of the 15-min run that crashed |
 
-## When an alarm started: `since`, `alarm_held` and `alarms.jsonl`
+## Since when: the dashboard server keeps the history
 
-The rules keep no state, but each script reads its own previous snapshot for one thing: when
-each alarm began. So every `alarm_items` entry also has `since` (epoch seconds), and
-`"initial": true` when the alarm was already there the first time this ran (after an
-install or an update from a version without keys), in which case the real start is unknown.
-
-An alarm that is absent but not known to be gone stays in `alarm_held` (it is not in
-`alarms`): one that was not `checked` this run carries `unchecked_since` and waits until it
-is checked again, for example a failing drive that is asleep; after 30 days unchecked it is
-dropped. In the 60 s snapshot an alarm also waits there (`absent: n`) until it has been gone
-for three runs in a row, so a temperature sitting on its threshold does not flap.
-
-Changes are appended to `/var/lib/horatio/alarms.jsonl`, one JSON line each, by both scripts
-(`source` is `state` or `sensors`). Nothing is written while an alarm simply stays active:
-
-| `event` | when | fields besides `timestamp`, `source` |
-|---|---|---|
-| `raised` | a key appears | `key`, `text`, `value`, `since`, `initial` |
-| `changed` | its `value` differs from the last run | the same, plus `was` |
-| `cleared` | it is gone and its prefix was `checked` | the same, plus `active_for_s`; `after_boot: true` when the box rebooted in between (counters that reset at boot) |
-| `expired` | held unchecked for 30 days | the same, plus `unchecked_since` |
-| `gap` | the previous snapshot is more than three intervals old (box off, timer stopped) | `from`, `to` |
-| `boot` | the 15-min run sees a new `boot_id` | `id`, `kernel`, `previous` |
+The collectors keep no state: a snapshot says what is wrong now. Since when each alarm has
+been there, and when it went, is tracked by the dashboard server from `alarm_items` and
+`checked`, for these two snapshots and for its own alarms alike, and written to its
+`logs/events.jsonl` (README.md, "What is kept in `logs/`"). `GET /api/alarms` is all of it
+in one list; `/api/storage-health` and `/api/sensors` serve each `alarm_items` entry with its
+`since`.
 
 `state.json` also has `boot`: `{id, kernel, previous: {clean, ended, kernel}}`. `previous` is
 how the boot before this one ended, read from the journal: `clean` is true when its last lines
 include journald's own `Journal stopped`, false after a power cut or a hang; `null` when the
-journal holds only the current boot. An unclean end adds an `info` note for the first day.
-
-The log is never rotated (a line per change, not per run) and `install.sh --uninstall`
-removes it with the rest of `/var/lib/horatio`. If the previous snapshot cannot be read, or
-the log cannot be written, the run still writes its snapshot, without `since`, and says so in
-`info`; the history starts again at the next run.
-
-```bash
-jq -c 'select(.event != "gap")' /var/lib/horatio/alarms.jsonl | tail      # what changed lately
-jq -r '.alarm_items[] | "\(.since | todate)  \(.text)"' /var/lib/horatio/state.json   # since when
-```
+journal holds only the current boot. An unclean end adds an `info` note for the first day,
+and the server logs a `boot` event when `boot_id` changes.
 
 | alarm starts with | first move |
 |---|---|
 | `SEL: N memory events in 7d` / `ECC: N uncorrectable\|correctable errors since boot` | `sudo ipmitool sel elist \| grep -i ecc` names the DIMM; `sudo ras-mc-ctl --errors` for the OS-time trend. Before any `ipmitool sel clear`: `ipmitool sel save <file>` — the SEL is the only record of POST-time errors |
 | `SEL: N hardware events in 7d` | a PSU / fan / drive / thermal fault the BMC logged: `sudo ipmitool sel elist` (the lines are also in `sel_hardware`), then the matching sensor: `ipmitool sdr type 'Power Supply'` / `type fan`, or the drive. Tune `sel_fault_patterns` |
 | `sdX: SMART health FAILED` / `sdX (serial): grown defects N > baseline M` | `sudo smartctl --all /dev/sdX`; identify by serial; plan the swap; set the new serial in `grown_defect_baseline` |
-| `sdX: reallocated=N` / `reported_uncorrect=` / `command_timeout=` / `pending=` / `offline_uncorrectable=` (one line per attribute) / `sdX: NC, trip point` | `sudo smartctl --all /dev/sdX`; check your notes for this box's known-benign attributes first (some vendors pack operation counters into "error" attributes). When the count started is in `alarm_items[].since` and `alarms.jsonl`. A few remapped sectors with nothing pending can be accepted with `smart_baseline`; the alarm then returns only if the count grows |
+| `sdX: reallocated=N` / `reported_uncorrect=` / `command_timeout=` / `pending=` / `offline_uncorrectable=` (one line per attribute) / `sdX: NC, trip point` | `sudo smartctl --all /dev/sdX`; check your notes for this box's known-benign attributes first (some vendors pack operation counters into "error" attributes). When the count started is in `GET /api/alarms` and the server's `logs/events.jsonl`. A few remapped sectors with nothing pending can be accepted with `smart_baseline`; the alarm then returns only if the count grows |
 | `sdX: unreadable (…)` | nothing readable came back: drive dropped, a USB stick, `timeout` killed smartctl, or SMART disabled: `lsblk`, `dmesg`, `sudo smartctl --all /dev/sdX` |
 | `smartmontools not installed: drives are not monitored` | `apt install smartmontools`, then `sudo systemctl start horatio-collect.service` |
 | `sdX: self-test log has errors` | a scheduled self-test failed: `sudo smartctl --log selftest /dev/sdX` |

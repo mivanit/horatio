@@ -22,10 +22,11 @@
 # and `systemctl --failed` (the catch-all for anything that is not a drive, a
 # DIMM or the backup: a service that died gets one alarm line instead of silence).
 #
-# The rules themselves keep no state. The one thing carried from run to run is
-# WHEN each alarm started: the previous state.json is read for that, and a line
-# is appended to alarms.jsonl beside it when an alarm is raised, changes value or
-# clears (see "memory" below and collector/README.md).
+# No state is kept between runs: a snapshot says what is wrong NOW. Each alarm
+# carries a stable key (`alarm_items`) and the snapshot says what it really
+# checked (`checked`), so that the dashboard server, which does the remembering,
+# can tell since when an alarm has been there and when it went (its
+# logs/events.jsonl; see collector/README.md).
 #
 # Every collection command's stderr AND a non-zero exit code go to a sidecar
 # .err file; the python step turns any non-empty one into a `collector:` alarm,
@@ -188,8 +189,9 @@ SEL_RECENT_DAYS = 7
 
 alarms, info = [], []
 # Identity for each alarm, parallel to `alarms` (same order, same text): the
-# strings carry counts and ages that change from run to run, so a reader cannot
-# tell "the same alarm, still there" from a new one without a key.
+# strings carry counts and ages that change from run to run, so a reader (the
+# dashboard server's alarm history) cannot tell "the same alarm, still there"
+# from a new one without a key.
 alarm_items = []
 # Key prefixes this run really evaluated, with a clean capture. An alarm that is
 # gone and whose prefix is NOT listed is unknown, not cleared: a crashed section,
@@ -773,113 +775,6 @@ def boot():
     if previous and not previous["clean"] and uptime < 86400:
         info.append(f"boot: the previous boot ended without a shutdown, last log line {previous['ended']}")
 part(boot)
-
-# ---- memory (this block is identical in health-collect.sh and health-sensors.sh) ----
-# The one thing carried between runs: when each alarm started. The previous
-# snapshot (this script's own last output) says which alarms were already there;
-# what changed since is appended to alarms.jsonl beside it, one line per alarm
-# raised, changed in value, or cleared. Nothing is written while an alarm simply
-# stays. Each alarm_items entry gains `since` (epoch), and `initial` when it was
-# already there the first time this ran, so its real start is unknown.
-# `alarm_held` lists alarms that are absent but not known to be gone: not
-# `checked` this run (kept until they are, or dropped after HELD_EXPIRE_S), or
-# absent for fewer than `clear_after` runs in a row (flap damping).
-# Both collectors append to the same log; each line is one small O_APPEND write.
-# A failure here costs only the history: the snapshot is still written.
-HELD_EXPIRE_S = 30 * 86400
-
-def remember(source, cadence_s, clear_after, note, boot=None):
-    now = state["ts"]
-    stamp = lambda t: time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(t))
-    number = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
-    carried = ("key", "text", "value", "since", "initial")
-    events = []
-
-    def event(kind, item=None, **more):
-        e = {"timestamp": stamp(now), "source": source, "event": kind}
-        if item is not None:
-            e.update({k: item[k] for k in carried if k in item})
-        e.update(more)
-        events.append(e)
-
-    try:
-        with open(out) as f:
-            prev = json.load(f)
-    except FileNotFoundError:
-        prev = None
-    # An older collector's snapshot has no keys: treat it like no snapshot at all.
-    known = isinstance(prev, dict) and prev.get("schema") == 1 and isinstance(prev.get("alarm_items"), list)
-    before = {}
-    if known:
-        for old in prev["alarm_items"] + (prev.get("alarm_held") or []):
-            before[old["key"]] = old
-        if number(prev.get("ts")) and now - prev["ts"] > 3 * cadence_s:
-            event("gap", **{"from": stamp(prev["ts"]), "to": stamp(now)})     # nothing was watching
-    rebooted = bool(known and prev.get("boot_id") and state.get("boot_id")
-                    and prev["boot_id"] != state["boot_id"])
-    if rebooted and boot is not None:
-        event("boot", **boot)
-
-    for item in alarm_items:
-        old = before.pop(item["key"], None)
-        if old is not None and number(old.get("since")):
-            item["since"] = old["since"]
-            if old.get("initial"):
-                item["initial"] = True
-            if "value" in item and "value" in old and item["value"] != old["value"]:
-                event("changed", item, was=old["value"])
-            continue
-        item["since"] = now
-        if old is not None or not known:
-            item["initial"] = True
-        if old is None:
-            event("raised", item)
-
-    held = []
-    for key, old in before.items():
-        gone = {k: old[k] for k in carried if k in old}
-        if any(key == p or key.startswith(p + "/") for p in checked):
-            absent = old.get("absent", 0) + 1
-            if absent < clear_after:
-                held.append({**gone, "absent": absent})
-                continue
-            more = {"after_boot": True} if rebooted else {}      # counters that reset at boot
-            if number(gone.get("since")):
-                more["active_for_s"] = int(now - gone["since"])
-            event("cleared", gone, **more)
-        else:
-            unchecked_since = old.get("unchecked_since", now)
-            if number(unchecked_since) and now - unchecked_since > HELD_EXPIRE_S:
-                event("expired", gone, unchecked_since=unchecked_since)
-            else:
-                held.append({**gone, "unchecked_since": unchecked_since})
-    state["alarm_held"] = held
-
-    if events:
-        try:
-            fd = os.open(os.path.join(os.path.dirname(out), "alarms.jsonl"),
-                         os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-            try:
-                for e in events:
-                    os.write(fd, (json.dumps(e) + "\n").encode())
-            finally:
-                os.close(fd)
-        except OSError as e:
-            note(f"collector: alarm log not written: {e}")
-
-def remember_or_forget(source, cadence_s, clear_after, note, boot=None):
-    try:
-        remember(source, cadence_s, clear_after, note, boot)
-    except Exception as e:
-        traceback.print_exc()
-        for item in alarm_items:
-            item.pop("since", None)
-            item.pop("initial", None)
-        state["alarm_held"] = []
-        note(f"collector: alarm history not kept this run: {type(e).__name__}: {e}")
-# ---- end memory ----
-
-remember_or_forget("state", 900, 1, info.append, state.get("boot"))
 
 state["alarms"] = alarms
 state["alarm_items"] = alarm_items

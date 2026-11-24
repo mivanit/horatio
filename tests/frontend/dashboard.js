@@ -590,6 +590,12 @@ function testHardwareSince() {
   context.dataCache.sensors = { lastUpdate: now, data: { status: 'ok', age_sec: 5,
     alarms: ['GPU 1: thermal slowdown active (sw)'], alarm_items: [item('gpu/1/slowdown', 'GPU 1: thermal slowdown active (sw)', t - 59)] } };
 
+  // The server's own fan alarm arrives the same way, with since when.
+  const fan = 'fan cpu: 0 RPM, below its 300 RPM minimum';
+  context.renderHardware({ ...state, sensor_alarms: [fan], sensor_alarm_items: [item('fan/cpu', fan, t - 7 * 60)] });
+  assert.equal(header(), '5 issues');
+  assert(html().includes(fan) && html().includes('(7 min)'));
+
   context.renderHardware(state);
   assert.equal(header(), '4 issues');
   assert(html().includes(`seen since ${context.sinceText(t - 2 * 86400 - 3600)}`) && html().includes('(2 d)'), 'an alarm older than the history says so');

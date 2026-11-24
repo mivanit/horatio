@@ -166,6 +166,49 @@ timestamp, and drops only byte-identical lines. It never changes its inputs or o
 merged file in its place. It runs on BusyBox too, but holds the data in RAM there, so merge
 large histories on a Linux box.
 
+## What is kept in `logs/`
+
+Everything the dashboard remembers is in the checkout's `logs/` (the only directory its
+service may write), as JSON lines. Measurements and events are separate files because they
+are different things: one is a bulky sample on a schedule, the other a rare, small fact.
+
+| file | one line per | written |
+|---|---|---|
+| `history.jsonl` | sample of the machine: CPU, memory, temperatures, fans, power, drives, GPUs, ping, processes | every `history.record_interval` |
+| `services.jsonl` | round of `http_targets` checks | every `services.check_interval` |
+| `events.jsonl` | thing that happened: an alarm `raised`, `changed` in value or `cleared`, a `boot`, a `gap` | when it happens; nothing while an alarm just stays |
+| `alarms-state.json` | (not a log) what the alarm history currently holds, so a restart continues it | in place, about once a minute |
+| `server.log`, `glances.log` | the server's own messages | rotated at 5 MiB |
+
+None of the JSON-lines files is rotated. `/var/lib/horatio/` holds only the collectors'
+two current snapshots, not history.
+
+`events.jsonl` covers every alarm, whoever decides it: the two root collectors' (by the `key`
+each gives in `alarm_items`) and the server's own fan rules. Each line has `timestamp`,
+`source` (`state`, `sensors` or `dashboard`) and `event`:
+
+| `event` | when | other fields |
+|---|---|---|
+| `raised` | an alarm appears | `key`, `text`, `value`, `since`; `initial: true` when it was already there the first time its source was seen |
+| `changed` | its `value` differs from the last snapshot (reallocated sectors `8 -> 9`) | the same, plus `was` |
+| `cleared` | it is gone, and the snapshot says it `checked` for it | the same, plus `active_for_s`; `after_boot: true` when the box rebooted in between (counters that reset at boot) |
+| `expired` | it could not be re-checked for 30 days (a drive that is gone) | the same, plus `unchecked_since` |
+| `boot` | the 15-min snapshot shows a new boot | `id`, `kernel`, `previous: {clean, ended, kernel}` |
+| `gap` | a source was not seen for more than three of its intervals (box off, timer stopped), or the server itself was not running | `from`, `to` |
+
+An alarm that is absent only because it could not be looked at (a failing drive that is
+asleep, a BMC that timed out) is kept, not cleared; the Hardware card shows it as "not
+re-checked". The 60 s snapshot's alarms and the fan rules must be absent three times in a row
+to clear, so a value sitting on its threshold does not write two lines a minute. While the
+server is not running nothing is recorded: an alarm that both came and went in that time is
+missed, and the next line is a `gap`. Service outages are not repeated here;
+`services.jsonl` has every check.
+
+```bash
+tail logs/events.jsonl                                   # what changed lately
+curl -s localhost:8080/api/alarms | python3 -m json.tool # what is wrong now, since when
+```
+
 ## Security
 
 Meant for a trusted LAN, not public interfaces. probably has many security holes. The dashboard binds to all interfaces and is unauthenticated except
@@ -196,7 +239,7 @@ again, don't put this on anything besides a trusted LAN!
 | `GET /`                      | Dashboard UI                                |
 | `/api/4/<plugin>`            | Proxied to the Glances REST API for the plugins the UI reads (cpu, percpu, mem, memswap, gpu, network, diskio, load, uptime, system, fs); anything else is 404 |
 | `GET /api/4/sensors`         | Served by the dashboard from Linux hwmon, in Glances' sensors shape (`type` `temperature_core` / `fan_speed` / `power`, `label`, `value`, `unit`, `warning`, `critical`; power rows also `total`, true only for a whole-machine reading). Temperature labels are Glances' own, so history continues; fans are `<chip> fan<N>` (or the kernel's label), with the `fans` rules applied |
-| `GET /api/sensor-alarms`     | `{alarms, notes}` the dashboard itself decides: fans below their `min_rpm`, setup hints (a desktop with no fan readings, a VM). The collectors' alarms stay in their own files; a login script reads both |
+| `GET /api/sensor-alarms`     | `{alarms, notes}` the dashboard itself decides: fans below their `min_rpm`, setup hints (a desktop with no fan readings, a VM). The collectors' alarms stay in their own files; `GET /api/alarms` has all of them in one list |
 | `GET /api/4/fs`              | Glances filesystems, deduplicated by device (bind mounts collapse) |
 | `GET /api/processlist`       | Process list with arguments stripped (the one the UI uses) |
 | `GET /api/list-endpoints`    | Which file-backed endpoints exist on this box (mail, storage-health, sensors) |
@@ -211,7 +254,7 @@ again, don't put this on anything besides a trusted LAN!
 | `GET /api/mail`              | Local system mail: `count` and the newest 10 `{date_epoch, subject}`; always 200 with `status` ok/missing/error |
 | `GET /api/storage-health`    | The 15-min collector snapshot (`alarms`, `info`, drives, md, ECC, SEL, backup, failed units, journal errors) with `status` ok/stale/missing/error and `age_sec`, plus the dashboard's own `sensor_alarms` / `sensor_notes` (as `/api/sensor-alarms`, whatever the collector's state); always 200. A source the box does not have (no BMC, no ECC reporting) is `null` with one `info` note |
 | `GET /api/sensors`           | The root collector's 60 s snapshot (`fans`, `temps`, `power`, `gpus` with nvidia-smi temperatures, driver limits, thermal slowdown and ECC, `alarms`), same shape, stale after 300 s. Power rows carry `unit` and `total` (the BMC's whole-machine reading) |
-| `GET /api/alarms`            | Everything wrong right now in one list, and since when. `active`: `{source, key, text, value, since, initial}` rows from the 15-min snapshot (`source: "state"`), the 60 s snapshot (`"sensors"`, only while it is fresh) and the service checks (`"services"`: a target that is down, `since` = its first failed check). `sources` gives each one's `status`: one that is not `ok` means unknown, never clear. `since` is epoch seconds; `initial: true` means the alarm predates the collector's history, so the real start is unknown; `key` and `since` are `null` with a collector too old to give them. `held`: alarms a collector could not re-check this run (a failing drive that is asleep). `recent`: the newest 50 lines of the collectors' change log (`raised`, `changed`, `cleared`, `boot`, `gap`; `collector/README.md`) |
+| `GET /api/alarms`            | Everything wrong right now in one list, and since when. `active`: `{source, key, text, value, since, initial}` rows from the 15-min snapshot (`source: "state"`), the 60 s snapshot (`"sensors"`, only while it is fresh), the server's own fan rules (`"dashboard"`) and the service checks (`"services"`: a target that is down, `since` = its first failed check). `sources` gives each one's `status`: one that is not `ok` means unknown, never clear. `since` is epoch seconds, from the server's alarm history; `initial: true` means the alarm was already there when the history began, so the real start is unknown; `key` and `since` are `null` with a collector too old to give its alarms keys. `held`: alarms a collector could not re-check (a failing drive that is asleep). `recent`: the newest 50 lines of `logs/events.jsonl` (below) |
 | `GET /api/services`          | Top-level `stale: true` when no check round has finished for several intervals (the results are then old; the card and `/text` show them as stale). Each `http_targets` entry: `ok` (null before its first check), `status`, `ms`, `error`, `checked`, `down_since` (epoch of the first failed check of the current outage, at most a week back; `null` when up), and `uptime` as `{up, checks}` counts over the last `1`, `24` and `168` hours. `checks: 0` means nothing was checked in that window |
 | `GET /api/services/history`  | The outage grid (query: `hours`, default 24): per target, `count` pairs of `[passed, failed]` checks, one per `bucket_sec` seconds from `start` (at most 300 buckets). `[0, 0]` is a bucket with no checks. `truncated: true` means the log could not be read back as far as `start` |
 | `GET /api/history`           | History records (query: `hours`, default 24) without the heavy fields (`temps`, `processes`) and `ip`. Each record also carries `cpu_freq` (min/median/avg/max MHz over every core and burst sample, plus the hardware range) where cpufreq sysfs exists. `since=<timestamp>` (URL-encoded) returns only newer records. Every response has `cutoff` (the window start, for trimming what a client already holds) and `now` (the server's clock, for the next `since`), both epoch seconds. With `since`, `truncated: true` means the read stopped before reaching `since` (refetch without it) and `skipped_lines` counts the unreadable lines in everything the server has parsed, which can reach further back than the records returned |

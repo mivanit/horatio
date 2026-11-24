@@ -336,10 +336,14 @@ FAN_DEFAULT: Final[dict[str, Any]] = {
 }
 
 
-def apply_fan_rules(
+def fan_findings(
     rows: list[dict[str, Any]], config: Any
-) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """Apply config.json ``fans`` to the fan rows: (rows to show, alarms, notes).
+
+    Each alarm is ``{"key": "fan/<label>", "text": ...}``: the text carries the
+    reading and changes with it, the key is the alarm's identity, which is what the
+    server's alarm history goes by.
 
     ``config`` maps a fan's label to its rule, plus an optional ``default`` rule for
     every fan not named::
@@ -352,7 +356,7 @@ def apply_fan_rules(
     exist is a note, so a typo or a renamed chip cannot silently disable an alarm."""
     rules: dict[str, Any] = config if isinstance(config, dict) else {}
     default: dict[str, Any] = {**FAN_DEFAULT, **_rule(rules.get("default"))}
-    alarms: list[str] = []
+    alarms: list[dict[str, Any]] = []
     notes: list[str] = []
     shown: list[dict[str, Any]] = []
     present: set[str] = set()
@@ -368,7 +372,10 @@ def apply_fan_rules(
         if isinstance(minimum, (int, float)) and not isinstance(minimum, bool):
             if value < minimum:
                 line: str = f"fan {row['label']}: {value:g} RPM, below its {minimum:g} RPM minimum"
-                (notes if rule.get("on_low") == "note" else alarms).append(line)
+                if rule.get("on_low") == "note":
+                    notes.append(line)
+                else:
+                    alarms.append({"key": f"fan/{row['label']}", "text": line})
             shown.append(row)
         elif value == 0 and rule.get("hide_if_zero"):
             continue
@@ -379,6 +386,17 @@ def apply_fan_rules(
         if name != "default" and name not in present:
             notes.append(f"fans config names {name!r}, which this box does not have")
     return shown, alarms, notes
+
+
+def apply_fan_rules(
+    rows: list[dict[str, Any]], config: Any
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    """``fan_findings`` with the alarms as their text alone."""
+    shown: list[dict[str, Any]]
+    items: list[dict[str, Any]]
+    notes: list[str]
+    shown, items, notes = fan_findings(rows, config)
+    return shown, [item["text"] for item in items], notes
 
 
 def _rule(value: Any) -> dict[str, Any]:
