@@ -5,6 +5,9 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- Power card without a whole-machine reading (no BMC or meter): with `power_psu_watts`
+  set, the measured parts warn once they alone pass the warning line, since the machine
+  then draws at least that much. The meta line names the line in watts.
 - `./install.sh -h` / `--help` prints the installer's options and exits, from any user,
   without changing anything.
 - Sensors on any Linux box: the dashboard reads Linux hwmon itself (`hwmon.py`, no root,

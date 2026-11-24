@@ -622,6 +622,18 @@ function testPowerFromHwmonAndTotals() {
   assert(bar().includes('power-seg-cpu0') && !bar().includes('power-psu'), 'a part, coloured as a CPU, no PSU line');
   assert.equal(context.elements.get('power-value').textContent, '≥ 64 W');
   assert(bar().includes('scale 100 W'), '1.5 x 64 W rounded up to 50 W');
+  // Parts only, with a PSU: the lower bound warns once it alone passes the line.
+  context.thresholds.power_psu_watts = 430;
+  context.thresholds.power_warn_fraction = 300 / 430;
+  context.tickTemps();
+  assert(bar().includes('warns at 300 W (70% of PSU)'));
+  assert.equal(context.elements.get('power-value').className, 'value');
+  context.sensors.data[0].value = 310;
+  context.tickTemps();
+  assert.equal(context.elements.get('power-value').className, 'value text-warning');
+  context.sensors.data[0].value = 64;
+  delete context.thresholds.power_psu_watts;
+  delete context.thresholds.power_warn_fraction;
   // An hwmon whole-machine meter, then the BMC's reading as well: the BMC wins.
   context.sensors.data.push({ type: 'power', label: 'System (ACPI)', value: 150, total: true });
   context.tickTemps();

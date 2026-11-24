@@ -2327,7 +2327,7 @@ async function fetchDataOnce() {
         `<div class="power-bar">${psuW ? `<div class="power-psu" style="left:${(psuW / maxW * 100).toFixed(2)}%" title="PSU ${psuW} W"></div>` : ''}${segs}</div>` +
         `<div class="power-legend">${legend}</div>` +
         `<div class="power-meta">${psuW ? `PSU ${psuW} W (dashed line) · ` : ''}scale ${Math.round(maxW)} W` +
-        (psuW ? ` · warns at ${Math.round(warnFrac * 100)}% of PSU` : '') +
+        (psuW ? ` · warns at ${Math.round(psuW * warnFrac)} W (${Math.round(warnFrac * 100)}% of PSU)` : '') +
         (totalRow ? '' : ' · no whole-machine reading: measured parts only') + `</div>`);
       const valueEl = document.getElementById('power-value');
       if (totalRow && psuW) {
@@ -2341,10 +2341,12 @@ async function fetchDataOnce() {
         valueEl.className = 'value';
         updateCardWarning('power', 0, 0);
       } else {
-        // Parts only (no BMC): a lower bound, which cannot be judged against the PSU.
+        // Parts only (no whole-machine reading): a lower bound. Under the warning line
+        // it says nothing; over it, the machine is over it for certain, so it warns.
+        const over = psuW != null && total >= psuW * warnFrac;
         valueEl.textContent = `≥ ${Math.round(total)} W`;
-        valueEl.className = 'value';
-        updateCardWarning('power', 0, 0);
+        valueEl.className = 'value' + (over ? ' text-warning' : '');
+        updateCardWarning('power', psuW ? total : 0, psuW ? psuW * warnFrac : 0);
       }
       updateCardNoData('power', true);
     } else {
