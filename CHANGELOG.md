@@ -8,7 +8,11 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 - Sensor labels can differ between old and new records after this upgrade, and
   identity changes can split a sensor's history into separate lines. Historical
   keys are preserved rather than merged. Duplicate chart labels use shorter
-  distinguishing paths, and hidden sensor lines stay hidden across range changes.
+  distinguishing paths. Hidden sensor lines stay hidden across label changes
+  while present in the chart; leaving the range resets their visibility, and an
+  empty range resets all trace selections.
+- Unchecked alarm observations reset the clearing count, so recovery requires
+  consecutive checked, healthy observations.
 - Python startup logs include the Horatio version and installed Git build, so
   `logs/server.log` and the service journal record when a new build starts.
 - CI tests the minimum supported Python 3.10 as well as 3.13. Installed-service

@@ -5304,9 +5304,9 @@ def track_alarms(
     ``known`` is None the first time a source is seen: its alarms were already
     there, so they are ``initial`` (the real start is unknown). An alarm that is
     gone is ``cleared`` only if the snapshot ``checked`` it, and only after
-    ``clear_after`` snapshots in a row without it; until then, and for as long as
-    it is not checked, it stays known. ``hidden`` are keys the source says still
-    exist though it does not list them (journal messages past the ones it
+    ``clear_after`` checked snapshots in a row without it. An unchecked snapshot
+    resets that count and keeps the alarm known. ``hidden`` are keys the source
+    says still exist though it does not list them (journal messages past the ones it
     prints): they remain active. Each entry remembers the boot it was last
     seen on, so a clear that follows a reboot says so: counters that reset at
     boot (ECC, failed units) take their alarms with them."""
@@ -5395,13 +5395,11 @@ def track_alarms(
             ):
                 event("expired", gone, unchecked_since=unchecked_since)
             else:
-                # The absences counted so far are kept: a source that checks a key
-                # only every other time must still be able to clear it.
+                # Unknown observations break the consecutive healthy streak.
                 after[key] = {
                     **gone,
                     "unchecked_since": unchecked_since,
                     "unchecked": unchecked,
-                    **({"absent": absent} if absent else {}),
                 }
     return after, events
 

@@ -130,7 +130,8 @@ def test_retirement_requires_password_and_uses_throttle(
     assert [event["event"] for event in server._read_events()] == ["raised"]
 
 
-def test_hidden_fault_resets_held_and_absence_bookkeeping() -> None:
+@pytest.mark.parametrize("unchecked", [False, True])
+def test_hidden_fault_resets_held_and_absence_bookkeeping(unchecked: bool) -> None:
     import server
 
     key = "journal/abcdef01"
@@ -139,9 +140,11 @@ def test_hidden_fault_resets_held_and_absence_bookkeeping() -> None:
     )
     original = dict(known[key])
     known, _ = server.track_alarms(known, [], ["journal"], STAMP + 60, 2)
-    known, _ = server.track_alarms(known, [], [], STAMP + 120, 2)
     assert known[key]["absent"] == 1
-    assert known[key]["unchecked_since"] == STAMP + 120
+    if unchecked:
+        known, _ = server.track_alarms(known, [], [], STAMP + 120, 2)
+        assert "absent" not in known[key]
+        assert known[key]["unchecked_since"] == STAMP + 120
 
     # The collector still sees this message, beyond its eight displayed rows.
     known, events = server.track_alarms(

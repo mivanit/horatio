@@ -210,8 +210,9 @@ each gives in `alarm_items`) and the server's own fan rules and host checks. Eac
 An alarm that is absent only because it could not be looked at (a failing drive that is
 asleep, a BMC that timed out, a fan that stopped answering) is kept, not cleared; the
 Hardware card shows it as "not re-checked". The 60 s snapshot's alarms and the fan rules
-must be absent three times in a row to clear. Raising is immediate on the first bad
-reading, with no debounce, so a real fault is not delayed. A value fluctuating
+must be checked and healthy three times in a row to clear. An unchecked snapshot
+or another observation of the fault resets the count. Raising is immediate on the
+first bad reading, with no debounce, so a real fault is not delayed. A value fluctuating
 across its limit can still raise an alarm, clear after three clean readings, and
 raise it again; each transition adds a line to `logs/events.jsonl`.
 

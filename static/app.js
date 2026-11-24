@@ -4509,6 +4509,9 @@ async function loadHistoryData(metric, hours, data) {
     return;
   }
 
+  // Trace selections intentionally live only in the current chart. A sensor
+  // that leaves the range returns with default visibility; an empty range resets
+  // all selections. Avoid a separate cache for sensors absent from the chart.
   if (data.records.length === 0) {
     entry.card.querySelector('.chart-container').innerHTML = `
       <div class="no-history-data">

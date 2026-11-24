@@ -251,19 +251,25 @@ def test_odd_input_is_dropped_not_tracked_wrongly() -> None:
     assert server.track_alarms(known, [], ["c"], 4000, 1)[1][0]["active_for_s"] == 0
 
 
-def test_a_key_checked_only_every_other_time_still_clears() -> None:
+def test_unchecked_observations_reset_the_clear_count() -> None:
     import server
 
     known: dict[str, dict[str, Any]] = server.track_alarms({}, [item("x")], [], 0, 3)[0]
     events: list[dict[str, Any]] = []
-    n: int
-    for n in range(1, 6):  # unchecked, checked, unchecked, checked, unchecked, ...
-        known, events = server.track_alarms(
-            known, [], ["x"] if n % 2 == 0 else [], n * 60, 3
-        )
-        assert events == []
-    assert known["x"]["absent"] == 2
-    known, events = server.track_alarms(known, [], ["x"], 360, 3)
+    # Even two healthy readings are discarded when the next snapshot is unknown.
+    for start in (0, 180):
+        for offset, absent in ((60, 1), (120, 2)):
+            known, events = server.track_alarms(known, [], ["x"], start + offset, 3)
+            assert (known["x"]["absent"], events) == (absent, [])
+        known, events = server.track_alarms(known, [], [], start + 180, 3)
+        assert events == [] and "absent" not in known["x"]
+        assert known["x"]["since"] == 0
+
+    # Three consecutive checked, healthy observations still clear it normally.
+    for now, absent in ((420, 1), (480, 2)):
+        known, events = server.track_alarms(known, [], ["x"], now, 3)
+        assert (known["x"]["absent"], events) == (absent, [])
+    known, events = server.track_alarms(known, [], ["x"], 540, 3)
     assert kinds(events) == [("cleared", "x")] and known == {}
 
 
