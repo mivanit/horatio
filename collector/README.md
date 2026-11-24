@@ -61,7 +61,10 @@ emit one string per finding; the dashboard's Hardware card (and any MOTD script)
 lists and adds no rules of its own. The card counts the 60 s file's alarms only while that file
 is fresh; a stale or missing one shows as "sensors stale" (alarms unknown), never as clear.
 `info` carries non-problems worth knowing (a drive in standby, a scrub in progress,
-no self-test on record). Any capture that failed or timed out is itself an alarm
+no self-test on record) and hardware that is not there to monitor: with no BMC,
+`sel_memory` and `sel_hardware` are `null`; with no DIMMs under EDAC (non-ECC memory, or
+ECC without its driver), `edac` is `null`. Each comes with one note, so an absent source
+never shows as a zero count. Any capture that failed or timed out is itself an alarm
 (`collector: …`), so a partial snapshot never reads as healthy; the 15-min run also alarms when
 the 60 s file is missing or older than 5 minutes. A part of the 15-min run that crashes on a
 value it cannot handle is a `collector: <part> crashed: …` alarm; the other parts still report,

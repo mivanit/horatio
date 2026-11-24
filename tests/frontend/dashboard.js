@@ -562,6 +562,33 @@ function testSensorFreshness() {
   assert.deepEqual(context.errors, []);
 }
 
+// Absent hardware is absent: a box with no BMC and no EDAC gets no Memory rows
+// (the collector writes null for both), and the check hint names only the tools
+// for what is present.
+function testHardwareMemoryRows() {
+  const context = liveContext(['hardware-content', 'hardware-value', 'snapshot-age']);
+  context.Date = { now: () => 100000000 };
+  context.escapeHtml = String;
+  context.hwHint = () => '';
+  context.updateCardCritical = () => {};
+  context.document.querySelector = () => context.elements.get('snapshot-age');
+  evaluate(context, between(app, 'function renderHardware', '// Power bar segment colours'));
+  const html = data => {
+    context.renderHardware({ status: 'ok', age_sec: 30, alarms: [], info: [], ...data });
+    return context.elements.get('hardware-content').innerHTML;
+  };
+  const none = html({ edac: null, sel_memory: null, sel_hardware: null });
+  assert(!none.includes('Memory'), 'no Memory section without a BMC or EDAC');
+  assert(!none.includes('ECC since boot') && !none.includes('BMC log'));
+  const ecc = html({ edac: { uptime_seconds: 7200, ce_total: 0, ue_total: 0 }, sel_memory: null, sel_hardware: null });
+  assert(ecc.includes('ECC since boot (2 h): 0 corrected, 0 uncorrectable'));
+  assert(ecc.includes('check: sudo ras-mc-ctl --errors') && !ecc.includes('ipmitool'));
+  const server = html({ edac: { uptime_seconds: 7200, ce_total: 0, ue_total: 0 },
+    sel_memory: { count: 0, recent: [] }, sel_hardware: { count: 0, recent: [] } });
+  assert(server.includes('BMC log, memory events: 0 lifetime'));
+  assert(server.includes('check: sudo ipmitool sel elist; sudo ras-mc-ctl --errors'));
+}
+
 async function testPausedStatus() {
   for (const ok of [true, false]) {
     const dom = makeDOM(['status', 'status-text', 'spinner', 'status-tooltip', 'toggle-btn']);
@@ -1475,7 +1502,7 @@ function testServicesCard() {
 }
 
 (async () => {
-  for (const test of [testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
+  for (const test of [testHardwareMemoryRows, testHistoryGapSkip, testHistoryAxes, testTempLabelsAndLimits, testServicesCard, testThemes,testFetchBodyTimeout, testStartupReadTimeouts, testIpInfoTimeout, testGpuRecovery, testGpuUnavailableReadings, testGpuInfoUnavailableReadings,
     testDriveTemperatureFreshness, testTempsWithoutSensors, testDriveUsageHidden, testSensorFreshness, testPausedStatus, testStartupPolling, testPingDisplay, testPingLoss,
     testStaticInfoRecovery, testSlowPollRenderIsolation, testCaptureCacheAge, testCapturePendingAndHiddenTab, testHistorySettingsLoading, testHistorySettingsPopupOwnership, testLiveSampleTimes,
     testVersionFooter]) {

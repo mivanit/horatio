@@ -5,6 +5,13 @@ Releases are `vX.Y.Z` git tags (README: Versions and updates). Add changes under
 
 ## [Unreleased]
 
+- Hardware card: a box without a BMC or without ECC reporting no longer shows
+  "BMC log, memory events: 0 lifetime" or "ECC since boot: 0 corrected", which read as
+  healthy counts of something that is not being measured. The collector writes `null`
+  for those sources with one note each ("no BMC …", "no ECC reporting (no DIMMs under
+  EDAC): memory errors are not monitored"), and the Memory section's `check:` hint names
+  only the tools for what is present.
+
 ## [0.2.1] - 2026-11-18
 
 - History cards line up: every chart and the Services grid show the whole requested

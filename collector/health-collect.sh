@@ -206,7 +206,10 @@ def part(section):
 
 if os.path.exists(os.path.join(tmp, "no-smartctl")):
     alarms.append("smartmontools not installed: drives are not monitored")
-if os.path.exists(os.path.join(tmp, "no-bmc")):
+# Absent hardware is absent, not zero: with no BMC the two SEL sections write
+# null (the dashboard then shows no "BMC log" rows) and this one note says why.
+NO_BMC = os.path.exists(os.path.join(tmp, "no-bmc"))
+if NO_BMC:
     info.append("no BMC (ipmitool or /dev/ipmi0 missing): no event log")
 
 # ---- config (per-machine SEL fault policy) -----------------------------------
@@ -267,6 +270,9 @@ def sel_recent(line):
     return when is not None and state["ts"] - when < SEL_RECENT_DAYS * 86400
 
 def sel_memory():
+    if NO_BMC:
+        state["sel_memory"] = None
+        return
     sel_lines = read("sel.txt").splitlines()
     mem = [l.strip() for l in sel_lines if "mem" in l.lower() or "ecc" in l.lower()]
     recent = [l for l in mem if sel_recent(l)]
@@ -284,6 +290,9 @@ part(sel_memory)
 # they also carry an embedded "|" in the description, so their column count and
 # direction position differ -- another reason not to run them through this.
 def sel_hardware():
+    if NO_BMC:
+        state["sel_hardware"] = None
+        return
     sel_lines = read("sel.txt").splitlines()
 
     def sel_hardware_fault(line):
@@ -313,6 +322,9 @@ part(sel_hardware)
 
 # ---- EDAC per-DIMM (no privileges needed; counters RESET EVERY BOOT) ---------
 # HEALTH_EDAC / HEALTH_UPTIME point the fixture run at a fake tree (README).
+# No DIMMs under EDAC means memory errors are not being counted at all (non-ECC
+# memory, or ECC memory without its EDAC driver), so `edac` is null and one info
+# note says so; a "0 corrected" line would read as healthy ECC.
 def edac():
     dimms = []
     for d in sorted(glob.glob(os.path.join(os.environ.get("HEALTH_EDAC", "/sys/devices/system/edac/mc"), "mc*/dimm*"))):
@@ -325,6 +337,10 @@ def edac():
             "ce_count": int(sysread(d, "dimm_ce_count") or 0),
             "ue_count": int(sysread(d, "dimm_ue_count") or 0),
         })
+    if not dimms:
+        state["edac"] = None
+        info.append("no ECC reporting (no DIMMs under EDAC): memory errors are not monitored")
+        return
     uptime = int(float(open(os.environ.get("HEALTH_UPTIME", "/proc/uptime")).read().split()[0]))
     ce_total = sum(d["ce_count"] for d in dimms)
     ue_total = sum(d["ue_count"] for d in dimms)

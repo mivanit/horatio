@@ -648,7 +648,10 @@ function renderHardware(data) {
   }
   if (data.sel_memory) memory.push(hwRow('', `BMC log, memory events: ${data.sel_memory.count} lifetime, ${data.sel_memory.recent?.length ?? '?'} in the last 7 days`));
   if (data.sel_hardware) memory.push(hwRow('', `BMC log, hardware faults: ${data.sel_hardware.count} lifetime, ${data.sel_hardware.recent?.length ?? '?'} in the last 7 days`));
-  if (memory.length) memory.push(hwRow('hw-note', 'check: sudo ipmitool sel elist; sudo ras-mc-ctl --errors'));
+  // The hint names only the tools for what is present: no ipmitool line on a box without a BMC.
+  const memCheck = [data.sel_memory || data.sel_hardware ? 'sudo ipmitool sel elist' : null,
+                    data.edac ? 'sudo ras-mc-ctl --errors' : null].filter(Boolean);
+  if (memory.length) memory.push(hwRow('hw-note', `check: ${memCheck.join('; ')}`));
 
   const backup = [];
   if (data.backup) {
