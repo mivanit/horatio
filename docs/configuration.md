@@ -145,7 +145,16 @@ reads them at startup.
 - Below `min_rpm` is an alarm; `"on_low": "note"` makes it a note.
 - `"min_rpm": null` disables an inherited minimum.
 - `hide_if_zero` defaults to true. It hides a zero reading only if the fan has no
-  minimum and has not been seen turning.
+  minimum and has not been seen turning since the server started. This memory is
+  not persisted: a fan without a minimum that stopped before a restart is hidden
+  again afterwards. To keep zero-RPM fans visible, set
+  `"fans": {"default": {"hide_if_zero": false}}`. Give important fans a positive
+  `min_rpm`: they are never hidden by this rule and alarm when they stop, unless
+  configured with `"on_low": "note"`.
+
+Desktop boards report unused fan headers as 0 RPM indefinitely. Hiding those
+headers by default keeps the fan display useful; minimum-speed rules distinguish
+important stopped fans from unused headers.
 
 An explicitly ruled missing fan keeps its alarm. Unreadable fans covered only by
 the default rule remain unchecked in alarm history. Old Linux display-name rules

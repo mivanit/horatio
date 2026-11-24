@@ -195,8 +195,18 @@ each gives in `alarm_items`) and the server's own fan rules and host checks. Eac
 An alarm that is absent only because it could not be looked at (a failing drive that is
 asleep, a BMC that timed out, a fan that stopped answering) is kept, not cleared; the
 Hardware card shows it as "not re-checked". The 60 s snapshot's alarms and the fan rules
-must be absent three times in a row to clear, so a value sitting on its threshold does not
-write two lines a minute. While the server is not running nothing is recorded: an alarm that
+must be absent three times in a row to clear. Raising is immediate on the first bad
+reading, with no debounce, so a real fault is not delayed. A value fluctuating
+across its limit can still raise an alarm, clear after three clean readings, and
+raise it again; each transition adds a line to `logs/events.jsonl`.
+
+For a fan, lower its `min_rpm` under `fans` in `config.json` if the minimum is too
+close to its normal speed, or use `"on_low": "note"` to show low readings without
+raising an alarm. Fan rules are read at server startup, so changes require a
+restart. GPU temperature warnings use `gpu_temp_alarm_margin_c` in the collector
+config (`/etc/horatio/config.json`).
+
+While the server is not running nothing is recorded: an alarm that
 both came and went in that time is missed, and the next line is a `gap` with
 `source: "dashboard"`. A `gap` on `state` or `sensors` means that collector's snapshots
 stopped while the server was running. Service outages are not repeated here;
