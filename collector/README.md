@@ -89,7 +89,8 @@ ago`), so two snapshots cannot be compared by text. Each snapshot therefore also
   by serial, because `sdX` letters move between boots; BMC sensors by name and entity. Three
   kinds of key do carry a device name, for want of anything better, and so start afresh if
   the letters move: a drive that gave no serial or no report at all (`smart/dev:<name>/…`)
-  and an md array's members (`md/<array>/member/<dev>/…`). A fault counter that never falls on its own (reallocated sectors, grown defects, ECC
+  an md array's members (`md/<array>/member/<dev>/…`), and EDAC channels
+  (`ecc/dimm/mcN/dimmN/…`). A fault counter that never falls on its own (reallocated sectors, grown defects, ECC
   counts) also has `"value"`, so a reader can report `8 -> 9`; temperatures and ages have none.
   A key raised twice in one run gets `#2`, `#3`.
 - `checked`: the key prefixes this run really evaluated, with a clean capture. A prefix `P`
@@ -99,10 +100,20 @@ ago`), so two snapshots cannot be compared by text. Each snapshot therefore also
   that is not judged right now (`mismatch_cnt` during a resync, the correctable ECC count
   while an uncorrectable one shows) list nothing. A drive is listed rule by rule, for what
   its report really contained: one that answered with its health but not its attribute
-  table is checked for `…/health`, not for `…/reallocated`.
+  table is checked for `…/health`, not for `…/reallocated`. A successful command with
+  an unavailable field is also unknown: BMC `ns` rows, GPU `N/A` counters, missing SMART
+  attributes and unreadable sysfs counters do not count as healthy observations.
+  Uncorrectable ECC and fan-ceiling alarms have individual device keys; their display
+  totals do not establish whether an omitted device recovered.
 - `alarm_hidden` (15-min snapshot): keys of alarms that exist but are not printed, which is
   the journal messages past the eight shown. Everything else under a checked prefix that is
   absent is gone; these are not.
+- An aggregate alarm may include `requires`, the exact checks needed to establish its
+  recovery. Corrected ECC keeps its summed threshold and names every DIMM's corrected
+  counter; a DIMM that disappears cannot make the old aggregate healthy. The server
+  retains those dependencies while the alarm is active. Explicitly checking the alarm's
+  own key still permits deliberate disabling of a rule. Older aggregate alarms without
+  dependencies remain held when the new collector cannot prove their recovery.
 - `boot_id`: the kernel's boot id. Counters that reset at boot (ECC, failed units, GPU ECC
   since driver load) make their alarms disappear at a reboot; a reader that sees the id
   change knows why.
@@ -121,7 +132,7 @@ ago`), so two snapshots cannot be compared by text. Each snapshot therefore also
 | `journal-more` | more distinct messages than the 8 shown (their keys are in `alarm_hidden`) |
 | `sensors-snapshot/missing`, `/stale` | the 60 s file, judged by the 15-min run |
 | `bmc/<fan\|temp\|power>/<name>@<entity>` | a BMC sensor whose status is not ok |
-| `fans/ceiling` | `fan_rpm_alarm_above` |
+| `fans/ceiling/<name>@<entity>` | `fan_rpm_alarm_above`; one key per fan, so a missing fan cannot be cleared by its neighbors |
 | `gpu/<index>/temp/<memory\|core\|tlimit>`, `/slowdown`, `/ecc`, `/retired_pages` | per GPU, by nvidia-smi index (PCI bus order) |
 | `capture/<name>`, `unparsed/<name>` | a capture that failed, a line that did not parse |
 | `collector/<part>`, `smart/dev:<name>/crash` | a part of the 15-min run that crashed; the check of one drive that crashed |
@@ -153,10 +164,11 @@ and the server logs a `boot` event when `boot_id` changes.
 | `nvmeXnY: media_errors=N` / `nvmeXnY: percentage_used=N (endurance spent)` | NVMe health log (`sudo smartctl --all /dev/nvmeXnY`): unrecoverable data errors, or the rated write endurance is used up. `passed` covers the rest of `critical_warning` (spare, temperature, read-only) |
 | `mdN: DEGRADED` / `mdN: sdX state faulty` / `mdN: sdX errors=` / `mdN: array_state` | `cat /proc/mdstat`; `sudo mdadm --detail /dev/mdN` |
 | `mdN: mismatch_cnt=N` | blocks differed between mirrors at the last `check` (not raised while a check/resync/repair runs: the count climbs during one); on RAID1 a small count can be benign. `echo repair > /sys/block/mdN/md/sync_action`, then a `check`; if it returns, look at the members' SMART |
-| `fans: N over C RPM (boost back on, manual override, or box hot)` | only with `fan_rpm_alarm_above` set: a BMC fan setting reverted (power-cycle?), the fans are held at a manual speed above the ceiling, or the box is hot |
+| `fan <name>: N RPM over C RPM ceiling (boost back on, manual override, or box hot)` | only with `fan_rpm_alarm_above` set: a BMC fan setting reverted (power-cycle?), the fans are held at a manual speed above the ceiling, or the box is hot |
 | `GPU N: memory X C >= max operating Y C - M` / `GPU N: core X C >= …` | within `gpu_temp_alarm_margin_c` of the driver's limit (`nvidia-smi -q -d TEMPERATURE`). The memory has no throttle of its own: cut the load or raise the fans. The core throttles itself at its max operating temp |
 | `GPU N: T.Limit X C <= max operating Y C + M` | the driver's relative GPU thermal margin is within `gpu_temp_alarm_margin_c` of its max operating threshold. T.Limit counts downward as the GPU heats up; it is not an absolute core or memory temperature |
 | `GPU N: thermal slowdown active (sw\|hw)` | the driver (sw, at max operating temp) or the board (hw, at slowdown temp) is cutting clocks for heat: `nvidia-smi -q -d TEMPERATURE,PERFORMANCE`. Power-cap throttling is normal and never alarms. `gpus[].sw_thermal_s` / `hw_thermal_s` count the seconds since driver load |
+| `NVIDIA driver/library version mismatch: …` | observed directly by `nvidia-smi`; finish the driver update and reboot. The server may add installed/loaded version details, but the collector preserves the alarm even when those are unavailable |
 | `GPU N: K uncorrected ECC errors since driver load` / `GPU N: retired pages pending` | `nvidia-smi -q -d ECC,PAGE_RETIREMENT`; pending pages retire at the next driver reload (reboot). Repeats mean the card is failing |
 | `<sensor>: status <not ok>` | `sudo ipmitool sdr type fan` / `type temperature`: the BMC's own threshold crossed |
 | `backup: <timer> has never fired` / `backup: last trigger Nh ago` / `unit failed: <backup service>` | `journalctl --unit <service>`; root's mail has the tail |

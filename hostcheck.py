@@ -13,6 +13,7 @@ import ctypes
 import os
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,8 +36,7 @@ class Findings:
 
 # ---- reboot required ---------------------------------------------------------------
 
-# Owner's rule (2026-11-24): a pending reboot is a note at once and an alarm after
-# a week, when "later" has become "forgotten".
+# A pending reboot is a note at once and an alarm after a week.
 REBOOT_ALARM_AFTER_SEC: Final[float] = 7 * 86400
 
 _AT_FDCWD: Final[int] = -100
@@ -55,11 +55,11 @@ def birth_time(path: Path) -> float | None:
         buf: ctypes.Array[ctypes.c_char] = ctypes.create_string_buffer(256)
         if _libc.statx(_AT_FDCWD, os.fsencode(path), 0, _STATX_BTIME, buf) != 0:
             return None
-        mask: int = int.from_bytes(buf.raw[0:4], "little")
+        mask: int = int.from_bytes(buf.raw[0:4], sys.byteorder)
         if not mask & _STATX_BTIME:
             return None
         # struct statx: stx_btime (a statx_timestamp, tv_sec first) at offset 80.
-        seconds: int = int.from_bytes(buf.raw[80:88], "little", signed=True)
+        seconds: int = int.from_bytes(buf.raw[80:88], sys.byteorder, signed=True)
         return float(seconds) if seconds > 0 else None
     except (AttributeError, OSError, ValueError):
         return None
@@ -76,8 +76,10 @@ def reboot_required(run: Path = Path("/run"), now: float | None = None) -> Findi
     found: Findings = Findings(checked=["reboot"])
     try:
         st: os.stat_result = flag.stat()
-    except OSError:
+    except FileNotFoundError:
         return found
+    except OSError as e:
+        return Findings(notes=[f"cannot read reboot requirement: {e}"])
     now = time.time() if now is None else now
     since: float = birth_time(flag) or min([st.st_mtime] + _mtimes(pkgs_file))
     pkgs: list[str] = []

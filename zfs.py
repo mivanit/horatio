@@ -1,5 +1,5 @@
-"""ZFS pool health for the server's own alarm source, erring on the side of failing
-loudly (owner, 2026-11-24): when unsure whether something is a problem, alarm.
+"""ZFS pool health for the server's own alarm source. Missing observations keep
+previous alarms unresolved; unreadable expected pools raise an alarm.
 
 Alarms (keys under ``zfs/``):
   zfs/unreadable            pools are expected but ``zpool`` is missing, fails, hangs
@@ -149,32 +149,54 @@ def _int(value: Any) -> int:
         return 0
 
 
-def vdev_errors(pool: dict[str, Any]) -> int:
-    """read + write + checksum errors over every vdev of every group."""
+def _counter(value: Any) -> int | None:
+    """An available nonnegative integer; missing or malformed is not zero."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and value.isdecimal():
+        return int(value)
+    return None
+
+
+def vdev_errors(pool: dict[str, Any]) -> tuple[int, bool]:
+    """(Known error sum, all counters available) over every vdev group."""
     total: int = 0
+    complete: bool = isinstance(pool.get("vdevs"), dict) and bool(pool["vdevs"])
 
     def walk(vdevs: Any) -> None:
-        nonlocal total
+        nonlocal total, complete
+        if not isinstance(vdevs, dict):
+            complete = False
+            return
         vdev: Any
-        for vdev in vdevs.values() if isinstance(vdevs, dict) else []:
-            if isinstance(vdev, dict):
-                total += sum(
-                    _int(vdev.get(k))
-                    for k in ("read_errors", "write_errors", "checksum_errors")
-                )
-                walk(vdev.get("vdevs"))
+        for vdev in vdevs.values():
+            if not isinstance(vdev, dict):
+                complete = False
+                continue
+            key: str
+            for key in ("read_errors", "write_errors", "checksum_errors"):
+                value: int | None = _counter(vdev.get(key))
+                if value is None:
+                    complete = False
+                else:
+                    total += value
+            if "vdevs" in vdev:
+                walk(vdev["vdevs"])
 
     group: str
     for group in VDEV_GROUPS:
-        walk(pool.get(group))
-    return total
+        if group in pool:
+            walk(pool[group])
+    return total, complete
 
 
 def pool_findings(
     name: str, pool: dict[str, Any], now: float, scrub_max_days: float
 ) -> Findings:
     """The alarms and notes of one parsed pool."""
-    found: Findings = Findings(checked=[f"zfs/{name}"])
+    found: Findings = Findings(checked=[f"zfs/{name}/state"])
     state: str = str(pool.get("state", "UNKNOWN"))
     if state != "ONLINE":
         found.alarms.append(
@@ -184,21 +206,29 @@ def pool_findings(
                 "value": state,
             }
         )
-    errors: int = vdev_errors(pool)
-    data: int = _int(pool.get("error_count"))
+    errors, errors_complete = vdev_errors(pool)
+    data: int | None = _counter(pool.get("error_count"))
+    if errors_complete and data is not None:
+        found.checked.append(f"zfs/{name}/errors")
+    else:
+        found.notes.append(f"zfs {name}: error counters incomplete")
     if errors or data:
         found.alarms.append(
             {
                 "key": f"zfs/{name}/errors",
-                "text": f"zfs {name}: {errors} device errors, {data} data errors",
-                "value": errors + data,
+                "text": f"zfs {name}: {errors} device errors, {data if data is not None else 'unknown'} data errors",
+                "value": errors + (data or 0),
             }
         )
     scan: Any = pool.get("scan_stats")
-    if not isinstance(scan, dict):
+    if scan is None:
+        found.checked.append(f"zfs/{name}/never-scrubbed")
         found.alarms.append(
             {"key": f"zfs/{name}/never-scrubbed", "text": f"zfs {name}: never scrubbed"}
         )
+        return found
+    if not isinstance(scan, dict):
+        found.notes.append(f"zfs {name}: scan state unreadable; scrub age unknown")
         return found
     function: str = str(scan.get("function", ""))
     scan_state: str = str(scan.get("state", ""))
@@ -208,7 +238,13 @@ def pool_findings(
         paused: str = ", paused" if _int(scan.get("scrub_pause")) else ""
         found.notes.append(f"zfs {name}: {function.lower()} in progress{pct}{paused}")
     elif function == "SCRUB" and scan_state == "FINISHED":
-        ended: int = _int(scan.get("end_time"))
+        ended: int | None = _counter(scan.get("end_time"))
+        if ended is None or not 0 < ended <= now:
+            found.notes.append(f"zfs {name}: last scrub completion time unknown")
+            return found
+        found.checked.extend(
+            [f"zfs/{name}/never-scrubbed", f"zfs/{name}/scrub-overdue"]
+        )
         days: float = (now - ended) / 86400
         if days > scrub_max_days:
             found.alarms.append(
@@ -288,28 +324,38 @@ def zfs_findings(
         return unreadable(f"cannot run zpool: {e}")
     why: str = (stderr.strip() or stdout.strip() or f"exit {rc}").splitlines()[0]
     if rc != 0 and ("invalid option" in stderr or "unrecognized option" in stderr):
-        return _health_only(zpool, run, expected, found, why)
+        found, summary = _health_only(zpool, run, found, why)
+        if summary["status"] == "ok":
+            _remember_pools(found, summary["pools"], expected, seen, seen_file)
+        return found, summary
     if rc != 0:
         return unreadable(why)
     try:
         pools: Any = json.loads(stdout).get("pools")
         if not isinstance(pools, dict):
             raise ValueError("no pools object")
+        if any(
+            not name
+            or not isinstance(pool, dict)
+            or not isinstance(pool.get("state"), str)
+            or not pool["state"]
+            for name, pool in pools.items()
+        ):
+            raise ValueError("invalid pool entry")
     except (ValueError, AttributeError) as e:
         return unreadable(f"unparseable zpool output: {e}")
     summary: list[dict[str, Any]] = []
     name: str
     for name, pool in pools.items():
-        if not isinstance(pool, dict):
-            continue
         found = found.merge(pool_findings(name, pool, now, max_days))
         scan: Any = pool.get("scan_stats")
+        errors, errors_complete = vdev_errors(pool)
         summary.append(
             {
                 "name": name,
                 "state": pool.get("state"),
-                "errors": vdev_errors(pool),
-                "data_errors": _int(pool.get("error_count")),
+                "errors": errors if errors_complete else None,
+                "data_errors": _counter(pool.get("error_count")),
                 "scan": {
                     k: scan.get(k)
                     for k in ("function", "state", "start_time", "end_time")
@@ -318,13 +364,24 @@ def zfs_findings(
                 else None,
             }
         )
-    names: set[str] = {str(n) for n in pools}
+    _remember_pools(found, summary, expected, seen, seen_file)
+    return found, {"status": "ok", "pools": summary}
+
+
+def _remember_pools(
+    found: Findings,
+    pools: list[dict[str, Any]],
+    expected: set[str],
+    seen: set[str],
+    seen_file: Path | None,
+) -> None:
+    """Shared bookkeeping after either JSON or legacy output was read."""
+    names: set[str] = {pool["name"] for pool in pools}
     _missing(expected, names, found)
-    if not pools and not expected:
+    if not names and not expected:
         found.notes.append("zfs: installed, no pools imported")
     if names - seen:
         _write_seen(seen_file, seen | names)
-    return found, {"status": "ok", "pools": summary}
 
 
 def _missing(expected: set[str], present: set[str], found: Findings) -> None:
@@ -341,7 +398,7 @@ def _missing(expected: set[str], present: set[str], found: Findings) -> None:
 
 
 def _health_only(
-    zpool: str, run: Any, expected: set[str], found: Findings, why: str
+    zpool: str, run: Any, found: Findings, why: str
 ) -> tuple[Findings, dict[str, Any]]:
     """OpenZFS before 2.3 has no ``-j``: pool health from ``zpool list``, and an
     alarm that the errors and scrub age are not being watched."""
@@ -359,20 +416,25 @@ def _health_only(
     if rc != 0:
         found.alarms.append({"key": "zfs/unreadable", "text": f"zfs: {stderr.strip()}"})
         return found, {"status": "error", "error": stderr.strip(), "pools": []}
-    present: set[str] = set()
-    line: str
-    for line in stdout.splitlines():
-        parts: list[str] = [str(p) for p in line.split("\t")]
-        if len(parts) == 2:
-            name, health = parts
-            present.add(name)
-            found.checked.append(f"zfs/{name}/state")
-            if health != "ONLINE":
-                found.alarms.append(
-                    {
-                        "key": f"zfs/{name}/state",
-                        "text": f"zfs {name}: pool is {health}",
-                    }
-                )
-    _missing(expected, present, found)
-    return found, {"status": "ok", "pools": [{"name": n} for n in sorted(present)]}
+    rows: list[list[str]] = [
+        [str(part) for part in line.split("\t")] for line in stdout.splitlines()
+    ]
+    if any(len(row) != 2 or not all(row) for row in rows):
+        why = "unparseable zpool list output"
+        found.alarms.append({"key": "zfs/unreadable", "text": f"zfs: {why}"})
+        return found, {"status": "error", "error": why, "pools": []}
+    name: str
+    health: str
+    for name, health in rows:
+        found.checked.append(f"zfs/{name}/state")
+        if health != "ONLINE":
+            found.alarms.append(
+                {
+                    "key": f"zfs/{name}/state",
+                    "text": f"zfs {name}: pool is {health}",
+                }
+            )
+    return found, {
+        "status": "ok",
+        "pools": [{"name": name, "state": health} for name, health in rows],
+    }

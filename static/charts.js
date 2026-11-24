@@ -199,7 +199,7 @@ const CHART_X_AXIS = {
 // name keeps its head and tail instead. The tooltip has the full name.
 function barTickLabel(value) {
   const label = String(this.getLabelForValue(value));
-  // 7 characters fit the shortest card; 8 still lost the first one on bodel.
+  // 7 characters fit the shortest card; 8 can clip the first one on narrow cards.
   return label.length > 7 ? label.slice(0, 4) + '…' + label.slice(-2) : label;
 }
 const CHART_X_AXIS_BAR = {
@@ -481,7 +481,11 @@ function getDriveUsageColor(percent) {
 function tempDisplayLabel(label) {
   const alias = [dashboardConfig.sensor_labels?.[label], dashboardConfig.temp_labels?.[label]]
     .find(a => typeof a === 'string' && a);
-  return alias ?? label;
+  if (alias) return alias;
+  // Stable fan identities retain the device path in records, while the label
+  // shows only the chip, channel and final device component.
+  const fan = /^@(.+)\/([^/]+)\/(fan\d+)$/.exec(label);
+  return fan ? `${fan[2]} ${fan[3]} (${fan[1].split('/').at(-1)})` : label;
 }
 
 // config.json temp_thresholds: a sensor's own limit in °C, by its own name or

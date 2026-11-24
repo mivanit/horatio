@@ -125,9 +125,9 @@ if command -v nvidia-smi > /dev/null; then
     timeout "$GPU_TIMEOUT" nvidia-smi -q -d TEMPERATURE > "$tmp/gpu-temp.txt" 2> "$tmp/gpu-temp.err" || echo "exit $?" >> "$tmp/gpu-temp.err"
     # A driver updated under the running kernel module: NVML refuses (exit 18,
     # "Driver/library version mismatch" on stdout) until a reboot. The dashboard
-    # raises that one alarm itself (hostcheck.py), so it is not three vague
-    # `collector:` alarms here; the GPU rows are simply absent (and held).
-    if grep -qs 'Driver/library version mismatch' "$tmp/gpu.txt" "$tmp/gpu-temp.txt"; then
+    # can enrich this diagnosis, but the observed failure must remain an alarm
+    # even when its optional host check cannot find the installed library.
+    if grep -qs 'Driver/library version mismatch' "$tmp/gpu.txt" "$tmp/gpu-temp.txt" "$tmp/gpu.err" "$tmp/gpu-temp.err"; then
         for f in gpu gpu-temp; do : > "$tmp/$f.txt"; : > "$tmp/$f.err"; done
         : > "$tmp/gpu-mismatch"
     fi
@@ -136,7 +136,7 @@ else
 fi
 
 python3 - "$tmp" "$OUT" <<'PY'
-import glob, json, os, re, sys, time, traceback
+import glob, json, math, os, re, sys, time, traceback
 
 tmp, out = sys.argv[1], sys.argv[2]
 alarms = []
@@ -201,7 +201,7 @@ state = {"schema": 1, "ts": int(time.time()), "boot_id": boot_id(), "info": []}
 if os.path.exists(os.path.join(tmp, "no-bmc")):
     state["info"].append("no BMC (ipmitool or /dev/ipmi0 missing): no BMC sensors")
 if os.path.exists(os.path.join(tmp, "gpu-mismatch")):
-    state["info"].append("nvidia: driver/library version mismatch, no GPU readings (the dashboard raises the alarm)")
+    alarm("gpu/driver-mismatch", "NVIDIA driver/library version mismatch: GPU readings are offline; finish the driver update and reboot")
 
 # ---- IPMI sensors ------------------------------------------------------------
 def sensors(text, what):
@@ -225,6 +225,8 @@ def sensors(text, what):
         # Parsed here, once, so the dashboard never re-parses the string.
         try:
             value = float(reading.split()[0])
+            if not math.isfinite(value):
+                value = None
         except (ValueError, IndexError):
             value = None
         rows.append({"name": name, "status": status, "entity": entity, "reading": reading, "value": value})
@@ -245,8 +247,8 @@ def sensor_alarms(rows, what):
             # The key always carries the entity: the label gains it only while
             # two sensors share a name in this very capture.
             alarm(f"bmc/{what}/{r['name']}@{r['entity']}", f"{r['label']}: status {r['status']}")
-    if has_bmc and capture_ok(what):
-        check(f"bmc/{what}")
+        if has_bmc and capture_ok(what) and r["status"] in ("ok", "nc", "cr", "nr"):
+            check(f"bmc/{what}/{r['name']}@{r['entity']}")
 
 has_bmc = not os.path.exists(os.path.join(tmp, "no-bmc"))
 state["fans"] = sensors(read("fan.txt"), "fan")
@@ -265,7 +267,10 @@ for r in state["power"]:
     words = r["reading"].split()
     r["unit"] = UNITS.get(words[-1]) if r["value"] is not None and words else None
     r["total"] = r["unit"] == "W" and bool(BMC_TOTAL.search(r["name"]))
-    r["psu_input"] = r["unit"] == "W" and not r["total"] and bool(PSU_INPUT.search(r["name"]))
+    # Role survives a missing reading, so consumers can reject an incomplete sum.
+    r["psu_input"] = not r["total"] and bool(PSU_INPUT.search(r["name"])) and (
+        r["unit"] == "W" or (r["unit"] is None and bool(re.search(r"\bpower\b", r["name"], re.IGNORECASE)))
+    )
 sensor_alarms(state["fans"], "fan")
 sensor_alarms(state["temps"], "temp")
 sensor_alarms(state["power"], "power")
@@ -276,13 +281,15 @@ sensor_alarms(state["power"], "power")
 # It also fires while the fans are held at a manual speed above the ceiling, or
 # when the BMC spins them up because the box is hot. Absent/null = off.
 ceiling = config.get("fan_rpm_alarm_above")
-if ceiling is not None:
-    over = [r for r in state["fans"] if r["value"] is not None and r["value"] > ceiling]
-    if over:
-        alarm("fans/ceiling", f"fans: {len(over)} over {ceiling} RPM (boost back on, manual override, or box hot), "
-                              f"e.g. {over[0]['label']} {int(over[0]['value'])}")
-if has_bmc and capture_ok("fan"):
-    check("fans/ceiling")      # also when the ceiling is off: the rule no longer applies
+if ceiling is None:
+    check("fans/ceiling")       # explicitly disabled, including older aggregate keys
+else:
+    for r in state["fans"]:
+        key = f"fans/ceiling/{r['name']}@{r['entity']}"
+        if r["value"] is not None and r["value"] > ceiling:
+            alarm(key, f"fan {r['label']}: {int(r['value'])} RPM over {ceiling} RPM ceiling (boost back on, manual override, or box hot)")
+        if has_bmc and capture_ok("fan") and r["status"] in ("ok", "nc", "cr", "nr") and r["value"] is not None:
+            check(key)
 
 # ---- GPUs (nvidia-smi) ---------------------------------------------------------
 # The --query-gpu fields of the bash stage, in order.
@@ -292,8 +299,9 @@ GPU_FIELDS = ["index", "bus_id", "name", "core_c", "mem_c", "sw_thermal", "hw_th
 def num(s):
     # "83", "26.25" -> number; "[N/A]", "N/A", "[Not Supported]" -> None.
     try:
-        return float(s)
-    except ValueError:
+        value = float(s)
+        return value if math.isfinite(value) else None
+    except (TypeError, ValueError):
         return None
 
 def short_model(name):
@@ -343,7 +351,8 @@ for line in read("gpu.txt").splitlines():
         continue
     f = dict(zip(GPU_FIELDS, parts))
     n = int(num(f["index"]))
-    # "Active" / "Not Active"; N/A counts as not active. sw is the driver's own
+    # "Active" / "Not Active"; an unavailable flag cannot establish recovery.
+    # sw is the driver's own
     # capping at max operating temp, hw the board's emergency halving of the clocks.
     # sw_power_cap is deliberately not here: an idle, capped card sits in it.
     throttle = [r for r in ("sw_thermal", "hw_thermal") if f[r] == "Active"]
@@ -364,9 +373,13 @@ for line in read("gpu.txt").splitlines():
         # The memory has no throttle of its own: the core can sit under its limit
         # while the memory is already past its own.
         for what, temp, top in (("memory", row["mem_c"], lim["mem_max_op"]), ("core", row["core_c"], lim["max_op"])):
+            if temp is not None and top is not None and capture_ok("gpu") and capture_ok("gpu-temp"):
+                check(f"gpu/{n}/temp/{what}")
             if temp is not None and top is not None and temp >= top - margin:
                 alarm(f"gpu/{n}/temp/{what}", f"GPU {n}: {what} {deg(temp)} C >= max operating {deg(top)} C - {deg(margin)}")
         current, top = lim.get("current_tlimit"), lim.get("max_op_tlimit")
+        if current is not None and top is not None and capture_ok("gpu-temp"):
+            check(f"gpu/{n}/temp/tlimit")
         if current is not None and top is not None and current <= top + margin:
             alarm(f"gpu/{n}/temp/tlimit", f"GPU {n}: T.Limit {deg(current)} C <= max operating {deg(top)} C + {deg(margin)}")
     if throttle:
@@ -380,9 +393,15 @@ for line in read("gpu.txt").splitlines():
     # given set of cards. The temperature rules need the limits from the second
     # capture; with the margin off they no longer apply and may clear.
     if capture_ok("gpu"):
-        check(f"gpu/{n}/slowdown", f"gpu/{n}/ecc", f"gpu/{n}/retired_pages")
-        if margin is None or capture_ok("gpu-temp"):
-            check(f"gpu/{n}/temp")
+        check("gpu/driver-mismatch")
+        if all(f[k] in ("Active", "Not Active") for k in ("sw_thermal", "hw_thermal")):
+            check(f"gpu/{n}/slowdown")
+        if row["ecc_uncorrected"] is not None:
+            check(f"gpu/{n}/ecc")
+        if row["retired_pending"] is not None:
+            check(f"gpu/{n}/retired_pages")
+    if margin is None:
+        check(f"gpu/{n}/temp")
 
 # ---- RAPL: CPU and DRAM watts per socket --------------------------------------
 # Emitted in the same row shape as the IPMI power rows, so the dashboard's

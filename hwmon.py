@@ -14,11 +14,10 @@ Rows keep Glances' JSON shape (``type``, ``label``, ``value``, ``unit``, ``warni
 backend (which emits the same shape) and the history recorder all read one format.
 
 Temperature labels reproduce Glances' naming exactly (``f71889ed 0``, ``Core 0``,
-``Package id 0``, a duplicate label gets `` 1``, `` 2``...), because history records and
-``temp_labels`` / ``temp_thresholds`` are keyed by them. Fans and power had no Glances
-history to stay compatible with, so they get names that do not move: the kernel's own
-label when it has one, else ``<chip> fan<N>`` / ``<chip> power<N>`` with the sysfs
-number. Power from drivers whose meaning is known gets a readable name instead (e.g.
+``Package id 0``, a duplicate label gets `` 1``, `` 2``...), because older history
+records use them. Fans also carry an ``id`` from their physical device and channel:
+readable labels may move when a device disappears, but rules and alarms must not.
+Power from drivers whose meaning is known gets a readable name (e.g.
 ``fam15h_power`` is ``CPU (est.)``).
 
 Pass a fake tree as ``root`` / ``thermal_root`` in tests.
@@ -26,6 +25,7 @@ Pass a fake tree as ``root`` / ``thermal_root`` in tests.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from pathlib import Path
@@ -197,7 +197,7 @@ def _temperatures(root: Path, thermal_root: Path) -> list[dict[str, Any]]:
                 continue
             warning: float | None = reading["warning"]
             critical: float | None = reading["critical"]
-            # BIOS-set limits can be backwards (bodel's Fintek: max 85, crit 80).
+            # BIOS-set limits can be backwards (Fintek: max 85, crit 80).
             if warning is not None and critical is not None and warning > critical:
                 warning, critical = critical, warning
             rows.append(
@@ -273,6 +273,24 @@ def _device_key(hwmon: Path) -> tuple[str, str]:
     return (device, str(hwmon))
 
 
+def _fan_id(hwmon: Path, chip: str, channel: int) -> str | None:
+    """A physical device and channel, independent of the hwmon probe number.
+
+    Most drivers expose device/; others put the class symlink directly below
+    the physical device. Without either path, do not invent a stable identity.
+    """
+    try:
+        device: Path = (hwmon / "device").resolve(strict=True)
+    except OSError:
+        device = hwmon.resolve()
+    path: str = re.sub(r"/hwmon/hwmon\d+(?:/device)?$", "", str(device))
+    if re.search(r"/hwmon\d+(?:/device)?$", path):
+        return None
+    if "/devices/" not in path:
+        return None
+    return f"@{path.split('/devices/', 1)[1]}/{chip}/fan{channel}"
+
+
 # amdgpu on an APU reports the whole package (CPU + GPU) as slowPPT / fastPPT: the
 # same power twice over two windows, and not the GPU's.
 APU_PPT: Final[dict[str, str | None]] = {
@@ -314,6 +332,7 @@ def _fans_and_power(root: Path) -> list[dict[str, Any]]:
                     {
                         "type": FAN,
                         "label": fan_label,
+                        "id": _fan_id(hwmon, chip, n),
                         "value": rpm,
                         "unit": "R",
                         "warning": None,
@@ -368,97 +387,143 @@ FAN_DEFAULT: Final[dict[str, Any]] = {
 }
 
 
+def fan_status(
+    rows: list[dict[str, Any]],
+    config: Any,
+    spun: set[str] | frozenset[str] = frozenset(),
+    aliases: dict[str, str] | None = None,
+    known: set[str] | frozenset[str] = frozenset(),
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]:
+    """Evaluate each fan once: shown rows, alarm items, notes, checked keys.
+
+    Real hwmon fans use their physical ``id`` as the rule selector and alarm
+    identity. A display label can move when another device disappears, so old
+    label rules must be updated to an id (or an alias naming that id). Rows from
+    backends without an id retain their own label as their identity.
+
+    Rules resolve default, then alias, then selector, for both present and
+    missing fans. Missing observations without an explicit rule stay unchecked;
+    the alarm tracker retains any earlier finding.
+    """
+    rules: dict[str, Any] = config if isinstance(config, dict) else {}
+    names: dict[str, str] = aliases or {}
+    # An alias naming several sensors is not a selector for any one of them.
+    raw_of: dict[str, str] = {
+        shown: raw
+        for raw, shown in names.items()
+        if list(names.values()).count(shown) == 1
+    }
+    default: dict[str, Any] = {**FAN_DEFAULT, **_rule(rules.get("default"))}
+    alarms: list[dict[str, Any]] = []
+    notes: list[str] = [
+        f"fans config {name!r}: min_rpm {_rule(rule)['min_rpm']!r} is not a number"
+        for name, rule in rules.items()
+        if _rule(rule).get("min_rpm") is not None and _minimum(_rule(rule)) is None
+    ]
+    checked: list[str] = []
+    shown: list[dict[str, Any]] = list(rows)
+    present: dict[str, dict[str, Any]] = {}
+    legacy: set[str] = set()
+    row: dict[str, Any]
+    for row in rows:
+        if row.get("type") != FAN:
+            continue
+        identity: str | None = row.get("id", row["label"])
+        if "id" in row:
+            legacy.add(row["label"])
+        if identity is None:
+            notes.append(
+                f"fan {row['label']}: no stable device path; fan rules cannot be evaluated"
+            )
+        else:
+            present[identity] = row
+
+    # Canonicalize aliases before visiting missing rules: alias and raw selector
+    # are two spellings of one fan, not two independently evaluated rules.
+    selectors: dict[str, None] = dict.fromkeys(present)
+    configured: set[str] = {raw_of.get(n, n) for n in rules if n != "default"}
+    selectors.update(dict.fromkeys(sorted(configured | known)))
+    selector: str
+    for selector in selectors:
+        alias: str | None = names.get(selector)
+        rule: dict[str, Any] = {
+            **default,
+            **(_rule(rules.get(alias)) if raw_of.get(alias) == selector else {}),
+            **_rule(rules.get(selector)),
+        }
+        minimum: float | None = _minimum(rule)
+        evaluable: bool = rule.get("min_rpm") is None or minimum is not None
+        key: str = f"fan/{selector}"
+        row = present.get(selector, {})
+        if row:
+            if evaluable or rule.get("on_low") == "note":
+                checked.append(key)
+            value: float = row["value"]
+            display: str = alias or names.get(row["label"], row["label"])
+            if minimum is not None and value < minimum:
+                text: str = (
+                    f"fan {display}: {value:g} RPM, below its {minimum:g} RPM minimum"
+                )
+                if rule.get("on_low") == "note":
+                    notes.append(text)
+                else:
+                    alarms.append({"key": key, "text": text})
+            if (
+                minimum is None
+                and value == 0
+                and rule.get("hide_if_zero")
+                and selector not in spun
+            ):
+                shown.remove(row)
+            continue
+
+        if selector not in configured:
+            # A previously observed default-only fan remains unknown, unless
+            # configuration now deliberately disables its alarm.
+            if (evaluable and minimum is None) or rule.get("on_low") == "note":
+                checked.append(key)
+            continue
+
+        # Explicitly configured missing fans still have an evaluable rule. In
+        # particular, min_rpm:null and on_low:note deliberately disable alarms.
+        if evaluable or rule.get("on_low") == "note":
+            checked.append(key)
+        if selector in legacy:
+            gone: str = f"fans config {selector!r} uses a display name; choose a stable id from /api/4/sensors"
+        elif not selector.startswith("@") and any(
+            "id" in r for r in rows if r.get("type") == FAN
+        ):
+            gone = f"fans config names {selector!r}, which cannot identify a physical fan; use a stable id from /api/4/sensors"
+        else:
+            gone = (
+                f"fans config names {alias or selector!r}, which this box does not have"
+            )
+        if minimum is not None and rule.get("on_low") != "note":
+            alarms.append({"key": key, "text": f"{gone} (min_rpm {minimum:g})"})
+        else:
+            notes.append(gone)
+    return shown, alarms, notes, checked
+
+
 def fan_findings(
     rows: list[dict[str, Any]],
     config: Any,
     spun: set[str] | frozenset[str] = frozenset(),
     aliases: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    """Apply config.json ``fans`` to the fan rows: (rows to show, alarms, notes).
-
-    Each alarm is ``{"key": "fan/<label>", "text": ...}``: the text carries the
-    reading and changes with it, the key is the alarm's identity, which is what the
-    server's alarm history goes by.
-
-    ``config`` maps a fan's label to its rule, plus an optional ``default`` rule for
-    every fan not named::
-
-        {"f71889ed fan1": {"min_rpm": 300}, "default": {"hide_if_zero": true}}
-
-    A rule is found by the fan's own label or by its ``sensor_labels`` name
-    (``aliases``, raw label -> display name); the alarm text uses the display name,
-    the key always the raw label, so renaming a fan never restarts its alarm.
-
-    A fan below its ``min_rpm`` is an alarm (or a note, with ``"on_low": "note"``) and
-    always stays visible. With ``hide_if_zero`` a fan reading 0 that has no minimum is
-    dropped, unless it is in ``spun`` (seen turning since the server started): an
-    empty header is not a stopped fan, but a fan that has stopped is. A rule with a
-    minimum naming a fan that cannot be read is an alarm (a fan that is not read is
-    not a fan that is fine); other rules naming a missing fan, and a ``min_rpm`` that
-    is not a number, are notes, so a typo cannot silently disable an alarm."""
-    rules: dict[str, Any] = config if isinstance(config, dict) else {}
-    names: dict[str, str] = aliases or {}
-    raw_of: dict[str, str] = {shown_as: raw for raw, shown_as in names.items()}
-    default: dict[str, Any] = {**FAN_DEFAULT, **_rule(rules.get("default"))}
-    alarms: list[dict[str, Any]] = []
-    notes: list[str] = [
-        f"fans config {name!r}: min_rpm {_rule(rule)['min_rpm']!r} is not a number"
-        for name, rule in rules.items()
-        if "min_rpm" in _rule(rule) and _minimum(_rule(rule)) is None
-    ]
-    shown: list[dict[str, Any]] = []
-    present: set[str] = set()
-    row: dict[str, Any]
-    for row in rows:
-        if row.get("type") != FAN:
-            shown.append(row)
-            continue
-        alias: str | None = names.get(row["label"])
-        present.add(row["label"])
-        if alias:
-            present.add(alias)
-        rule: dict[str, Any] = {
-            **default,
-            **_rule(rules.get(alias)),
-            **_rule(rules.get(row["label"])),
-        }
-        minimum: float | None = _minimum(rule)
-        value: float = row["value"]
-        if minimum is not None:
-            if value < minimum:
-                line: str = f"fan {alias or row['label']}: {value:g} RPM, below its {minimum:g} RPM minimum"
-                if rule.get("on_low") == "note":
-                    notes.append(line)
-                else:
-                    alarms.append({"key": f"fan/{row['label']}", "text": line})
-            shown.append(row)
-        elif value == 0 and rule.get("hide_if_zero") and row["label"] not in spun:
-            continue
-        else:
-            shown.append(row)
-    name: str
-    for name in rules:
-        if name != "default" and name not in present:
-            gone_rule: dict[str, Any] = _rule(rules[name])
-            gone_min: float | None = _minimum(gone_rule)
-            gone: str = f"fans config names {name!r}, which this box does not have"
-            if gone_min is not None and gone_rule.get("on_low") != "note":
-                # Keyed by the raw label, as when it was read, so the alarm goes on.
-                alarms.append(
-                    {
-                        "key": f"fan/{raw_of.get(name, name)}",
-                        "text": f"{gone} (min_rpm {gone_min:g})",
-                    }
-                )
-            else:
-                notes.append(gone)
+    """The fan status without tracker coverage, for display-only callers."""
+    shown, alarms, notes, _ = fan_status(rows, config, spun, aliases)
     return shown, alarms, notes
 
 
 def _minimum(rule: dict[str, Any]) -> float | None:
     """A rule's ``min_rpm`` when it is a number (not a bool), else None."""
     value: Any = rule.get("min_rpm")
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    ):
         return float(value)
     return None
 

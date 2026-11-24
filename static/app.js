@@ -588,46 +588,15 @@ function renderHardware(data) {
   const content = document.getElementById('hardware-content');
   const collector = 'horatio-collect.timer';
 
-  const reset = resetHardwareHeader;
-  // The server's own findings (hwmon fan rules, setup hints): there whatever the
-  // collector's state, so a box without the collector still shows a stopped fan.
-  const serverAlarms = Array.isArray(data?.sensor_alarms) ? data.sensor_alarms : [];
-  const serverNotes = Array.isArray(data?.sensor_notes) ? data.sensor_notes : [];
-  if (data?.status === 'missing') {
-    // Expected before the housekeeping installer has run: not a failure.
-    content.innerHTML = serverAlarms.map(a => hwRow('text-error', a)).join('') +
-      serverNotes.map(n => hwRow('hw-note', n)).join('') +
-      `<div class="info-item mail-muted">No health snapshot yet (${escapeHtml(data.path || '')}); ` +
-      `is ${collector} installed?</div>`;
-    updateCardNoData('hardware', true);
-    updateCardWarning('hardware', 0, 0);
-    reset();
-    if (serverAlarms.length) {
-      updateCardCritical('hardware', true);
-      const valueEl = document.getElementById('hardware-value');
-      valueEl.textContent = `${serverAlarms.length} issue${serverAlarms.length === 1 ? '' : 's'}`;
-      valueEl.className = 'value text-error';
-    }
-    return;
-  }
-  if (data?.status === 'error') {
-    const detail = data.detail ? `: ${escapeHtml(data.detail)}` : '';
-    content.innerHTML = serverAlarms.map(a => hwRow('text-error', a)).join('') +
-      serverNotes.map(n => hwRow('hw-note', n)).join('') +
-      `<div class="info-item text-error">Cannot read the ${collector} snapshot${detail}</div>`;
-    updateCardNoData('hardware', false);
-    reset();
-    if (serverAlarms.length) {
-      updateCardCritical('hardware', true);
-      const valueEl = document.getElementById('hardware-value');
-      valueEl.textContent = `${serverAlarms.length} issue${serverAlarms.length === 1 ? '' : 's'}`;
-      valueEl.className = 'value text-error';
-    }
-    return;
-  }
-
-  const ageText = snapshotAgeText(data);
+  data ??= {};
+  const stateKnown = data.status === 'ok' || data.status === 'stale';
   const stale = data.status === 'stale';
+  const serverUnknown = data.sensor_status != null && data.sensor_status !== 'ok';
+  const ageText = stateKnown ? snapshotAgeText(data) : '';
+  // Each source contributes independently, even before the main collector is
+  // installed or while its snapshot is unreadable.
+  const serverAlarms = Array.isArray(data.sensor_alarms) ? data.sensor_alarms : [];
+  const serverNotes = Array.isArray(data.sensor_notes) ? data.sensor_notes : [];
   // The sensors alarms count only from a fresh snapshot (same 5 min rule as the
   // fans / temps / power cards). Stale, missing, errored or never fetched means
   // its alarm list is unknown, not clear: flagged like a stale state.json.
@@ -642,29 +611,40 @@ function renderHardware(data) {
   });
   // The server's own alarms (hwmon fan rules) come with the same kind of entry.
   const serverItems = Array.isArray(data?.sensor_alarm_items) ? data.sensor_alarm_items : [];
-  const rows = [...withItems(data), ...(sensorsUnknown ? [] : withItems(sen)),
-                ...serverAlarms.map((text, i) => ({ text, item: serverItems[i]?.text === text ? serverItems[i] : null }))];
+  const serverRows = serverAlarms.map((text, i) => ({ text, item: serverItems[i]?.text === text ? serverItems[i] : null }));
+  // The collector can diagnose a driver mismatch independently. Prefer the
+  // host's richer diagnosis when both sources identify this exact fault.
+  const hostMismatch = serverRows.some(r => r.item?.key === 'gpu/driver-mismatch');
+  const keepDiagnosis = row => !hostMismatch || row.item?.key !== 'gpu/driver-mismatch';
+  const snapshots = [...(stateKnown ? [data] : []), ...(sensorsUnknown ? [] : [sen])];
+  const rows = [...snapshots.flatMap(withItems).filter(keepDiagnosis), ...serverRows];
   const alarms = rows.map(r => r.text);
-  // Alarms a collector could not look at again (a failing drive that is asleep, a
-  // BMC that timed out): not in `alarms`, and not known to be gone. From the server.
-  const unchecked = [data, ...(sensorsUnknown ? [] : [sen])]
-    .flatMap(snap => Array.isArray(snap?.alarm_held) ? snap.alarm_held : [])
-    .concat(Array.isArray(data?.sensor_alarm_held) ? data.sensor_alarm_held : [])
-    .filter(h => typeof h?.text === 'string' && h.unchecked_since != null);
-  const info = [...(Array.isArray(data?.info) ? data.info : []), ...serverNotes];
+  // Retained faults that could not be checked are never treated as clear.
+  const unchecked = snapshots.flatMap(snap => Array.isArray(snap.alarm_held) ? snap.alarm_held : [])
+    .concat(Array.isArray(data.sensor_alarm_held) ? data.sensor_alarm_held : [])
+    .filter(h => typeof h?.text === 'string' && h.unchecked_since != null &&
+      (!hostMismatch || h.key !== 'gpu/driver-mismatch'));
+  const info = [...snapshots.flatMap(snap => Array.isArray(snap.info) ? snap.info : []), ...serverNotes];
 
   // Header: the verdict, and the snapshot's OWN age (not when it was fetched).
   const valueEl = document.getElementById('hardware-value');
-  valueEl.textContent = stale ? 'stale' : alarms.length ? `${alarms.length} issue${alarms.length === 1 ? '' : 's'}` :
-    sensorsUnknown ? 'sensors stale' : unchecked.length ? `${unchecked.length} unchecked` : 'all clear';
-  valueEl.className = 'value ' + (stale ? 'text-warning' : alarms.length ? 'text-error' :
-    sensorsUnknown || unchecked.length ? 'text-warning' : 'text-success');
+  valueEl.textContent = alarms.length ? `${alarms.length} issue${alarms.length === 1 ? '' : 's'}` :
+    unchecked.length ? `${unchecked.length} unchecked` : !stateKnown ? 'snapshot unavailable' :
+    stale ? 'stale' : serverUnknown ? `checks ${data.sensor_status}` : sensorsUnknown ? 'sensors stale' : 'all clear';
+  valueEl.className = 'value ' + (alarms.length ? 'text-error' :
+    !stateKnown || stale || serverUnknown || sensorsUnknown || unchecked.length ? 'text-warning' : 'text-success');
   document.querySelector('#hardware-card .cache-time').textContent = ageText;
 
   // Issues: alarms in red, then the collector's info notes in grey. A stale
   // snapshot means the alarm list is unknown, not clear: never say "no alarms".
   // Drive-specific notes ("sdb: no self-test on record") are on Drive Health.
   const issues = [];
+  if (!stateKnown) {
+    const text = data.status === 'missing'
+      ? `No health snapshot yet (${data.path || ''}); is ${collector} installed?`
+      : `Cannot read the ${collector} snapshot${data.detail ? ': ' + data.detail : ''}`;
+    issues.push(hwRow('text-warning', text));
+  }
   if (stale) issues.push(hwRow('text-warning', `${ageText} (stale); is ${collector} running?`));
   if (sensorsUnknown) {
     const why = sen ? `sensors snapshot ${sen.status}${sen.age_sec != null ? ` (${Math.round(sen.age_sec / 60)} min old)` : ''}` : 'no fresh sensors snapshot';
@@ -683,7 +663,7 @@ function renderHardware(data) {
     const from = sinceText(h.since), last = sinceText(h.unchecked_since);
     issues.push(hwRow('text-warning', `${h.text}: not re-checked${last ? ` since ${last}` : ''}${from ? `, alarm since ${from}` : ''}`));
   });
-  if (!stale && !sensorsUnknown && alarms.length === 0 && unchecked.length === 0) issues.push(hwRow('text-success', 'no alarms'));
+  if (stateKnown && !stale && !serverUnknown && !sensorsUnknown && alarms.length === 0 && unchecked.length === 0) issues.push(hwRow('text-success', 'no alarms'));
   info.filter(i => !/^(sd[a-z]+|nvme\d+n\d+):/.test(i)).forEach(i => issues.push(hwRow('hw-note', i)));
 
   const memory = [];
@@ -720,7 +700,7 @@ function renderHardware(data) {
   updateCardNoData('hardware', true);
   // Any alarm is red; a stale snapshot (alarms unknown, not clear) is orange.
   updateCardCritical('hardware', alarms.length > 0);
-  updateCardWarning('hardware', stale || sensorsUnknown || unchecked.length ? 1 : 0, 0);
+  updateCardWarning('hardware', !stateKnown || stale || serverUnknown || sensorsUnknown || unchecked.length ? 1 : 0, 0);
 }
 
 // One line of the event log (README: "What is kept in logs/") as text, or null for a kind
@@ -2289,19 +2269,16 @@ async function fetchDataOnce() {
       });
       (sen.temps ?? []).forEach(t => t.value != null && temps.push({ label: t.label, value: t.value, warning: thresholds.temp_celsius, critical: 90 }));
       (sen.fans ?? []).forEach(f => f.value != null && fans.push({ label: f.label, value: f.value }));
-      // Watts rows only (the same capture carries PSU amps). The collector writes
-      // `unit` and `total`; one from before this release only `reading` and `entity`
-      // ('rapl' = a CPU/DRAM part), so both are read for one release.
-      const psuInputs = [];
-      (sen.power ?? []).forEach(p => {
+      // New servers normalize power once for both history and live charts.
+      // Older snapshots remain readable, but an uncertain PSU sum is never a
+      // whole-machine total or a component alongside CPU/GPU draw.
+      const powerRows = Array.isArray(sen.power_rows) ? sen.power_rows : (sen.power ?? []).filter(p => {
         const watts = p.unit !== undefined ? p.unit === 'W' : String(p.reading).endsWith('Watts');
-        if (p.value == null || !watts) return;
-        if (p.psu_input === true) { psuInputs.push(p.value); return; }  // the whole box, summed below
-        power.push({ label: p.label, value: p.value, fromCollector: true,
-                     total: p.total !== undefined ? p.total === true : p.entity !== 'rapl' });
+        return watts && !p.psu_input && !/^(ps|psu|pws)[ _]?\d+.*\binput\b/i.test(p.label || p.name || '');
+      }).map(p => ({ ...p, total: p.total !== undefined ? p.total === true : p.entity !== 'rapl' }));
+      powerRows.forEach(p => {
+        if (Number.isFinite(p.value)) power.push({ label: p.label, value: p.value, total: p.total === true, fromCollector: true });
       });
-      if (psuInputs.length && !power.some(p => p.total && p.fromCollector))
-        power.push({ label: 'PSU input', value: psuInputs.reduce((a, b) => a + b, 0), fromCollector: true, total: true });
     }
     // Drive temperatures from the 15-min SMART snapshot, keyed by device. SAS
     // drives report a trip point; the others get spinning-rust defaults (50 / 60).
@@ -2384,7 +2361,7 @@ async function fetchDataOnce() {
       // dataset holds its own unit's values and null elsewhere, so every bar has
       // exactly one, measured against its own axis.
       const pct = f => f.unit === '%';
-      charts.fans.data.labels = fans.map(f => tempDisplayLabel(f.label));
+      charts.fans.data.labels = fans.map(f => tempDisplayLabel(f.id || f.label));
       charts.fans.data.datasets[0].data = fans.map(f => pct(f) ? null : f.value || 0);
       charts.fans.data.datasets[1].data = fans.map(f => pct(f) ? f.value : null);
       charts.fans.options.scales.y1.display = fans.some(pct);
@@ -3443,12 +3420,28 @@ function extractHistoryValue(record, metric, rangeType = 'avg') {
 
 // Create a history chart
 // unitType: 'percent' | 'gb' for hasUnitToggle metrics, the selected field's key for fieldSelect ones
-// The whole-machine reading of a history record's power: the recorder names it in
-// `power_total`; records from before that only had the BMC's, always this name.
-const LEGACY_POWER_TOTAL_KEY = 'Pwr Consumption';
+// Prefer explicit metadata. Old records remain readable without a migration:
+// recognize only known whole-machine labels, leaving unfamiliar readings as parts.
+const LEGACY_POWER_TOTAL_KEYS = /^(?:(?:Pwr|Power)[ _]?Consumption|Sys(?:tem)?[ _]?Power|Total[ _]?Power|Power[ _]?Meter|System \(ACPI\))(?: \([\d.]+\))?$/i;
+function powerTotalKeys(record) {
+  const keys = Array.isArray(record?.power_totals) ? record.power_totals :
+    Object.keys(record?.power ?? {}).filter(k => LEGACY_POWER_TOTAL_KEYS.test(k))
+      .sort((a, b) => Number(a === 'System (ACPI)') - Number(b === 'System (ACPI)'));
+  return [...new Set([record?.power_total, ...keys].filter(k => typeof k === 'string'))];
+}
 function powerTotalKey(record) {
-  if (typeof record?.power_total === 'string') return record.power_total;
-  return record?.power?.[LEGACY_POWER_TOTAL_KEY] != null ? LEGACY_POWER_TOTAL_KEY : null;
+  return powerTotalKeys(record).find(k => Number.isFinite(record?.power?.[k])) ?? null;
+}
+function powerStack(record) {
+  if (!record?.power) return null;
+  const totals = new Set(powerTotalKeys(record));
+  const parts = Object.fromEntries(Object.entries(record.power).filter(([k]) => !totals.has(k)));
+  const total = powerTotalKey(record);
+  if (total) {
+    const measured = Object.values(parts).reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0);
+    parts.other = (parts.other ?? 0) + Math.max(0, record.power[total] - measured);
+  }
+  return parts;
 }
 // History charts with more records than this draw no per-point markers (see createHistoryChart).
 const HISTORY_MARKER_MAX = 500;   // about 3.5 days of 10-minute records
@@ -3686,7 +3679,8 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
       // exceeds it, so no separate total line.
       // Extract each record once (temps sorts ~40 core readings per call) and
       // index the result per dataset, instead of sensors x records extractions.
-      let values = records.map(r => extractHistoryValue(r, metric));
+      const stack = metric === 'power' && mode === 'stack';
+      let values = records.map(r => stack ? powerStack(r) : extractHistoryValue(r, metric));
       // GPU fans are percent, not RPM: never in the RPM band, always on the y1 axis.
       const pctSensors = new Set(metric === 'fans'
         ? records.flatMap(r => r?.gpu_fans && typeof r.gpu_fans === 'object' ? Object.keys(r.gpu_fans) : []) : []);
@@ -3706,17 +3700,10 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
           Object.keys(v).forEach(k => sensorNames.add(k));
         }
       });
-      const stack = metric === 'power' && mode === 'stack';
-      // Per record, since the whole-machine reading can change name (a BMC added).
-      const totalKeys = stack ? records.map(powerTotalKey) : [];
-      // Every whole-machine reading a record names (power_totals), not only the one
-      // it stacks against: an ACPI meter next to the BMC is not a part.
-      const everTotal = new Set(totalKeys.filter(Boolean)
-        .concat(records.flatMap(r => Array.isArray(r?.power_totals) ? r.power_totals : [])));
       let sensors = Array.from(sensorNames);
       if (stack) {
-        const rank = l => l.startsWith('GPU') ? 0 : l.startsWith('CPU') ? 1 : l.startsWith('DRAM') ? 2 : 3;
-        sensors = sensors.filter(s => !everTotal.has(s)).sort((a, b) => rank(a) - rank(b)).concat('other');
+        const rank = l => l.startsWith('GPU') ? 0 : l.startsWith('CPU') ? 1 : l.startsWith('DRAM') ? 2 : l === 'other' ? 4 : 3;
+        sensors.sort((a, b) => rank(a) - rank(b));
       }
       // Band traces first, max right after min: its fill targets the previous dataset.
       const BAND_ORDER = band ? ['min', 'max', 'median', 'mean'].map(s => `${band} ${s}`) : [];
@@ -3727,15 +3714,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
         [`${band} mean`]: { borderDash: [2, 3], borderWidth: 1, pointRadius: 0 },
       } : {};
       datasets = sensors.map((sensor, i) => {
-        const data = values.map((v, at) => {
-          if (sensor === 'other') {
-            const key = totalKeys[at];
-            if (!v || !key || v[key] == null) return null;
-            const parts = Object.entries(v).filter(([k]) => !everTotal.has(k)).reduce((s, [, x]) => s + (x ?? 0), 0);
-            return Math.max(0, v[key] - parts);
-          }
-          return v?.[sensor] ?? null;
-        });
+        const data = values.map(v => v?.[sensor] ?? null);
         const color = band && sensor.startsWith(band + ' ') ? colors[0] : colors[i % colors.length];
         return {
           label: ['temps', 'fans', 'power'].includes(metric) ? tempDisplayLabel(sensor) : sensor,
@@ -4060,8 +4039,11 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
           title: (ctx) => new Date(ctx[0].parsed.x).toLocaleString(),
           label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(ctx.dataset.unitSuffix ? 0 : selectedField?.decimals ?? 1)}${ctx.dataset.unitSuffix ?? displayUnit}`,
           // Stacked power: the rows are the parts, so add their sum.
-          footer: (items) => metric === 'power' && mode === 'stack' && items.length > 1
-            ? `total ${items.reduce((s, it) => s + it.parsed.y, 0).toFixed(0)}${displayUnit}` : ''
+          footer: (items) => {
+            if (metric !== 'power' || mode !== 'stack' || !items.length) return '';
+            const prefix = powerTotalKey(records[items[0].dataIndex]) ? 'total' : '≥';
+            return `${prefix} ${items.reduce((s, it) => s + it.parsed.y, 0).toFixed(0)}${displayUnit}`;
+          }
         }
       }
     },

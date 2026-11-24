@@ -171,7 +171,7 @@ else
 fi
 
 python3 - "$tmp" "$OUT" <<'PY'
-import glob, hashlib, json, os, re, sys, time, traceback
+import glob, hashlib, json, math, os, re, sys, time, traceback
 
 tmp, out = sys.argv[1], sys.argv[2]
 
@@ -201,7 +201,7 @@ checked = []
 # Keys of alarms that exist but are not printed (journal messages past the limit).
 alarm_hidden = []
 
-def alarm(key, text, value=None):
+def alarm(key, text, value=None, requires=None):
     """Raise one alarm. `text` is what readers print and is all `alarms` holds.
     `key` is its stable identity: no counts, ages or device letters that move
     (drives go by serial). `value` only for a fault counter that never falls on
@@ -218,6 +218,8 @@ def alarm(key, text, value=None):
         item["key"] = k
         if value is not None:
             item["value"] = value
+        if requires is not None:
+            item["requires"] = requires
     except Exception:
         traceback.print_exc()
     alarm_items.append(item)
@@ -239,6 +241,18 @@ def sysread(*parts):
         with open(os.path.join(*parts)) as f:
             return f.read().strip()
     except OSError:
+        return None
+
+def number(value):
+    """A measured scalar, never an absent field, boolean or nonfinite value."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+def counter(value):
+    """A nonnegative sysfs counter, or None when it could not be read."""
+    try:
+        n = int(value)
+        return n if n >= 0 else None
+    except (TypeError, ValueError):
         return None
 
 def capture_ok(name):
@@ -414,30 +428,38 @@ def edac():
         dimms.append({
             "path": "/".join(d.split("/")[-2:]),
             "label": label,          # generic sb_edac name, NOT Dell A1..B12
-            "ce_count": int(sysread(d, "dimm_ce_count") or 0),
-            "ue_count": int(sysread(d, "dimm_ue_count") or 0),
+            "ce_count": counter(sysread(d, "dimm_ce_count")),
+            "ue_count": counter(sysread(d, "dimm_ue_count")),
         })
     if not dimms:
         state["edac"] = None
         info.append("no ECC reporting (no DIMMs under EDAC): memory errors are not monitored")
         return
     uptime = int(float(open(os.environ.get("HEALTH_UPTIME", "/proc/uptime")).read().split()[0]))
-    ce_total = sum(d["ce_count"] for d in dimms)
-    ue_total = sum(d["ue_count"] for d in dimms)
+    def total(field):
+        values = [d[field] for d in dimms]
+        return sum(values) if all(v is not None for v in values) else None
+    ce_total, ue_total = total("ce_count"), total("ue_count")
     state["edac"] = {
         "uptime_seconds": uptime,
         "dimms": dimms,
         "ce_total": ce_total,
         "ue_total": ue_total,
     }
-    check("ecc/uncorrectable")
-    if ue_total > 0:
-        # The correctable count is not judged while this one shows, so it is not `checked`.
-        alarm("ecc/uncorrectable", f"ECC: {ue_total} uncorrectable errors since boot", ue_total)
-    else:
-        check("ecc/correctable")
+    for d in dimms:
+        key = f"ecc/dimm/{d['path']}/uncorrectable"
+        if d["ue_count"] is not None:
+            check(key)
+            if d["ue_count"] > 0:
+                alarm(key, f"ECC {d['label']}: {d['ue_count']} uncorrectable errors since boot", d["ue_count"])
+    # Corrected errors retain their aggregate threshold. Unknown counters cannot
+    # establish recovery, and an uncorrectable fault takes precedence.
+    if ue_total == 0 and ce_total is not None:
+        requires = [f"ecc/dimm/{d['path']}/correctable" for d in dimms]
+        check(*requires)
         if ce_total >= CE_WARN:
-            alarm("ecc/correctable", f"ECC: {ce_total} correctable errors since boot", ce_total)
+            alarm("ecc/correctable", f"ECC: {ce_total} correctable errors since boot", ce_total, requires=requires)
+
 part(edac)
 
 # ---- drives ------------------------------------------------------------------
@@ -488,7 +510,7 @@ def smart():
         # Each rule is `checked` only when what it reads was really in the report:
         # a drive that answered with its health but not its attribute table has
         # not been cleared of anything the table would show.
-        if entry["passed"] is not None:
+        if isinstance(entry["passed"], bool):
             check(f"{did}/health")
         if entry["passed"] is False:
             alarm(f"{did}/health", f"{name}: SMART health FAILED")
@@ -499,10 +521,12 @@ def smart():
         if nvme:
             entry["media_errors"] = nvme.get("media_errors")
             entry["percentage_used"] = nvme.get("percentage_used")
-            check(f"{did}/media_errors", f"{did}/percentage_used")
-            if (nvme.get("media_errors") or 0) > 0:
+            for field in ("media_errors", "percentage_used"):
+                if number(nvme.get(field)):
+                    check(f"{did}/{field}")
+            if number(nvme.get("media_errors")) and nvme["media_errors"] > 0:
                 alarm(f"{did}/media_errors", f"{name}: media_errors={nvme['media_errors']}", nvme["media_errors"])
-            if (nvme.get("percentage_used") or 0) >= 100:
+            if number(nvme.get("percentage_used")) and nvme["percentage_used"] >= 100:
                 alarm(f"{did}/percentage_used", f"{name}: percentage_used={nvme['percentage_used']} (endurance spent)")
         if rc & 128:    # bit 7: the self-test log has errors. ATA drops entries outdated by
                         # a later successful extended test; SCSI alarms while any failed
@@ -524,12 +548,12 @@ def smart():
 
         # Drives that report a trip point (SAS drives, typically 68 C) get a 5 C margin.
         trip = (s.get("temperature") or {}).get("drive_trip")
-        if trip is not None:
+        if number(trip):
             entry["drive_trip_c"] = trip
-            if entry["temperature_c"] is not None and entry["temperature_c"] >= trip - 5:
-                alarm(f"{did}/temperature", f"{name}: {entry['temperature_c']}C, trip point {trip}C")
-        if trip is None or entry["temperature_c"] is not None:    # no trip point: no rule
-            check(f"{did}/temperature")
+            if number(entry["temperature_c"]):
+                check(f"{did}/temperature")
+                if entry["temperature_c"] >= trip - 5:
+                    alarm(f"{did}/temperature", f"{name}: {entry['temperature_c']}C, trip point {trip}C")
 
         # SAS: the grown defect list is the signal that matters. A SAS drive can
         # fail with every error counter at zero to the end; only this number and
@@ -539,8 +563,9 @@ def smart():
             entry["grown_defect_list"] = grown
             base = grown_defect_baseline.get(serial, 0)
             entry["grown_defect_baseline"] = base
-            check(f"{did}/grown_defects")
-            if grown > base:
+            if number(grown):
+                check(f"{did}/grown_defects")
+            if number(grown) and grown > base:
                 alarm(f"{did}/grown_defects", f"{name} ({serial}): grown defects {grown} > baseline {base}", grown)
 
         # SATA: the attributes that actually indicate media failure.
@@ -554,10 +579,11 @@ def smart():
             accepted = smart_baseline.get(serial) if isinstance(smart_baseline, dict) else None
             accepted = accepted if isinstance(accepted, dict) else {}
             for k, v in got.items():
-                check(f"{did}/{k}")
+                if number(v):
+                    check(f"{did}/{k}")
                 base = accepted.get(k)
                 base = base if isinstance(base, int) and not isinstance(base, bool) and base > 0 else 0
-                if k in ATA_ALARM and (v or 0) > base:
+                if k in ATA_ALARM and number(v) and v > base:
                     alarm(f"{did}/{k}", f"{name}: {k}={v}" + (f" (baseline {base})" if base else ""), v)
             if accepted:
                 entry["attrs_baseline"] = {k: accepted[k] for k in got if k in accepted}
@@ -614,26 +640,34 @@ def md_arrays():
         for dev in sorted(glob.glob(os.path.join(md, "dev-*"))):
             member = os.path.basename(dev)[4:]                     # dev-<name>
             # sysfs prints e.g. "in_sync,writemostly"; keep it as a list.
-            flags = [f for f in (sysread(dev, "state") or "").split(",") if f]
-            merrs = int(sysread(dev, "errors") or 0)
+            raw_flags = sysread(dev, "state")
+            flags = [f for f in (raw_flags or "").split(",") if f]
+            merrs = counter(sysread(dev, "errors"))
+            if flags:
+                check(f"md/{name}/member/{member}/state")
+            if merrs is not None:
+                check(f"md/{name}/member/{member}/errors")
             members.append({"name": member, "state": flags, "errors": merrs})
             for f in flags:
                 if f in MD_BAD_STATES:
                     alarm(f"md/{name}/member/{member}/state/{f}", f"{name}: {member} state {f}")
             if merrs:
                 alarm(f"md/{name}/member/{member}/errors", f"{name}: {member} errors={merrs}", merrs)
-        degraded = int(sysread(md, "degraded") or 0)
+        degraded = counter(sysread(md, "degraded"))
         sync_action = sysread(md, "sync_action")
         array_state = sysread(md, "array_state")
         # Blocks that differed between mirrors at the last `check`; persists until
         # the next check. On RAID1 a small count can be benign (in-flight writes).
         # It climbs while a check/resync/repair RUNS, so only judge it once idle.
-        mismatch = int(sysread(md, "mismatch_cnt") or 0)
+        mismatch = counter(sysread(md, "mismatch_cnt"))
         mds.append({"name": name, "level": sysread(md, "level"), "degraded": degraded,
                     "sync_action": sync_action, "array_state": array_state,
                     "mismatch_cnt": mismatch, "members": members})
-        check(f"md/{name}/member", f"md/{name}/degraded", f"md/{name}/array_state")
-        if sync_action == "idle":      # not judged while a check or resync runs
+        if degraded is not None:
+            check(f"md/{name}/degraded")
+        if array_state:
+            check(f"md/{name}/array_state")
+        if sync_action == "idle" and mismatch is not None:      # not judged while a check or resync runs
             check(f"md/{name}/mismatch")
             if mismatch:
                 alarm(f"md/{name}/mismatch", f"{name}: mismatch_cnt={mismatch}", mismatch)

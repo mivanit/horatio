@@ -2183,7 +2183,7 @@ async def collect_history_sample(
     for sensor in temps_data:
         value_hw: float | None = _round(sensor.get("value"), 1)
         if sensor.get("type") == hwmon.FAN and value_hw is not None:
-            hw_fans[sensor["label"]] = value_hw
+            hw_fans[sensor.get("id") or sensor["label"]] = value_hw
         elif sensor.get("type") == hwmon.POWER and value_hw is not None:
             power[sensor["label"]] = value_hw
             if sensor.get("total"):
@@ -4767,7 +4767,7 @@ async def storage_health() -> Response:
     result: dict[str, Any] = with_alarm_history(
         "state", await asyncio.to_thread(_get_storage_health), _alarm_memory
     )
-    hw: dict[str, Any] = await asyncio.to_thread(server_findings)
+    hw: dict[str, Any] = await asyncio.to_thread(server_findings, False)
     result["sensor_alarms"] = hw["alarms"]
     # The same alarms with since when (the server's alarm history).
     result["sensor_alarm_items"] = [
@@ -4781,8 +4781,9 @@ async def storage_health() -> Response:
         for row in held_rows("dashboard", None, _alarm_memory)
     ]
     result["sensor_notes"] = hw["notes"]
+    result["sensor_status"] = hw.get("status", "ok")
     # ZFS pools as the server read them: {status ok|error|absent, error?, pools}.
-    result["zfs"] = (await asyncio.to_thread(get_zfs))[1]
+    result["zfs"] = _cached_host_checks()[1]
     return Response(content=json.dumps(result), media_type="application/json")
 
 
@@ -4794,6 +4795,7 @@ async def sensors_snapshot() -> Response:
         await asyncio.to_thread(_get_storage_health, SENSORS_PATH, SENSORS_STALE_SEC),
         _alarm_memory,
     )
+    result["power_rows"] = collector_power_rows(result)
     return Response(content=json.dumps(result), media_type="application/json")
 
 
@@ -4833,7 +4835,10 @@ _SENSOR_HIDE: list[re.Pattern[str]] = []  # set at startup, below TEMP_LABELS
 
 
 def _sensor_hidden(label: str) -> bool:
-    names: tuple[str, ...] = (label, TEMP_LABELS.get(label, label))
+    names: list[str] = [label, TEMP_LABELS.get(label, label)]
+    if label.startswith("@") and label.count("/") >= 2:
+        _, chip, channel = label.rsplit("/", 2)
+        names.append(f"{chip} {channel}")
     return any(p.match(n) for p in _SENSOR_HIDE for n in names)
 
 
@@ -4846,15 +4851,48 @@ def get_hw_sensors() -> dict[str, Any]:
         now: float = time.monotonic()
         if now - _hwmon_cache["at"] < HWMON_CACHE_SEC and _hwmon_cache["data"]:
             return _hwmon_cache["data"]
-        raw: list[dict[str, Any]] = [
-            r for r in hwmon.read_sensors() if not _sensor_hidden(r["label"])
-        ]
+        raw: list[dict[str, Any]] = []
+        hidden: set[str] = set()
+        for r in hwmon.read_sensors():
+            identity: str = r.get("id") or r["label"]
+            if _sensor_hidden(identity) or _sensor_hidden(r["label"]):
+                hidden.update((identity, r["label"]))
+            else:
+                raw.append(r)
+
+        def excluded(name: str) -> bool:
+            return (
+                name in hidden
+                or _sensor_hidden(name)
+                or any(TEMP_LABELS.get(n) == name for n in hidden)
+            )
+
         _fans_spun.update(
-            r["label"] for r in raw if r.get("type") == hwmon.FAN and r["value"] > 0
+            r.get("id") or r["label"]
+            for r in raw
+            if r.get("type") == hwmon.FAN and r["value"] > 0
         )
         fan_rules: Any = _CONFIG.get("fans")
-        rows, items, notes = hwmon.fan_findings(raw, fan_rules, _fans_spun, TEMP_LABELS)
-        raw_of: dict[str, str] = {shown: raw for raw, shown in TEMP_LABELS.items()}
+        fan_rules = {
+            n: rule
+            for n, rule in (fan_rules.items() if isinstance(fan_rules, dict) else [])
+            if n == "default" or not excluded(n)
+        }
+        known: set[str] = {
+            key.removeprefix("fan/")
+            for key in _alarm_memory.get("dashboard", {}).get("alarms", {})
+            if key.startswith("fan/")
+        }
+        rows, items, notes, checked = hwmon.fan_status(
+            raw,
+            fan_rules,
+            _fans_spun,
+            TEMP_LABELS,
+            known={n for n in known if not excluded(n)},
+        )
+        # Deliberate configuration exclusions can resolve remembered alarms;
+        # temporarily unreadable sensors cannot.
+        checked.extend(f"fan/{n}" for n in known if excluded(n))
         notes = [*notes, *hwmon.setup_notes(raw)]
         data: dict[str, Any] = {
             "rows": rows,
@@ -4863,13 +4901,7 @@ def get_hw_sensors() -> dict[str, Any]:
             # fans were really read: a fan that has stopped answering is not a fan
             # that is fine again.
             "alarm_items": items,
-            # Plus every fan a rule names, read or not: a ruled fan that stops
-            # answering raises its own alarm under the same key (hwmon.fan_findings).
-            "checked": [f"fan/{r['label']}" for r in raw if r.get("type") == hwmon.FAN]
-            + [
-                f"fan/{raw_of.get(n, n)}"
-                for n in (fan_rules if isinstance(fan_rules, dict) else {})
-            ],
+            "checked": checked,
             "notes": notes,
         }
         _hwmon_cache.update(at=now, data=data)
@@ -4924,16 +4956,41 @@ def get_zfs() -> tuple[hostcheck.Findings, dict[str, Any]]:
         return data
 
 
-def server_findings() -> dict[str, Any]:
+def _cached_host_checks() -> tuple[hostcheck.Findings, dict[str, Any], str]:
+    """Read the tracker's latest checks without making HTTP requests wait on tools."""
+    now: float = time.monotonic()
+    host: hostcheck.Findings = _host_cache["data"] or hostcheck.Findings(
+        notes=["host checks pending"]
+    )
+    pools, summary = _zfs_cache["data"] or (
+        hostcheck.Findings(notes=["ZFS check pending"]),
+        {"status": "pending", "pools": []},
+    )
+    found: hostcheck.Findings = host.merge(pools)
+    status: str = "ok" if _host_cache["data"] and _zfs_cache["data"] else "pending"
+    if _host_cache["data"] and now - _host_cache["at"] > 3 * HOST_CHECK_CACHE_SEC:
+        found.notes.append("host checks stale: waiting for the alarm tracker")
+        status = "stale"
+    if _zfs_cache["data"] and now - _zfs_cache["at"] > 3 * ZFS_CACHE_SEC:
+        found.notes.append("ZFS check stale: waiting for the alarm tracker")
+        summary = {**summary, "status": "stale"}
+        status = "stale"
+    return found, summary, status
+
+
+def server_findings(refresh: bool = True) -> dict[str, Any]:
     """Everything the server decides itself, as one alarm source ("dashboard"):
     the hwmon fan rules and setup hints (get_hw_sensors) plus the host checks
     (hostcheck: a pending reboot, an NVIDIA driver/library mismatch; zfs: pool
     health and scrubs). The same
     shape as get_hw_sensors without ``rows`` (sync)."""
     hw: dict[str, Any] = get_hw_sensors()
-    host: hostcheck.Findings = _host_findings().merge(get_zfs()[0])
+    host: hostcheck.Findings = (
+        _host_findings().merge(get_zfs()[0]) if refresh else _cached_host_checks()[0]
+    )
     items: list[dict[str, Any]] = [*hw["alarm_items"], *host.alarms]
     return {
+        "status": "ok" if refresh else _cached_host_checks()[2],
         "alarms": [item["text"] for item in items],
         "alarm_items": items,
         "checked": [*hw["checked"], *host.checked],
@@ -4951,7 +5008,18 @@ def collector_power_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     psu: list[dict[str, Any]] = []
     r: Any
     for r in snapshot.get("power") or []:
-        if not isinstance(r, dict) or r.get("value") is None:
+        if not isinstance(r, dict):
+            continue
+        # A missing reading must retain its role, including older snapshots that
+        # only marked PSU inputs when their units could be read.
+        if r.get("psu_input") or re.search(
+            r"^(?:ps|psu|pws)[ _]?\d+.*\binput[ _]+power\b",
+            str(r.get("label", r.get("name", ""))),
+            re.IGNORECASE,
+        ):
+            psu.append(r)
+            continue
+        if not _number(r.get("value")):
             continue
         watts: bool = (
             r["unit"] == "W"
@@ -4961,12 +5029,13 @@ def collector_power_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
         if not watts:
             continue
         total: bool = bool(r["total"]) if "total" in r else r.get("entity") != "rapl"
-        if r.get("psu_input"):
-            psu.append(r)
-            continue
         rows.append({"label": r.get("label", ""), "value": r["value"], "total": total})
     # Per-PSU wall inputs: their sum is the whole box, used only without a total.
-    if psu and not any(row["total"] for row in rows):
+    if (
+        psu
+        and all(_number(r.get("value")) and r.get("unit") == "W" for r in psu)
+        and not any(row["total"] for row in rows)
+    ):
         rows.append(
             {"label": "PSU input", "value": sum(r["value"] for r in psu), "total": True}
         )
@@ -5109,6 +5178,18 @@ def track_alarms(
         if _number(item.get("value")) or isinstance(item.get("value"), str):
             entry["value"] = item["value"]
         old: dict[str, Any] | None = before.pop(entry["key"], None)
+        requires: Any = item.get("requires")
+        if (
+            isinstance(requires, list)
+            and requires
+            and all(isinstance(k, str) and k for k in requires)
+        ):
+            # An aggregate that remains faulty cannot forget a missing member.
+            entry["requires"] = sorted(
+                set(requires) | set((old or {}).get("requires", []))
+            )
+        elif old and "requires" in old:
+            entry["requires"] = old["requires"]
         if old is None:
             entry["since"] = now
             if known is None:
@@ -5129,9 +5210,13 @@ def track_alarms(
         if key in hidden:
             after[key] = old
             continue
-        gone: dict[str, Any] = {k: old[k] for k in (*_ALARM_FIELDS, "boot") if k in old}
+        gone: dict[str, Any] = {
+            k: old[k] for k in (*_ALARM_FIELDS, "boot", "requires") if k in old
+        }
         absent: int = int(old.get("absent", 0))
-        if _covered(key, checked):
+        if _covered(key, checked) or (
+            old.get("requires") and all(_covered(k, checked) for k in old["requires"])
+        ):
             absent += 1
             if absent < clear_after:
                 after[key] = {**gone, "absent": absent}
@@ -5234,6 +5319,12 @@ def _load_alarm_memory(path: Path = ALARM_MEMORY_FILE) -> dict[str, Any]:
             and ("absent" not in entry or isinstance(entry["absent"], int))
             and ("unchecked_since" not in entry or _epoch(entry["unchecked_since"]))
             and ("unchecked" not in entry or isinstance(entry["unchecked"], int))
+            and (
+                "requires" not in entry
+                or isinstance(entry["requires"], list)
+                and bool(entry["requires"])
+                and all(isinstance(k, str) and k for k in entry["requires"])
+            )
         )
 
     out: dict[str, Any] = {}
@@ -5531,6 +5622,15 @@ def alarms_snapshot(
         held += held_rows("sensors", sensors, memory)
     active += alarm_rows("dashboard", dashboard, memory)
     held += held_rows("dashboard", None, memory)
+    # This one diagnosis can be observed directly by the collector and enriched
+    # by the host check. Prefer the latter only while it actually exists.
+    if any(item.get("key") == "gpu/driver-mismatch" for item in dashboard):
+        active = [
+            row
+            for row in active
+            if row["key"] != "gpu/driver-mismatch" or row["source"] == "dashboard"
+        ]
+        held = [row for row in held if row["key"] != "gpu/driver-mismatch"]
     target: dict[str, Any]
     for target in [] if services["stale"] else services["targets"]:
         if target["ok"] is False:
@@ -5576,7 +5676,7 @@ async def alarms() -> Response:
     state, sensors, hw, events = await asyncio.gather(
         asyncio.to_thread(_get_storage_health),
         asyncio.to_thread(_get_storage_health, SENSORS_PATH, SENSORS_STALE_SEC),
-        asyncio.to_thread(server_findings),
+        asyncio.to_thread(server_findings, False),
         asyncio.to_thread(_read_events),
     )
     now: float = time.time()
@@ -5592,6 +5692,7 @@ async def alarms() -> Response:
     # The server's own notes (setup hints, a reboot pending under a week, a scrub
     # running): not alarms, but what a login script or an agent should see too.
     body["notes"] = hw["notes"]
+    body["sources"]["dashboard"]["status"] = hw.get("status", "ok")
     return Response(content=json.dumps(body), media_type="application/json")
 
 
