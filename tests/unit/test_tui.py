@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
@@ -32,7 +33,9 @@ def test_narrow_terminal_requests_its_actual_width(
     import tui
 
     seen: list[str] = []
-    monkeypatch.setattr(tui.shutil, "get_terminal_size", lambda *args: (59, 24))
+    monkeypatch.setattr(
+        tui.shutil, "get_terminal_size", lambda *args: os.terminal_size((59, 24))
+    )
     monkeypatch.setattr(tui, "fetch", lambda url: seen.append(url) or "")
     monkeypatch.setattr(sys, "argv", ["tui.py", "localhost:8080", "--once"])
     assert tui.main() == 0
