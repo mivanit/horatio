@@ -5,8 +5,31 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 
 ## [Unreleased]
 
-Planned release: **0.3.0**.
+### Upgrade requirements
 
+- **Python service and collectors:** after updating the source, run
+  `./install.sh` before restarting the service. It now launches
+  `python/server.py`; there is no root-level compatibility launcher. The installer
+  also reinstalls existing collectors so journal/SEL alarms include the evidence
+  needed for review. See [Python updates](docs/operations.md#updates).
+- **Older OpenWrt installations:** manually update the source, preserving
+  `www/`, `config.json`, and `logs/`, then run `sh lua/install-openwrt.sh`.
+  The old `openwrt/install.sh` and `lua/install.sh` entrypoints are removed;
+  older updaters may not recognize the new path. Follow the
+  [migration instructions](lua/README.md#openwrt).
+- **Linux fan rules:** update existing display-name selectors to stable fan
+  `id` values from `/api/4/sensors`, or aliases of those ids. Defaults still
+  apply to all fans. See [fan configuration](docs/configuration.md#fan-rules).
+- **API clients:** `GET /api/sensor-alarms` is removed. Update scripts to read
+  `GET /api/alarms`, which includes those alarms and the server's `notes`.
+  See the [API reference](docs/api.md#hardware-and-alarms).
+
+### Changes
+
+- The live TUI keeps `/help` and the header borders visible in narrow terminals.
+  It requests the actual width down to 10 columns and reserves space for the
+  help link before shortening long titles or omitting the hostname. Metric
+  layouts still need at least 60 columns.
 - Unchecked alarms retain stored evidence and reviews across collection failures
   and restarts. Identical or aging evidence stays reviewed when checks resume;
   new evidence reopens the review. Establishing a missing evidence baseline no
@@ -95,11 +118,6 @@ Planned release: **0.3.0**.
 - History recording uses a separate persistent Glances connection pool from
   interactive requests. Startup, scheduled, and manual records share that pool;
   clients close after background tasks finish, including on startup failure.
-- **Upgrade requirement:** run `./install.sh` after pulling this release and
-  before restarting the Python service. The service now launches
-  `python/server.py`; there is no root-level compatibility launcher. Reinstall
-  existing collectors too (the installer does this automatically) so journal/SEL
-  alarms include the evidence needed for review.
 - Held alarms can be manually retired with the dashboard password. Retirement
   is recorded in the event history, survives restarts and does not suppress a
   newly observed fault. Active alarms cannot be retired.
@@ -122,10 +140,7 @@ Planned release: **0.3.0**.
   timeouts allow for slower hosts without changing production timeouts.
 
 - The Lua installers are named `lua/install-linux.sh` and `lua/install-openwrt.sh`.
-  The former `lua/install.sh` and `openwrt/install.sh` entrypoints are removed;
-  older installations need a manual source update followed by the new installer
-  (see [migration instructions](lua/README.md#openwrt)). On Linux/systemd, native
-  dependencies are built in the checkout, the service runs as
+  On Linux/systemd, native dependencies are built in the checkout, the service runs as
   the installing user, and a systemd timer records history while the dashboard is closed.
 
 - Source layout: Python modules live in `python/`, and the lightweight Lua backend
@@ -140,9 +155,6 @@ Planned release: **0.3.0**.
   SMART, RAID and memory readings retain earlier alarms; per-device fan and ECC
   alarms survive partial device inventories. NVIDIA driver mismatches remain
   alarms even when the installed library version cannot be inferred.
-- Linux fan rules now use physical device/channel ids from `/api/4/sensors`, or
-  aliases of those ids. Existing display-name rules need a configuration update;
-  they cannot silently move to another fan. Defaults still apply to all fans.
 - Hardware findings and history remain visible without the main health snapshot.
   Host/ZFS checks refresh in the tracker, with pending/stale status in the API.
   Starting or canceling a scrub does not clear an overdue scrub alarm, and older
@@ -156,8 +168,6 @@ Planned release: **0.3.0**.
   scrubbed, last scrub older than `zfs_scrub_max_days` (38), an expected pool missing, or state
   unreadable while pools are expected). New config keys `zfs_pools`,
   `zfs_scrub_max_days`, `sensor_hide`.
-- `GET /api/alarms` gains `notes`; **`GET /api/sensor-alarms` is removed** (its alarms
-  were already in `/api/alarms`). Update login scripts that read it.
 - GPU fans (percent of maximum) on the Fans card against a second axis, and in history
   as `gpu_fans`; `/api/gpu-info` gains `fan_percent`.
 - Fans: a fan that stops after turning stays on the card at 0 RPM; a ruled fan that
