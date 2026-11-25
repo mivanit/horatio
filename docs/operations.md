@@ -83,6 +83,10 @@ is installed, or pass `--no-optional`. Pass `--grant-capabilities` on updates on
 (re)apply the process permissions; a package upgrade of nethogs or sysstat drops them. `config.json`, `/etc/horatio/config.json`, `.password`
 and `logs/` are never touched.
 
+After pulling a source update, run the installer before restarting the service.
+The Python entrypoint is `python/server.py`; there is deliberately no root-level
+`server.py` compatibility launcher. The installer updates the service command.
+
 ### Versions and updates
 
 Releases are `vX.Y.Z` git tags, with notes in [`CHANGELOG.md`](../CHANGELOG.md). `VERSION`
@@ -214,6 +218,8 @@ An alarm that is absent only because it could not be looked at (a failing drive 
 asleep, a BMC that timed out, a fan that stopped answering) is kept, not cleared; the
 Hardware card shows it as "not re-checked". The 60 s snapshot's alarms and the fan rules
 must be checked and absent under the current rules three times in a row to clear.
+The 15-minute snapshot's alarms clear after one checked observation without the
+alarm; they do not use the three-observation rule.
 An unchecked snapshot or another observation of the fault resets the count.
 Raising is immediate on the
 first bad reading, with no debounce, so a real fault is not delayed. A value fluctuating
@@ -273,6 +279,10 @@ original reading, first-observed time and observed duration. Notes stay visible;
 the symbol key and technical identifiers are expandable. The small Hardware
 card shows three recent events with relative ages; tooltips and history details
 retain exact timestamps. Diagnostic commands are under **Hardware details**.
+
+Expanded details survive a refresh, but keyboard focus inside event details or
+the symbol key does not. Focus on an alarm lane follows that lane when rows
+reorder. Losing focus inside the expanded details is an accepted limitation.
 
 The history card is a fetched snapshot, not a live view: its concerns show an
 **As of** time and update when you refresh the card. The small Hardware card

@@ -493,24 +493,16 @@ function tempDisplayLabel(label, originalLabel = sensorOriginalLabel(label)) {
   return fan ? `${fan[2]} ${fan[3]} (${fan[1].split('/').at(-1)})` : label;
 }
 
-// Qualify only colliding display names. History values remain keyed by identity.
-// Keep aliases and disambiguation for compatibility; further simplification
-// needs an explicit rule for existing aliases and equal names (configuration.md).
-function sensorDisplayLabels(keys, originals = []) {
-  const labels = keys.map((key, i) => tempDisplayLabel(key, originals[i]));
-  const counts = new Map();
-  labels.forEach(label => counts.set(label, (counts.get(label) ?? 0) + 1));
-  const paths = keys.map(key =>
-    (/ \[([^\]]+)\]$/.exec(key)?.[1] ?? key.replace(/^@/, '')).split('/'));
-  return labels.map((label, i) => {
-    if (counts.get(label) === 1 || keys[i] === label) return label;
-    // Keep only enough trailing path components to distinguish this label.
-    let depth = 1;
-    while (depth < paths[i].length && paths.some((path, j) => j !== i && labels[j] === label &&
-      path.slice(-depth).join('/') === paths[i].slice(-depth).join('/'))) depth++;
-    const identity = paths[i].slice(-depth).join('/');
-    return `${label} [${identity}]`;
+// Keep old label-keyed series raw when an identity-based counterpart is known.
+// Equal display names are allowed: values and chart visibility use sensor keys.
+function historySensorLabels(keys) {
+  const replacedLabels = new Set(fanDisplayNames.values());
+  keys.forEach(key => {
+    const original = sensorOriginalLabel(key);
+    if (original !== key) replacedLabels.add(original);
   });
+  return keys.map(key => replacedLabels.has(key) || (key.startsWith('@') && !fanDisplayNames.has(key))
+    ? key : tempDisplayLabel(key));
 }
 
 // config.json temp_thresholds: a sensor's own limit in °C, by its own name or

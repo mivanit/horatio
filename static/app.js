@@ -2749,7 +2749,7 @@ async function fetchDataOnce() {
       // dataset holds its own unit's values and null elsewhere, so every bar has
       // exactly one, measured against its own axis.
       const pct = f => f.unit === '%';
-      charts.fans.data.labels = sensorDisplayLabels(fans.map(f => f.id || f.label), fans.map(f => f.label));
+      charts.fans.data.labels = fans.map(f => tempDisplayLabel(f.id || f.label, f.label));
       charts.fans.data.datasets[0].data = fans.map(f => pct(f) ? null : f.value || 0);
       charts.fans.data.datasets[1].data = fans.map(f => pct(f) ? f.value : null);
       charts.fans.options.scales.y1.display = fans.some(pct);
@@ -4102,7 +4102,7 @@ function createHistoryChart(canvasId, metric, records, unitType = 'percent', hou
         [`${band} max`]: { borderDash: [4, 4], borderWidth: 1, pointRadius: 0, fill: '-1' },
         [`${band} mean`]: { borderDash: [2, 3], borderWidth: 1, pointRadius: 0 },
       } : {};
-      const displayLabels = ['temps', 'fans', 'power'].includes(metric) ? sensorDisplayLabels(sensors) : sensors;
+      const displayLabels = ['temps', 'fans', 'power'].includes(metric) ? historySensorLabels(sensors) : sensors;
       datasets = sensors.map((sensor, i) => {
         const data = values.map(v => v?.[sensor] ?? null);
         const color = band && sensor.startsWith(band + ' ') ? colors[0] : colors[i % colors.length];

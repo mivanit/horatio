@@ -75,9 +75,11 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
   with stable incident times across refreshes.
 - Sensor labels can differ between old and new records after this upgrade, and
   identity changes can split a sensor's history into separate lines. Historical
-  keys are preserved rather than merged. Duplicate chart labels use shorter
-  distinguishing paths. Hidden sensor lines stay hidden across label changes
-  while present in the chart; leaving the range resets their visibility, and an
+  keys are preserved rather than merged. Legacy name-based series show their raw
+  name when an identity-based counterpart is known; unidentified old fan ids
+  show their raw key. Charts no longer add distinguishing path suffixes to equal
+  names. Duplicate names remain separate series. Hidden sensor lines stay hidden
+  across label changes while present in the chart; leaving the range resets their visibility, and an
   empty range resets all trace selections.
 - Unchecked alarm observations reset the clearing count, so clearing requires
   consecutive checked observations without the alarm.

@@ -120,11 +120,15 @@ identity to the sensor name where available; display aliases still use the name.
 Other history records keep the sensor's own name. `temp_labels` is the older
 setting and is still read; `sensor_labels` wins where both name a sensor.
 
-Aliases also apply to historical series. Equal display names receive short
-distinguishing path suffixes; the underlying history keys remain separate.
-This compatibility behavior is retained so existing aliases keep working and
-distinct sensors remain distinguishable. Further label simplification is deferred
-until its handling of aliases and duplicate names is specified.
+When a name-based history series has a known identity-based counterpart, the old
+series shows its raw name and the identified series can use its alias. Old fan
+ids without a known label also show their raw key. Other series keep normal
+alias lookup; records do not carry enough information to identify every old
+name as a legacy key.
+
+Charts do not add path suffixes to distinguish equal display names. Two series
+may have the same name, but their readings and visibility remain separate,
+keyed by sensor identity. No history records are renamed or merged.
 
 A chart remembers hidden lines only while their series remain in its selected
 range. A series that leaves the range returns visible; an empty range resets all
@@ -174,9 +178,8 @@ silently reassigned. Without a stable physical path, the reading stays visible
 with a setup note. Current low readings still evaluate default and matching
 label/alias rules, but their alarms cannot be tracked across observations.
 
-Charts prefer configured aliases, then the sensor's original label. Physical
-identity is shown only when needed to distinguish equal display names or when
-an old fan record has no known label. This never combines separate history keys.
+Current fan charts prefer configured aliases, then the sensor's original label.
+History uses the simple label rules above. This never combines separate history keys.
 An upgrade can therefore leave old and new records with different names or
 separate lines; see [history identities across upgrades](operations.md#history-identities-across-upgrades).
 
