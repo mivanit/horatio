@@ -650,7 +650,7 @@ function renderHardware(data) {
   // Issues: alarms in red, then the collector's info notes in grey. A stale
   // snapshot means the alarm list is unknown, not clear: never say "no alarms".
   // Drive-specific notes ("sdb: no self-test on record") are on Drive Health.
-  const issues = [];
+  const issues = [], diagnostics = [];
   const review = getFreshCache('alarms', 300000)?.review;
   if (stateUnknown) {
     const text = data.status === 'missing'
@@ -676,7 +676,7 @@ function renderHardware(data) {
     }
     // Several lines of one kind in a row (journal messages) share one hint, after the last.
     const hint = hwHint(text, data);
-    if (hint && hint !== (i + 1 < rows.length ? hwHint(rows[i + 1].text, data) : null)) issues.push(hwRow('hw-note', `check: ${hint}`));
+    if (hint && hint !== (i + 1 < rows.length ? hwHint(rows[i + 1].text, data) : null)) diagnostics.push(hwRow('hw-note', `check: ${hint}`));
   });
   const retirement = getFreshCache('alarms', 300000)?.retirement;
   unchecked.forEach((h, index) => {
@@ -689,7 +689,7 @@ function renderHardware(data) {
     }
   });
   if (stateKnown && !stale && !serverUnknown && !sensorsUnknown && !sensorsAbsent && alarms.length === 0 && unchecked.length === 0) {
-    issues.push(reviewed.length ? hwRow('hw-note', 'No unreviewed issues; reviewed evidence remains below.') : hwRow('text-success', 'no alarms'));
+    issues.push(reviewed.length ? hwRow('hw-note', 'No unreviewed issues') : hwRow('text-success', 'no alarms'));
   }
   info.filter(i => !/^(sd[a-z]+|nvme\d+n\d+):/.test(i)).forEach(i => issues.push(hwRow('hw-note', i)));
 
@@ -718,10 +718,9 @@ function renderHardware(data) {
     (row.reviewed?.note ? hwRow('hw-note', row.reviewed.note) : '')).join('')}</details>` : '';
 
   const detailsOpen = content.querySelector?.('[data-hardware-details]')?.open;
-  const details = hwSection('Memory', memory) + hwSection('Backup', backup);
+  const details = hwSection('Checks', diagnostics) + hwSection('Memory', memory) + hwSection('Backup', backup);
   content.innerHTML = hwSection('Issues', issues) + hardwareAlarmHistoryHTML() + reviewedHTML +
-    (details ? `<details data-hardware-details ${detailsOpen ? 'open' : ''}><summary>Hardware details</summary>${details}
-      <div class="hw-note">alarm rules and the full table: collector/README.md</div></details>` : '');
+    (details ? `<details data-hardware-details ${detailsOpen ? 'open' : ''}><summary>Hardware details</summary>${details}</details>` : '');
   content.onclick = event => {
     const reviewButton = event.target.closest('[data-review-alarm]');
     if (reviewButton && !reviewButton.disabled) {
@@ -770,8 +769,8 @@ function openAlarmRetirement(alarm, action = 'retire') {
     <div class="history-settings-header">${title}</div>
     <div class="hw-note" id="ar-alarm"></div>
     <div class="hw-note">${review
-      ? 'This evidence leaves the attention list. New evidence brings it back. Review does not establish recovery.'
-      : 'Close an old concern after repairing, replacing or removing hardware. Its history stays, and future faults can raise new alarms.'}</div>
+      ? 'Move this evidence to reviewed. New evidence will bring it back.'
+      : 'Remove this unchecked alarm from current concerns. Its history stays.'}</div>
     <label class="history-settings-row">Note (optional)
       <textarea id="ar-note" maxlength="2000" rows="3" placeholder="What did you check or change?"></textarea>
     </label>
@@ -1084,7 +1083,7 @@ function alarmHistoryGroups(data, current) {
     const group = add(event);
     if (group) { group.events.push(event); group.text = event.text; }
   }
-  for (const [field, status] of [['active', 'Currently reported'], ['held', 'Not re-checked'], ['reviewed', 'Reviewed evidence']]) {
+  for (const [field, status] of [['active', 'Active'], ['held', 'Not re-checked'], ['reviewed', 'Reviewed']]) {
     for (const row of Array.isArray(current?.[field]) ? current[field] : []) {
       if (row.source === 'services') continue; // Services have their own history.
       const group = add(row);
@@ -1111,12 +1110,12 @@ function alarmHistoryHTML(entry, width) {
   const validRange = Number.isFinite(from) && Number.isFinite(to) && to > from;
   const position = epoch => Math.max(0, Math.min(100, (epoch - from) / (to - from) * 100));
   const notice = [];
-  if (entry.alarmHistoryError) notice.push('History refresh failed; showing the last fetched events.');
-  if (entry.alarmCurrentStale) notice.push('Current concerns could not be refreshed. Actions are disabled until refresh succeeds.');
-  if (data.truncated) notice.push('Only part of the event log was read. Events in this range may be missing.');
+  if (entry.alarmHistoryError) notice.push('History refresh failed. Showing saved events.');
+  if (entry.alarmCurrentStale) notice.push('Current concerns are stale. Refresh to make changes.');
+  if (data.truncated) notice.push('History is incomplete for this range.');
   if (data.skipped) notice.push(`${data.skipped} unreadable event record${data.skipped === 1 ? '' : 's'} skipped.`);
   const unknown = Object.entries(current?.sources || {}).filter(([source, value]) => source !== 'services' && value?.status !== 'ok');
-  if (unknown.length) notice.push(`Current checks unavailable or stale: ${unknown.map(([source]) => source).join(', ')}. Missing readings do not establish recovery.`);
+  if (unknown.length) notice.push(`Checks unavailable or stale: ${unknown.map(([source]) => source).join(', ')}.`);
   const currentRows = groups.map((group, i) => group.current && group.current.kind !== 'reviewed' ?
     `<button class="alarm-current-row alarm-current-${group.current.kind}" data-alarm-lane="${i}" aria-pressed="${group.id === entry.alarmSelection}"><span>${escapeHtml(group.current.status)}</span> ${escapeHtml(group.text)}${group.current.since < from ? ' <small>First observed before this range</small>' : ''}</button>` : '').join('');
   const reviewed = groups.map((group, i) => group.current?.kind === 'reviewed' ?
@@ -1131,12 +1130,12 @@ function alarmHistoryHTML(entry, width) {
         title="${escapeHtml(`${alarmEventLabel(event)} · ${alarmTime(epoch)}`)}">${ALARM_EVENT_LABELS[event.event][0]}</span>`;
     }).join('');
     return `<button class="alarm-lane${group.id === entry.alarmSelection ? ' selected' : ''}" data-alarm-lane="${i}" aria-pressed="${group.id === entry.alarmSelection}">
-      <span class="alarm-lane-name" title="${escapeHtml(group.text)}">${escapeHtml(group.text)} <small>${escapeHtml(group.source)}</small></span>
+      <span class="alarm-lane-name" title="${escapeHtml(group.text)}">${escapeHtml(group.text)}</span>
       <span class="alarm-track" style="margin-left:${HISTORY_AXIS_WIDTH}px;margin-right:${HISTORY_PLOT_INSET}px">${markers}</span></button>`;
   }).join('');
   const ticks = validRange ? historyTicks(from * 1000, to * 1000, Math.max(1, width)).map(tick =>
     `<span style="left:${position(tick.value / 1000).toFixed(4)}%">${escapeHtml(tick.label)}</span>`).join('') : '';
-  let details = '<p class="hw-note">Select an alarm to see its recorded events and current state.</p>';
+  let details = '<p class="hw-note">Select an alarm for details.</p>';
   if (selected) {
     const row = selected.current;
     const capability = row?.kind === 'held' ? current?.retirement : current?.review;
@@ -1147,28 +1146,31 @@ function alarmHistoryHTML(entry, width) {
     const events = [...selected.events].reverse().map(event => {
       const observed = Number.isFinite(event.since) ? `<span>First observed: ${escapeHtml(alarmTime(event.since))}${event.since < from ? ' (before this range)' : ''}</span>` : '';
       const interval = Number.isFinite(event.active_for_s) && event.active_for_s >= 0 ? `<span>Observed interval: ${alarmInterval(event.active_for_s)}</span>` : '';
-      return `<li><strong>${escapeHtml(alarmEventLabel(event))}</strong> <time>${escapeHtml(alarmTime(Date.parse(event.timestamp) / 1000))}</time>
-        <div>${escapeHtml(event.text)}</div>${observed}${interval}${event.note ? `<p class="alarm-note"><strong>Operator note:</strong> ${escapeHtml(event.note)}</p>` : ''}</li>`;
+      const id = escapeHtml(JSON.stringify([selected.id, event.timestamp, event.event, event.since]));
+      return `<li><details class="alarm-event" data-alarm-event="${id}">
+        <summary><strong>${escapeHtml(alarmEventLabel(event))}</strong> <time>${escapeHtml(alarmTime(Date.parse(event.timestamp) / 1000))}</time></summary>
+        <div class="alarm-event-meta"><div>${escapeHtml(event.text)}</div>${observed}${interval}</div></details>
+        ${event.note ? `<p class="alarm-note">${escapeHtml(event.note)}</p>` : ''}</li>`;
     }).join('');
     details = `<h3>${escapeHtml(selected.text)}</h3>
-      <div class="alarm-detail-status">${row ? escapeHtml(row.status) : 'History only; current state unconfirmed.'} ${button}</div>
-      ${row?.reviewed?.note ? `<p class="alarm-note">Review note: ${escapeHtml(row.reviewed.note)}</p>` : ''}
-      <details data-alarm-identity><summary>Source and identity</summary><code>${escapeHtml(selected.source)} · ${escapeHtml(selected.key)}</code></details>
-      ${events ? `<ol class="alarm-events">${events}</ol>` : '<p class="hw-note">No events for this alarm were recorded in the selected range.</p>'}`;
+      ${row ? `<div class="alarm-detail-status">${escapeHtml(row.status)} ${button}</div>` : ''}
+      ${row?.reviewed?.note && !selected.events.some(event => event.event === 'reviewed' && event.note === row.reviewed.note) ? `<p class="alarm-note">${escapeHtml(row.reviewed.note)}</p>` : ''}
+      ${events ? `<ol class="alarm-events">${events}</ol>` : '<p class="hw-note">No events in this range.</p>'}
+      <details data-alarm-identity><summary>Technical details</summary><code>${escapeHtml(selected.source)} · ${escapeHtml(selected.key)}</code></details>`;
   }
   const contextEvents = (Array.isArray(data.events) ? data.events : []).filter(e => ['boot', 'gap'].includes(e?.event) && Number.isFinite(Date.parse(e.timestamp)));
-  const context = contextEvents.length ? `<details><summary>Monitoring gaps and boots (${contextEvents.length})</summary>${contextEvents.map(e =>
+  const context = contextEvents.length ? `<details><summary>Monitoring events (${contextEvents.length})</summary>${contextEvents.map(e =>
     `<div class="hw-note">${escapeHtml(alarmTime(Date.parse(e.timestamp) / 1000))} · ${escapeHtml(e.source || '')} · ${e.event === 'boot' ? 'Boot recorded' : `Monitoring gap${e.from && e.to ? `: ${escapeHtml(e.from)} to ${escapeHtml(e.to)}` : ''}`}</div>`).join('')}</details>` : '';
   return `<div class="alarm-history">
     <div class="alarm-history-notice" role="status">${notice.map(text => `<p>${escapeHtml(text)}</p>`).join('')}</div>
-    <div class="alarm-current"><h3>Current concerns</h3>${currentRows || `<p class="hw-note">${entry.alarmCurrentStale ? 'Current concerns unavailable.' : 'No current hardware concerns reported.'}</p>`}</div>
-    ${reviewed ? `<details class="alarm-reviewed" ${entry.alarmReviewedOpen ? 'open' : ''}><summary>Reviewed evidence</summary>${reviewed}</details>` : ''}
-    <div class="alarm-legend">${[['raised', 'Raised'], ['cleared', 'Cleared'], ['retired', 'Closed'], ['expired', 'Expired'], ['reviewed', 'Reviewed'], ['reopened', 'Review reopened'], ['changed', 'Updated']].map(([event, label]) =>
-      `<span><span class="alarm-marker-${event}" aria-hidden="true">${ALARM_EVENT_LABELS[event][0]}</span> ${label}</span>`).join('')}</div>
+    <div class="alarm-current"><h3>Current concerns</h3>${currentRows || `<p class="hw-note">${entry.alarmCurrentStale ? 'Current concerns unavailable.' : 'No current concerns reported.'}</p>`}</div>
+    ${reviewed ? `<details class="alarm-reviewed" ${entry.alarmReviewedOpen ? 'open' : ''}><summary>Reviewed (${groups.filter(group => group.current?.kind === 'reviewed').length})</summary>${reviewed}</details>` : ''}
+    <div class="alarm-timeline-heading"><h3>Timeline</h3><details data-alarm-legend><summary>Symbols</summary>
+      <div class="alarm-legend">${[['raised', 'Raised'], ['cleared', 'Cleared'], ['retired', 'Closed'], ['expired', 'Expired'], ['reviewed', 'Reviewed'], ['reopened', 'Review reopened'], ['changed', 'Updated']].map(([event, label]) =>
+        `<span><span class="alarm-marker-${event}" aria-hidden="true">${ALARM_EVENT_LABELS[event][0]}</span> ${label}</span>`).join('')}</div></details></div>
     ${hasEvents ? `<div class="alarm-lanes">${lanes}</div>
       <div class="alarm-axis" style="margin-left:${HISTORY_AXIS_WIDTH}px;margin-right:${HISTORY_PLOT_INSET}px">${ticks}</div>` : '<p class="no-history-data">No alarm events recorded in this range.</p>'}
     <div class="alarm-detail">${details}</div>${context}
-    <p class="hw-note">Markers are recorded observations, not continuous health measurements. Service outages have their own history.</p>
   </div>`;
 }
 
@@ -1181,9 +1183,14 @@ function renderAlarmHistory(entry) {
   const reviewed = box.querySelector('.alarm-reviewed');
   if (reviewed) entry.alarmReviewedOpen = reviewed.open;
   const identityOpen = box.querySelector('[data-alarm-identity]')?.open;
+  const legendOpen = box.querySelector('[data-alarm-legend]')?.open;
+  const openEvents = new Set(Array.from(box.querySelectorAll?.('[data-alarm-event][open]') || [], event => event.dataset.alarmEvent));
   box.innerHTML = alarmHistoryHTML(entry, box.clientWidth - HISTORY_AXIS_WIDTH - HISTORY_PLOT_INSET);
   const identity = box.querySelector('[data-alarm-identity]');
   if (identity) identity.open = identityOpen === true;
+  const legend = box.querySelector('[data-alarm-legend]');
+  if (legend) legend.open = legendOpen === true;
+  box.querySelectorAll?.('[data-alarm-event]').forEach(event => { event.open = openEvents.has(event.dataset.alarmEvent); });
   const lanes = box.querySelector('.alarm-lanes');
   if (lanes) {
     // Let the scrollbar occupy the card's right padding, not the shared plot.

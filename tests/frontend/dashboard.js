@@ -2088,9 +2088,9 @@ async function testAlarmHistory() {
   let html = context.alarmHistoryHTML(entry, 800);
   assert(html.includes('First observed') && html.includes('before this range'));
   assert(html.includes('Longstanding fan fault') && html.includes('Removed fan'));
-  assert(html.includes('Only part') && html.includes('2 unreadable'));
-  assert(html.includes('Current checks unavailable or stale: sensors'));
-  assert(html.includes('Monitoring gaps and boots (1)'));
+  assert(html.includes('History is incomplete') && html.includes('2 unreadable'));
+  assert(html.includes('Checks unavailable or stale: sensors'));
+  assert(html.includes('Monitoring events (1)'));
   assert.equal(context.alarmEventLabel({ event: 'changed', reason: 'new_evidence' }), 'New evidence');
   assert.equal(context.alarmEventLabel({ event: 'reopened', reason: 'evidence_unavailable' }), 'Evidence unavailable; review no longer applies');
   assert(context.hwEventText(event('reopened', 1600, { reason: 'evidence_unavailable' })).includes('evidence unavailable; review no longer applies'));
@@ -2103,7 +2103,10 @@ async function testAlarmHistory() {
   html = context.alarmHistoryHTML(entry, 800);
   assert.equal((html.match(/<strong>Cleared<\/strong>/g) || []).length, 2);
   assert(html.includes('Observed interval: 6 min 40 s'));
-  assert(html.includes('History only; current state unconfirmed.'));
+  assert(!html.includes('History only; current state unconfirmed.'));
+  assert(!html.includes('Markers are recorded observations') && !html.includes('<small>dashboard</small>'));
+  assert(html.includes('<details class="alarm-event"') && html.includes('<div class="alarm-event-meta">'),
+    'event readings and occurrence metadata remain available behind each event summary');
   assert.equal(context.alarmInterval(0), '0 s');
   assert.equal(context.alarmInterval(3600), '1 h');
   assert.equal(context.alarmInterval(90061), '1 d 1 h 1 min 1 s');
@@ -2201,13 +2204,16 @@ function testAlarmHistoryFocus() {
   const context = liveContext([]);
   evaluate(context, between(app, 'function renderAlarmHistory', '// Shared by the Hardware health'));
   let focusedIndex, currentRow = false;
-  let identity = { open: true };
+  let identity = { open: true }, legend = { open: true };
+  let event = { open: true, dataset: { alarmEvent: 'same-occurrence' } };
   const groups = [{ id: 'first' }, { id: 'second' }];
   const box = {
     clientWidth: 600,
-    set innerHTML(value) { identity = { open: false }; },
+    set innerHTML(value) { identity = { open: false }; legend = { open: false }; event = { open: false, dataset: { alarmEvent: 'same-occurrence' } }; },
+    querySelectorAll(selector) { return selector === '[data-alarm-event]' || selector === '[data-alarm-event][open]' && event.open ? [event] : []; },
     querySelector(selector) {
       if (selector === '[data-alarm-identity]') return identity;
+      if (selector === '[data-alarm-legend]') return legend;
       if (selector === '[data-alarm-lane]:focus') return {
         dataset: { alarmLane: '0' }, classList: { contains: () => !currentRow },
       };
@@ -2221,12 +2227,18 @@ function testAlarmHistoryFocus() {
   context.renderAlarmHistory(entry);
   assert.deepEqual(focusedIndex, ['alarm-lane', 1], 'refresh follows focused identity when groups reorder');
   assert.equal(identity.open, true, 'refresh keeps source and identity expanded');
+  assert.equal(legend.open, true, 'refresh keeps the symbol key expanded');
+  assert.equal(event.open, true, 'refresh keeps the selected event details expanded');
   identity.open = false;
+  legend.open = false;
+  event.open = false;
   currentRow = true;
   entry.alarmGroups = groups;
   context.renderAlarmHistory(entry);
   assert.deepEqual(focusedIndex, ['alarm-current-row', 1], 'current concern buttons retain keyboard focus too');
   assert.equal(identity.open, false, 'refresh also preserves a collapsed disclosure');
+  assert.equal(legend.open, false);
+  assert.equal(event.open, false);
 }
 
 async function testAlarmRetirement() {
