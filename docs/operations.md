@@ -271,6 +271,9 @@ even if its display name and alarm key are unchanged. Old entries simply aging
 out of the collector's window do not require another review. Incomplete captures
 or evidence groups larger than 256 entries cannot be reviewed; their alarms
 remain visible. Review and closure through the dashboard require its password.
+If previously reviewed evidence cannot be re-checked, its held row shows
+"Previously reviewed" and the saved note alongside the unchecked warning.
+This remembers the investigation without implying a fresh successful check.
 
 The **H** or **Alarm history** button on Hardware health opens the full-width
 history card. It shares time-range controls with the other history cards.

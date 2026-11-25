@@ -26,6 +26,9 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 
 ### Changes
 
+- Held alarms display their previous review and note in the Hardware card and
+  alarm history. Their unchecked warning and closure action remain unchanged;
+  the API includes valid saved review metadata without recording another event.
 - The live TUI keeps `/help` and the header borders visible in narrow terminals.
   It requests the actual width down to 10 columns and reserves space for the
   help link before shortening long titles or omitting the hostname. Metric

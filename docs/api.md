@@ -107,6 +107,9 @@ Current concerns and when they began:
 Held rows include `unchecked_since` (epoch seconds). Reviewable rows include
 `evidence`, an array of opaque underlying-entry tokens. Reviewed rows also carry
 `reviewed: {timestamp, note, evidence}`; `timestamp` is the review's epoch time.
+Held rows can also carry this saved review. It describes previously inspected
+evidence, not a successful current check; the row remains in `held` and cannot
+be reviewed again while held.
 Use the current row's `evidence` when submitting a review, not an older review's
 tokens. Both capability objects contain `supported` and `password_configured`
 booleans. Availability does not guarantee an individual row is actionable.

@@ -687,6 +687,10 @@ function renderHardware(data) {
     const age = hardwareAgeText(h.unchecked_since);
     const title = [from ? `Alarm since ${from}` : '', last ? `Not re-checked since ${last}` : ''].filter(Boolean).join('; ');
     issues.push(`<div class="hw-row text-warning" title="${escapeHtml(title)}">${escapeHtml(h.text)}<br>Not re-checked${age ? ` for ${age}` : ''}</div>`);
+    if (h.reviewed) {
+      issues.push(hwRow('hw-note', 'Previously reviewed'));
+      if (h.reviewed.note) issues.push(hwRow('hw-note', h.reviewed.note));
+    }
     if (retirement?.supported && typeof h.key === 'string' && Number.isFinite(h.since) && Number.isFinite(h.unchecked_since)) {
       const enabled = retirement.password_configured === true;
       issues.push(`<button class="history-settings-btn" data-retire-alarm="${index}" ${enabled ? '' : 'disabled'}
@@ -1101,7 +1105,10 @@ function alarmHistoryGroups(data, current) {
     for (const row of Array.isArray(current?.[field]) ? current[field] : []) {
       if (row.source === 'services') continue; // Services have their own history.
       const group = add(row);
-      if (group) { group.current = { ...row, status, kind: field }; group.text = row.text; }
+      if (group) {
+        group.current = { ...row, status: field === 'held' && row.reviewed ? `${status} · Previously reviewed` : status, kind: field };
+        group.text = row.text;
+      }
     }
   }
   return [...groups.values()].sort((a, b) => {

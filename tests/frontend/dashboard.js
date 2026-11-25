@@ -1838,7 +1838,7 @@ function testHardwareIndependentSources() {
   const context = liveContext(['hardware-content', 'hardware-value', 'snapshot-age']);
   const now = Date.UTC(2026, 10, 24, 8), ts = now / 1000;
   context.Date = class extends Date { static now() { return now; } };
-  context.escapeHtml = String;
+  context.escapeHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
   context.hwHint = () => '';
   context.updateCardCritical = (id, on) => { context.statuses.critical = on; };
   context.updateCardWarning = (id, count) => { context.statuses.warning = count > 0; };
@@ -1958,6 +1958,17 @@ function testHardwareIndependentSources() {
   assert(!context.elements.get('hardware-value').className.includes('text-success'));
   assert(!html().includes('no alarms') && html().includes('No unreviewed issues'));
   assert(!context.statuses.critical && !context.statuses.warning, 'reviewed evidence is neutral, not recovered or critical');
+  context.dataCache.alarms.data.retirement = { supported: true, password_configured: true };
+  for (const note of ['', '<script>checked</script>']) {
+    context.renderHardware({ status: 'ok', age_sec: 0, alarms: [], alarm_held: [
+      { ...reviewed, unchecked_since: ts, reviewed: { timestamp: ts, note } },
+    ] });
+    assert(html().includes('Not re-checked') && html().includes('Previously reviewed'));
+    assert(context.statuses.warning, 'a previous review does not suppress held uncertainty');
+    assert(html().includes('data-retire-alarm=') && !html().includes('data-review-alarm='));
+    assert(!html().includes('<script>'));
+    if (note) assert(html().includes('&lt;script>checked&lt;/script>'));
+  }
   const reviewable = { key: 'journal/test', text: 'Journal fault', since: ts, evidence: ['a'] };
   context.dataCache.alarms.data.review = { supported: true, password_configured: true };
   for (const status of ['ok', 'stale']) {
@@ -2173,6 +2184,18 @@ async function testAlarmHistory() {
   entry.alarmHistory.events = [];
   html = context.alarmHistoryHTML(entry, 800);
   assert(html.includes('No alarm events recorded in this range') && html.includes('Longstanding fan fault'));
+  entry.alarmCurrent.held = [{ source: 'state', key: 'sel/hardware', text: 'Held event', since: 600,
+    unchecked_since: 800, reviewed: { timestamp: 700, note: '<script>inspected</script>' } }];
+  context.alarmHistoryHTML(entry, 800);
+  entry.alarmSelection = group('state', 'sel/hardware').id;
+  html = context.alarmHistoryHTML(entry, 800);
+  assert.equal(group('state', 'sel/hardware').current.kind, 'held');
+  assert(html.includes('Not re-checked · Previously reviewed'));
+  assert(html.includes('&lt;script>inspected&lt;/script>') && !html.includes('<script>'));
+  assert(html.includes('data-alarm-action="retire"') && !html.includes('data-alarm-action="review"'));
+  entry.alarmCurrent.held[0].reviewed.note = '';
+  assert(context.alarmHistoryHTML(entry, 800).includes('Not re-checked · Previously reviewed'),
+    'a held review is visible even without a note or review event in range');
   entry.alarmCurrent = {};
   html = context.alarmHistoryHTML(entry, 800);
   assert(html.includes('Snapshot time unavailable. Refresh to update.'), 'missing timestamps are not replaced by the current clock');

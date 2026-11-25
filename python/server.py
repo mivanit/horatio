@@ -5916,6 +5916,12 @@ def held_rows(
     return [
         {"source": source, **{k: entry.get(k) for k in _ALARM_FIELDS}}
         | {"unchecked_since": entry["unchecked_since"]}
+        | (
+            {"reviewed": entry["reviewed"]}
+            if _reviewable_alarm(source, entry.get("key", ""))
+            and _review_still_applies(entry, _alarm_evidence(entry.get("evidence")))
+            else {}
+        )
         for entry in memory.get(source, {}).get("alarms", {}).values()
         if "unchecked_since" in entry
     ]

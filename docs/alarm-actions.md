@@ -29,6 +29,10 @@ If a source cannot re-check an alarm and omits it, the alarm appears under
 server restarts. When readable again, identical evidence or a subset returns
 to `reviewed`; new evidence reopens it. This differs from a reported alarm with
 incomplete evidence, which explicitly invalidates the review as described above.
+Held API rows retain a valid previous `reviewed` annotation. The Hardware card
+and alarm history show "Previously reviewed" and its note alongside
+"Not re-checked". The warning and closure action remain: prior inspection does
+not establish the current condition.
 If an older version already lost a review, inspect the current evidence and mark
 it reviewed again; the fix does not reconstruct past review state.
 An existing occurrence with no previous evidence metadata establishes a baseline

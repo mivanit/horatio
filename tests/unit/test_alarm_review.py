@@ -210,6 +210,21 @@ def test_retained_review_survives_restart_and_checks_returning_evidence(
         held = server.held_rows("state", None, memory)
         assert len(held) == 1 and held[0]["key"] == key
         assert held[0]["unchecked_since"] == STAMP + 60
+        assert held[0]["reviewed"] == original["reviewed"]
+        unchecked = snapshot | {"alarm_items": [], "alarms": [], "checked": []}
+        enriched = server.with_alarm_history("state", unchecked, memory)
+        assert enriched["alarm_held"][0]["reviewed"] == original["reviewed"]
+        merged = server.alarms_snapshot(
+            STAMP + 60,
+            unchecked,
+            {"status": "missing"},
+            [],
+            {"stale": False, "targets": []},
+            memory,
+            [],
+        )
+        assert merged["held"] == held
+        assert merged["active"] == merged["reviewed"] == []
 
     item = snapshot["alarm_items"][0] | {"evidence": evidence}
     known, events = server.track_alarms(
@@ -225,6 +240,25 @@ def test_retained_review_survives_restart_and_checks_returning_evidence(
     else:
         assert known[key]["reviewed"] == original["reviewed"]
         assert events == []
+
+
+@pytest.mark.parametrize(
+    "review",
+    [None, "invalid", {}, {"timestamp": STAMP, "evidence": ["other"], "note": "old"}],
+)
+def test_held_rows_omit_invalid_reviews(review: Any) -> None:
+    import server
+
+    entry = {
+        "key": KEY,
+        "text": "recorded fault",
+        "since": STAMP,
+        "unchecked_since": STAMP + 60,
+        "evidence": ["a"],
+        "reviewed": review,
+    }
+    rows = server.held_rows("state", None, {"state": {"alarms": {KEY: entry}}})
+    assert len(rows) == 1 and "reviewed" not in rows[0]
 
 
 def test_unchecked_unreviewed_alarm_keeps_its_evidence_baseline(
