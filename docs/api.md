@@ -59,6 +59,12 @@ The [collector reference](../collector/README.md) describes the snapshots, raw
 `alarm_items`/`checked` contract, and collection rules. These endpoints add the
 dashboard's status and alarm-history information.
 
+For valid collector snapshots, `/api/storage-health` and `/api/sensors` enrich
+`alarm_items` with `since` and expose unchecked occurrences as `alarm_held`.
+Reviewed evidence is separated into `alarm_reviewed` and removed from the
+served `alarms`/`alarm_items` lists. The collector's snapshot files remain raw;
+review and closure state belongs to the server.
+
 For copyable API and file examples, occurrence selection, and error handling,
 see [alarm actions for agents](alarm-actions.md).
 

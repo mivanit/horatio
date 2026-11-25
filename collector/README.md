@@ -167,9 +167,11 @@ ago`), so two snapshots cannot be compared by text. Each snapshot therefore also
 The collectors keep no state: a snapshot says what is wrong now. Since when each alarm has
 been there, and when it went, is tracked by the dashboard server from `alarm_items` and
 `checked`, for these two snapshots and for its own alarms alike, and written to its
-`logs/events.jsonl` (see [logs and alarm history](../docs/operations.md#logs-and-history)). `GET /api/alarms` is all of it
-in one list; `/api/storage-health` and `/api/sensors` serve each `alarm_items` entry with its
-`since`.
+`logs/events.jsonl` (see [logs and alarm history](../docs/operations.md#logs-and-history)).
+`GET /api/alarms` groups current findings into `active`, `held`, and `reviewed`.
+`/api/storage-health` and `/api/sensors` add `since` to `alarm_items`, expose held
+occurrences as `alarm_held`, and move reviewed evidence to `alarm_reviewed`.
+These are server-side views; review does not change the collector's raw files.
 
 Journal and BMC event alarms also carry `evidence`: opaque identifiers for the
 underlying log entries. The dashboard uses these to remember an operator's
