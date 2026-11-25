@@ -4847,7 +4847,7 @@ function hideAllHistory() {
 
 // Set up history button handlers (event delegation)
 document.querySelector('.grid').addEventListener('click', (e) => {
-  const historyBtn = e.target.closest('.history-btn');
+  const historyBtn = e.target.closest('button[data-history-metric]');
   if (historyBtn) {
     const metric = historyBtn.dataset.historyMetric;
 

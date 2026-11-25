@@ -2133,12 +2133,39 @@ async function testAlarmHistory() {
   context.alarmHistoryHTML(entry, 800);
   assert.equal(entry.alarmSelection, null, 'selection clears when no longer present');
 
-  let handler, recordings = 0, opened = 0;
+  let handler, recordings = 0;
+  const opened = [], closed = [], cards = new Map();
   const clickContext = vm.createContext({ document: { querySelector: () => ({ addEventListener: (_, cb) => { handler = cb; } }) },
-    historyCards: new Map(), fetch: () => { recordings++; return Promise.resolve(); }, createHistoryCard: () => { opened++; } });
+    historyCards: cards, fetch: () => { recordings++; return Promise.resolve(); },
+    createHistoryCard: metric => { opened.push(metric); cards.set(metric, {}); },
+    removeHistoryCard: metric => { closed.push(metric); cards.delete(metric); } });
   evaluate(clickContext, between(app, '// Set up history button handlers', '// Set up global history controls'));
-  handler({ target: { closest: () => ({ dataset: { historyMetric: 'alarms' } }) } });
-  assert.equal(recordings, 0); assert.equal(opened, 1);
+  // Match the actual rendered attributes: an unconditional closest() stub hid
+  // the text button's mismatch with the old class-based delegation selector.
+  const clickButton = markup => {
+    const attrs = Object.fromEntries([...markup.matchAll(/([\w-]+)="([^"]*)"/g)].map(m => [m[1], m[2]]));
+    const button = { dataset: { historyMetric: attrs['data-history-metric'] } };
+    handler({ target: { closest: selector => {
+      const match = selector.match(/^(\w+)?(?:\.([\w-]+))?(?:\[([\w-]+)\])?$/);
+      assert(match, `unsupported button selector: ${selector}`);
+      const [, tag, cls, attr] = match;
+      return (!tag || tag === 'button') && (!cls || (attrs.class || '').split(/\s+/).includes(cls)) &&
+        (!attr || Object.hasOwn(attrs, attr)) ? button : null;
+    } } });
+  };
+  context.historyMetricAvailable = () => true;
+  const textButton = context.hardwareAlarmHistoryHTML().match(/<button[^>]*>Alarm history<\/button>/)[0];
+  clickButton(textButton);
+  assert.deepEqual(opened, ['alarms'], 'the rendered Hardware history button opens its card');
+  clickButton(textButton);
+  assert.deepEqual(closed, ['alarms'], 'clicking again closes its card');
+  const index = fs.readFileSync(path.join(__dirname, '..', '..', 'index.html'), 'utf8');
+  clickButton(index.match(/<button[^>]*data-history-metric="alarms"[^>]*>/)[0]);
+  assert.deepEqual(opened, ['alarms', 'alarms'], 'the header H button still opens alarm history');
+  assert.equal(recordings, 0, 'neither alarm history button records a metric sample');
+  clickButton(index.match(/<button[^>]*data-history-metric="cpu"[^>]*>/)[0]);
+  assert.equal(opened.at(-1), 'cpu');
+  assert.equal(recordings, 1, 'numeric history keeps its record-on-open behavior');
 }
 
 async function testAlarmHistoryRefresh() {

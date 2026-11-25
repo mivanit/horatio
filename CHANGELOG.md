@@ -5,15 +5,32 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 
 ## [Unreleased]
 
+Planned release: **0.3.0**.
+
 - Reviewed journal alarms retain their review while omitted from the collector's
   displayed rows. History labels say "Cleared" without claiming a repair. The
-  Hardware card shows several recent events, keeps them visible when health
-  refresh fails, and preserves expanded history across refreshes.
+  Hardware card shows the three latest lifecycle or new-evidence events, newest
+  first, and keeps them visible when health refresh fails. Reviewed evidence has
+  a neutral count instead of an all-clear state. Memory and backup details start
+  collapsed; expanded hardware and alarm identity details survive refreshes.
 - Alarm history has a full-width timeline and event details, including clearing,
   operator closure and optional notes. History reads report incomplete ranges.
   Journal/BMC evidence can be marked reviewed; new evidence restores attention
   while old entries aging out do not. Web edits require the dashboard password;
   local agents can submit JSON action files and read result receipts.
+- Alarm history uses readable durations, labeled operator notes and a colored
+  event legend. Keyboard focus follows the same alarm when refreshes reorder
+  rows. Long lane labels and action dialogs fit small screens; Drive Health
+  tiles use two rows on mobile and wrap long paths and diagnostic notes.
+- The [alarm agent guide](docs/alarm-actions.md) covers HTTP and local-file
+  inspection, occurrence selection, review and closure, notes, receipts and
+  conflict/retry handling. The API reference documents evidence limits, event
+  fields and occurrence identifiers. The README now links focused configuration,
+  API, operations and development guides.
+- The demo's alarm timeline and sampled metrics share fan stalls and a GPU
+  overheat, with corresponding workload, power and fan labels. It illustrates
+  recurring, unchecked, expired, closed and reviewed alarms and new evidence,
+  with stable incident times across refreshes.
 - Sensor labels can differ between old and new records after this upgrade, and
   identity changes can split a sensor's history into separate lines. Historical
   keys are preserved rather than merged. Duplicate chart labels use shorter
@@ -25,8 +42,11 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 - Python startup logs include the Horatio version and installed Git build, so
   `logs/server.log` and the service journal record when a new build starts.
 - CI tests the minimum supported Python 3.10 as well as 3.13. Installed-service
-  tests cover collector removal and reinstallation across a dashboard restart;
-  the Lua timer test waits for its first history record before reading it.
+  tests exercise both backends under real systemd, including history across
+  restarts, plus Python collector removal/reinstallation. OpenWrt container tests cover
+  fresh installs and migration from v0.2.1 with LuCI. Frontend and backend tests
+  cover alarm actions, hidden evidence, history refresh failures and disclosure
+  state; browser layout remains outside this coverage.
 - History timestamp filters accept fractional seconds consistently on Python
   3.10 and newer.
 - Alarm writes remain protected through repeated cancellation. A failed write
@@ -95,7 +115,7 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 - The static demo includes GPU fan percentages alongside chassis RPM, exercising
   both fan-chart axes in the live view and history. Native backend tests are named
   `test-python` and `test-lua`; previous Make target names remain aliases.
-- Alarm recovery requires readable evidence for each rule. Missing BMC/GPU,
+- Alarm clearing requires readable evidence for each rule. Missing BMC/GPU,
   SMART, RAID and memory readings retain earlier alarms; per-device fan and ECC
   alarms survive partial device inventories. NVIDIA driver mismatches remain
   alarms even when the installed library version cannot be inferred.
@@ -111,8 +131,8 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 - The server raises its own host alarms, in `/api/alarms` and on the Hardware card:
   `/run/reboot-required` (a note, an alarm after a week), an NVIDIA kernel module that
   no longer matches the installed library (at once; the text says whether a reboot fixes
-  it), and ZFS pools (`zfs.py`: not ONLINE, device or data errors, never scrubbed, last
-  scrub older than `zfs_scrub_max_days` (38), an expected pool missing, or state
+  it), and ZFS pools (`python/zfs.py`: not ONLINE, device or data errors, never
+  scrubbed, last scrub older than `zfs_scrub_max_days` (38), an expected pool missing, or state
   unreadable while pools are expected). New config keys `zfs_pools`,
   `zfs_scrub_max_days`, `sensor_hide`.
 - `GET /api/alarms` gains `notes`; **`GET /api/sensor-alarms` is removed** (its alarms
@@ -137,8 +157,8 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
   (`since 2026-11-21 17:50 (2 d)`, or `seen since …` when it predates the alarm
   history), keeps showing an alarm that could not be re-checked (`not re-checked since
   …`; the header then reads `N unchecked` instead of `all clear`), and lists the last
-  five alarm changes under "Recent changes". Several lines of one kind in a row share
-  one `check:` hint. The Services card shows when an outage began
+  three lifecycle or new-evidence events under "Alarm history". Several lines of
+  one kind in a row share one `check:` hint. The Services card shows when an outage began
   (`down (timeout) since …`). All of it appears once the collectors and the server are
   updated; an older one of either simply shows what it showed before.
 - OpenWrt installer (apk): `apk update` runs first (its index is lost at every reboot; a
@@ -160,10 +180,12 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
   `logs/events.jsonl` when one is `raised`, `changed` in value (`8 -> 9` reallocated
   sectors) or `cleared`; nothing is written while it just stays. An alarm that could not
   be re-checked (a failing drive that is asleep) is kept instead of being reported as
-  gone, and the 60 s snapshot's alarms and the fan rules must be absent three times in a
-  row to clear, so a value on its threshold does not flap. The log also records a `boot`
-  and a `gap` when a source, or the server itself, was not running. The collectors keep
-  no state, as before. README: "What is kept in `logs/`".
+  gone, and the 60 s snapshot's alarms and the fan rules must be checked and absent
+  three times in a row to clear. Unknown observations reset that count; raising is
+  immediate, so a reading fluctuating across its threshold can still raise and
+  clear repeatedly. The log also records a `boot` and a `gap` when a source, or the
+  server itself, was not running. The collectors keep no state, as before. See
+  [logs and history](docs/operations.md#logs-and-history).
 - Hardware collector: the journal alarm is now one line per distinct error-level message,
   `journal: <unit>: <message> (N in 24h, first …, last …)`, oldest first and at most 8,
   instead of `journal: N error-level messages … latest: <one of them>`, which could hide
@@ -180,11 +202,11 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
   then draws at least that much. The meta line names the line in watts.
 - `./install.sh -h` / `--help` prints the installer's options and exits, from any user,
   without changing anything.
-- Sensors on any Linux box: the dashboard reads Linux hwmon itself (`hwmon.py`, no root,
-  no collector) instead of Glances' sensors plugin, which is now switched off. It serves
+- Sensors on any Linux box: the dashboard reads Linux hwmon itself (`python/hwmon.py`,
+  no root, no collector) instead of Glances' sensors plugin, which is now switched off. It serves
   `/api/4/sensors` in the same shape, so the cards, the OpenWrt backend and history read
-  one format, and temperature names are exactly Glances' (history and `temp_labels`
-  continue).
+  one format. Existing `temp_labels` remain supported; physical identities can
+  distinguish equal labels and split old and new history as described above.
   - Fans: every chip's fans, including boards whose fan chip keeps its readings under
     `hwmonN/device/` (Fintek, older ITE), which Glances dropped whenever another chip
     (e.g. the GPU) had a fan. Named `<chip> fan<N>` or by the kernel's label.
@@ -196,7 +218,7 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
   - config.json `fans`: per-fan `min_rpm` (an alarm, or a note with `"on_low": "note"`)
     and `hide_if_zero` (default on: empty fan headers no longer show as 0 RPM fans),
     plus a `default` rule. Alarms appear on the Hardware card, also on a box without the
-    collector, and at `/api/sensor-alarms` for login scripts.
+    collector, and at `/api/alarms` for login scripts.
   - Hints on the Hardware card: a desktop with no fan readings is told to run
     `sensors-detect` and load its Super I/O driver; a VM is told it has no sensors.
   - config.json `sensor_labels` renames any sensor (fans and power too);
