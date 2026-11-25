@@ -2082,6 +2082,7 @@ async function testAlarmHistory() {
     event('reopened', 1650, { source: 'state', key: 'journal/error', evidence: ['old', 'new'] }),
     { source: 'dashboard', event: 'gap', timestamp: stamp(1200), from: stamp(1000), to: stamp(1200) },
   ] }, alarmCurrent: {
+    now: 1990,
     sources: { state: { status: 'ok' }, sensors: { status: 'error' } },
     active: [{ source: 'state', key: 'journal/error', text: 'Journal issue', since: 900, evidence: ['old', 'new'] },
       { source: 'dashboard', key: 'fan/longstanding', text: 'Longstanding fan fault', since: 500 }],
@@ -2090,6 +2091,8 @@ async function testAlarmHistory() {
     review: { supported: true, password_configured: true }, retirement: { supported: true, password_configured: true },
   } };
   let html = context.alarmHistoryHTML(entry, 800);
+  const snapshotNote = `As of ${context.alarmTime(1990)}. Refresh to update.`;
+  assert(html.includes(snapshotNote), 'concerns show their own fetch time, not the history range end');
   assert(html.includes('First observed') && html.includes('before this range'));
   assert(html.includes('Longstanding fan fault') && html.includes('Removed fan'));
   assert(html.includes('History is incomplete') && html.includes('2 unreadable'));
@@ -2129,7 +2132,9 @@ async function testAlarmHistory() {
   html = context.alarmHistoryHTML(entry, 800);
   assert(html.includes('data-alarm-action="review"') && html.includes('New evidence'));
   entry.alarmCurrentStale = true;
-  assert(context.alarmHistoryHTML(entry, 800).includes('data-alarm-action="review" disabled'));
+  html = context.alarmHistoryHTML(entry, 800);
+  assert(html.includes('data-alarm-action="review" disabled'));
+  assert(html.includes(snapshotNote), 'a failed refresh keeps the original snapshot time');
   entry.alarmCurrentStale = false;
   entry.alarmSelection = group('dashboard', 'fan/removed').id;
   assert(context.alarmHistoryHTML(entry, 800).includes('data-alarm-action="retire"'));
@@ -2137,7 +2142,9 @@ async function testAlarmHistory() {
   html = context.alarmHistoryHTML(entry, 800);
   assert(html.includes('No alarm events recorded in this range') && html.includes('Longstanding fan fault'));
   entry.alarmCurrent = {};
-  context.alarmHistoryHTML(entry, 800);
+  html = context.alarmHistoryHTML(entry, 800);
+  assert(html.includes('Snapshot time unavailable. Refresh to update.'), 'missing timestamps are not replaced by the current clock');
+  assert(html.includes('No concerns reported in this snapshot.'));
   assert.equal(entry.alarmSelection, null, 'selection clears when no longer present');
 
   let handler, recordings = 0;
@@ -2186,16 +2193,18 @@ async function testAlarmHistoryRefresh() {
   evaluate(context, between(app, 'async function loadHistoryData', '// Remove a history card'));
   const old = context.loadHistoryData('alarms', 24), newer = context.loadHistoryData('alarms', 1);
   loads[2].resolve({ ok: true, data: { cutoff: 100, now: 200, events: [] } });
-  loads[3].resolve({ ok: true, data: { active: [] } });
+  loads[3].resolve({ ok: true, data: { now: 190, active: [] } });
   await newer;
   loads[0].resolve({ ok: true, data: { cutoff: 0, now: 100, events: [] } });
-  loads[1].resolve({ ok: true, data: { active: [{ text: 'old' }] } });
+  loads[1].resolve({ ok: true, data: { now: 90, active: [{ text: 'old' }] } });
   await old;
   assert.deepEqual(rendered, [200], 'older responses never replace newer history');
+  assert.equal(entry.alarmCurrent.now, 190, 'older responses never replace the concern snapshot time');
   const failure = context.loadHistoryData('alarms', 1);
   loads[4].resolve({ ok: false, errorType: 'network' }); loads[5].resolve({ ok: false });
   await failure;
   assert.equal(entry.alarmHistory.now, 200);
+  assert.equal(entry.alarmCurrent.now, 190, 'failed fetches do not advance the concern snapshot time');
   assert(entry.alarmHistoryError && entry.alarmCurrentStale, 'last good history remains with stale current actions disabled');
   const closed = context.loadHistoryData('alarms', 1);
   context.historyCards.delete('alarms');

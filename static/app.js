@@ -1176,7 +1176,9 @@ function alarmHistoryHTML(entry, width) {
     `<div class="hw-note">${escapeHtml(alarmTime(Date.parse(e.timestamp) / 1000))} · ${escapeHtml(e.source || '')} · ${e.event === 'boot' ? 'Boot recorded' : `Monitoring gap${e.from && e.to ? `: ${escapeHtml(e.from)} to ${escapeHtml(e.to)}` : ''}`}</div>`).join('')}</details>` : '';
   return `<div class="alarm-history">
     <div class="alarm-history-notice" role="status">${notice.map(text => `<p>${escapeHtml(text)}</p>`).join('')}</div>
-    <div class="alarm-current"><h3>Current concerns</h3>${currentRows || `<p class="hw-note">${entry.alarmCurrentStale ? 'Current concerns unavailable.' : 'No current concerns reported.'}</p>`}</div>
+    <div class="alarm-current"><h3>Concerns</h3>
+      <p class="hw-note">${Number.isFinite(current?.now) ? `As of ${escapeHtml(alarmTime(current.now))}` : 'Snapshot time unavailable'}. Refresh to update.</p>
+      ${currentRows || `<p class="hw-note">${entry.alarmCurrentStale ? 'Current concerns unavailable.' : 'No concerns reported in this snapshot.'}</p>`}</div>
     ${reviewed ? `<details class="alarm-reviewed" ${entry.alarmReviewedOpen ? 'open' : ''}><summary>Reviewed (${groups.filter(group => group.current?.kind === 'reviewed').length})</summary>${reviewed}</details>` : ''}
     <div class="alarm-timeline-heading"><h3>Timeline</h3><details data-alarm-legend><summary>Symbols</summary>
       <div class="alarm-legend">${[['raised', 'Raised'], ['cleared', 'Cleared'], ['retired', 'Closed'], ['expired', 'Expired'], ['reviewed', 'Reviewed'], ['reopened', 'Review reopened'], ['changed', 'Updated']].map(([event, label]) =>

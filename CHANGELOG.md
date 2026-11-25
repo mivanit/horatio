@@ -7,6 +7,8 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 
 Planned release: **0.3.0**.
 
+- Alarm history labels its concerns with the snapshot time and a refresh hint,
+  making clear that they do not update with the live dashboard.
 - Reviewed journal alarms retain their review while omitted from the collector's
   displayed rows. History labels say "Cleared" without claiming a repair. The
   Hardware card shows the three latest lifecycle or new-evidence events, newest
