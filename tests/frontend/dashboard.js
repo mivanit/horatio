@@ -650,7 +650,9 @@ function testHardwareSince() {
   assert.equal(html().split('check: journalctl').length - 1, 1, 'two journal lines in a row share one hint');
   assert(html().indexOf('check: journalctl') > html().indexOf('NVRM'), 'after the last of them');
   assert(html().includes('check: smartctl'));
-  assert(html().includes(`sdb: SMART health FAILED: not re-checked since ${context.sinceText(t - 1800)}, alarm since ${context.sinceText(t - 86400 * 9)}`));
+  assert(html().includes('sdb: SMART health FAILED<br>Not re-checked for 30 min'));
+  assert(html().includes(`title="Alarm since ${context.sinceText(t - 86400 * 9)}; Not re-checked since ${context.sinceText(t - 1800)}"`),
+    'held timestamps remain available without repeating them in the compact row');
   assert(!html().includes('flap damping') && !html().includes('Alarm history'));
 
   // Nothing wrong that could be checked, but one alarm that could not: not "all clear".
@@ -658,7 +660,7 @@ function testHardwareSince() {
   context.renderHardware({ ...state, alarms: [], alarm_items: [] });
   assert.deepEqual([header(), context.elements.get('hardware-value').className, context.statuses.warning, context.statuses.critical],
     ['1 unchecked', 'value text-warning', true, false]);
-  assert(!html().includes('no alarms') && html().includes('not re-checked'));
+  assert(!html().includes('no alarms') && html().includes('Not re-checked'));
 
   // A collector from before alarm_items, or an entry that is not for this line: the text alone.
   context.renderHardware({ status: 'ok', age_sec: 30, alarms: ['md0: DEGRADED (1 missing)'] });
@@ -687,6 +689,8 @@ function testHardwareSince() {
   ] } };
   context.renderHardware({ status: 'ok', age_sec: 30, alarms: [] });
   const recent = context.hardwareAlarmHistoryHTML();
+  assert(recent.includes('46 min ago cleared') && recent.includes(`title="${context.alarmTime(t - 2800)}"`),
+    'the preview uses relative ages while keeping the exact event time available');
   assert(recent.includes('cleared after 20 min: GPU 1'));
   assert(recent.includes('raised: GPU 1') && recent.includes('sde: reallocated=8'));
   assert(recent.indexOf('cleared after') < recent.indexOf('raised: GPU 1'));
@@ -1876,7 +1880,7 @@ function testHardwareIndependentSources() {
   snapshot.alarms = []; snapshot.alarm_items = []; snapshot.alarm_held = [];
   context.renderHardware({ status: 'error', sensor_alarm_held: server.sensor_alarm_held });
   assert.equal(header(), '1 unchecked');
-  assert(html().includes('Case fan fault') && html().includes('not re-checked'));
+  assert(html().includes('Case fan fault') && html().includes('Not re-checked'));
   for (const sensor_status of ['pending', 'stale']) {
     context.renderHardware({ status: 'ok', age_sec: 0, sensor_status });
     assert.equal(header(), `checks ${sensor_status}`);

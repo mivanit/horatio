@@ -681,7 +681,9 @@ function renderHardware(data) {
   const retirement = getFreshCache('alarms', 300000)?.retirement;
   unchecked.forEach((h, index) => {
     const from = sinceText(h.since), last = sinceText(h.unchecked_since);
-    issues.push(hwRow('text-warning', `${h.text}: not re-checked${last ? ` since ${last}` : ''}${from ? `, alarm since ${from}` : ''}`));
+    const age = hardwareAgeText(h.unchecked_since);
+    const title = [from ? `Alarm since ${from}` : '', last ? `Not re-checked since ${last}` : ''].filter(Boolean).join('; ');
+    issues.push(`<div class="hw-row text-warning" title="${escapeHtml(title)}">${escapeHtml(h.text)}<br>Not re-checked${age ? ` for ${age}` : ''}</div>`);
     if (retirement?.supported && typeof h.key === 'string' && Number.isFinite(h.since) && Number.isFinite(h.unchecked_since)) {
       const enabled = retirement.password_configured === true;
       issues.push(`<button class="history-settings-btn" data-retire-alarm="${index}" ${enabled ? '' : 'disabled'}
@@ -866,8 +868,7 @@ async function submitAlarmRetirement(popup = alarmRetirementPopup) {
 
 // One line of the event log (README: "What is kept in logs/") as text, or null for a kind
 // not shown here (a gap in the snapshots) or a line that cannot be read.
-function hwEventText(e) {
-  const when = sinceText(Date.parse(e?.timestamp) / 1000);
+function hwEventText(e, when = sinceText(Date.parse(e?.timestamp) / 1000)) {
   if (!when) return null;
   const span = s => !Number.isFinite(s) || s < 0 ? '' : s < 7200 ? ` after ${Math.round(s / 60)} min` : s < 172800 ? ` after ${Math.round(s / 3600)} h` : ` after ${Math.round(s / 86400)} d`;
   // A line about an alarm says which one; one that does not is not shown.
@@ -886,12 +887,22 @@ function hwEventText(e) {
   }
 }
 
+function hardwareAgeText(epoch) {
+  if (!Number.isFinite(epoch) || !Number.isFinite(new Date(epoch * 1000).getTime())) return '';
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000 - epoch));
+  return seconds < 3600 ? `${Math.floor(seconds / 60)} min` : seconds < 172800 ? `${Math.floor(seconds / 3600)} h` : `${Math.floor(seconds / 86400)} d`;
+}
+
 function hardwareAlarmHistoryHTML() {
   // Recorded facts remain useful when current health cannot be fetched.
   const log = getCache('alarms')?.recent;
   const rows = (Array.isArray(log) ? log : [])
     .filter(e => ['raised', 'cleared', 'retired', 'expired', 'reviewed', 'reopened'].includes(e?.event) || e?.reason === 'new_evidence')
-    .map(hwEventText).filter(Boolean).slice(-3).reverse().map(text => hwRow('', text));
+    .map(event => {
+      const epoch = Date.parse(event.timestamp) / 1000, age = hardwareAgeText(epoch);
+      const text = hwEventText(event, age ? `${age} ago` : '');
+      return text ? `<div class="hw-row" title="${escapeHtml(alarmTime(epoch))}">${escapeHtml(text)}</div>` : null;
+    }).filter(Boolean).slice(-3).reverse();
   if (rows.length && !getFreshCache('alarms', 300000)) rows.push(hwRow('hw-note', 'Showing previously fetched alarm history; newer events may be missing.'));
   if (typeof historyMetricAvailable === 'function' && historyMetricAvailable('alarms')) {
     rows.push('<button class="history-settings-btn" data-history-metric="alarms">Alarm history</button>');
@@ -1156,7 +1167,9 @@ function alarmHistoryHTML(entry, width) {
       ${row ? `<div class="alarm-detail-status">${escapeHtml(row.status)} ${button}</div>` : ''}
       ${row?.reviewed?.note && !selected.events.some(event => event.event === 'reviewed' && event.note === row.reviewed.note) ? `<p class="alarm-note">${escapeHtml(row.reviewed.note)}</p>` : ''}
       ${events ? `<ol class="alarm-events">${events}</ol>` : '<p class="hw-note">No events in this range.</p>'}
-      <details data-alarm-identity><summary>Technical details</summary><code>${escapeHtml(selected.source)} · ${escapeHtml(selected.key)}</code></details>`;
+      <details data-alarm-identity><summary>Technical details</summary><code>${escapeHtml(selected.source)} · ${escapeHtml(selected.key)}</code>
+        ${Number.isFinite(row?.since) ? `<div>First observed: ${escapeHtml(alarmTime(row.since))}</div>` : ''}
+        ${Number.isFinite(row?.unchecked_since) ? `<div>Not re-checked since: ${escapeHtml(alarmTime(row.unchecked_since))}</div>` : ''}</details>`;
   }
   const contextEvents = (Array.isArray(data.events) ? data.events : []).filter(e => ['boot', 'gap'].includes(e?.event) && Number.isFinite(Date.parse(e.timestamp)));
   const context = contextEvents.length ? `<details><summary>Monitoring events (${contextEvents.length})</summary>${contextEvents.map(e =>
