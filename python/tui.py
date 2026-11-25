@@ -297,7 +297,7 @@ def main() -> int:
                 "view": VIEWS[state["view"]],
                 "style": style,
                 "color": color,
-                "width": max(60, cols),
+                "width": max(10, cols),
                 "height": None if rows is None else max(5, rows - BAR_ROWS),
                 "hours": state["hours"],
                 "table": 1 if state["table"] else None,

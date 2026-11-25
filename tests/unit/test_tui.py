@@ -5,6 +5,40 @@ import sys
 import pytest
 
 
+@pytest.mark.parametrize("width", [10, 20, 40, 57, 59, 60, 80])
+@pytest.mark.parametrize("style", ["ascii", "unicode"])
+@pytest.mark.parametrize("color", [False, True])
+def test_help_link_survives_narrow_terminal_clipping(
+    width: int, style: str, color: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import server
+    import tui
+
+    monkeypatch.setattr(server.socket, "gethostname", lambda: "long-hostname" * 5)
+    frame = server.render_text(
+        [], title="Long dashboard title " * 5, width=width, style=style, color=color
+    )
+    header = frame.splitlines()[:3]
+    assert all(len(server._strip_ansi(line)) == width for line in header)
+    visible = server._strip_ansi(tui.clip(header[1], width))
+    assert "/help" in visible
+    if style == "unicode":
+        assert visible.startswith("│") and visible.endswith("│")
+
+
+def test_narrow_terminal_requests_its_actual_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tui
+
+    seen: list[str] = []
+    monkeypatch.setattr(tui.shutil, "get_terminal_size", lambda *args: (59, 24))
+    monkeypatch.setattr(tui, "fetch", lambda url: seen.append(url) or "")
+    monkeypatch.setattr(sys, "argv", ["tui.py", "localhost:8080", "--once"])
+    assert tui.main() == 0
+    assert "width=59" in seen[0]
+
+
 def test_tui_unit() -> None:
     """tui.py: terminal detection, escape-safe clipping, URL building; server colour depths."""
     import server

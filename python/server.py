@@ -7515,30 +7515,36 @@ def render_text(
     heading: str = title or socket.gethostname()
     host: str = socket.gethostname()
     sub: str = "" if heading == host else (f"· {host}" if unicode else f"- {host}")
-    inner: str = f" {heading} " + _paint(sub, "muted", color) + " "
+    # The header must fit the actual terminal even when metric layouts need
+    # their minimum width. Reserve the help link before shortening the title.
+    header_width: int = max(10, width)
     two_col: bool
     col_w: int
     width, two_col, col_w = _text_layout(width, view, unicode)
-    span: int = width - 2
-    hint: str = "options and API: /help "
-    fill: int = max(1, span - len(_strip_ansi(inner)) - len(hint))
+    span: int = header_width - 2 if unicode else header_width
+    hint: str = "options and API: /help " if span >= 40 else "/help "
+    title_budget: int = span - len(hint) - 2
+    if len(heading) + 1 + len(sub) > title_budget:
+        sub = ""
+    inner: str = _paint(" " + heading[:title_budget], "title", color)
+    if sub:
+        inner += _paint(" " + sub, "muted", color)
+    fill: int = span - len(_strip_ansi(inner)) - len(hint)
     if unicode:
         out: list[str] = [
             _paint("╭" + "─" * span + "╮", "cpu", color),
             _paint("│", "cpu", color)
-            + _paint(inner[: len(heading) + 2], "title", color)
-            + inner[len(heading) + 2 :]
+            + inner
             + " " * fill
             + _paint(hint, "muted", color)
             + _paint("│", "cpu", color),
             _paint("╰" + "─" * span + "╯", "cpu", color),
         ]
     else:
-        title_line: str = inner.strip()
         out = [
-            "=" * width,
-            title_line + hint.rstrip().rjust(width - len(_strip_ansi(title_line))),
-            "=" * width,
+            "=" * header_width,
+            inner + " " * fill + _paint(hint, "muted", color),
+            "=" * header_width,
         ]
     left: list[tuple[str, str]] = []
     if view in ("latest", "both"):
@@ -7632,7 +7638,8 @@ LIVE VIEW (tui.py)
          Default: 1 to 3 hours, picked so the sparklines have about one record
          per column (wider terminals and slower recording intervals get the
          longer window)
-  width  terminal width in columns, default 80 (60 to 400). The server can't see
+  width  terminal width in columns, default 80 (10 to 400). The header fits narrow
+         terminals; metric layouts still need at least 60 columns. The server can't see
          your terminal, so pass it:  curl "http://<host>:8080/text?width=$COLUMNS"
          At 160 or wider, the unicode report shows snapshot and history side by side.
   height trim to N lines: a requested table shrinks to fit, and if it still
@@ -7800,7 +7807,7 @@ async def text_view(
             thresholds=_CONFIG.get("thresholds") or {},
             table=with_table,
             live=sample,
-            width=max(TEXT_MIN_WIDTH, min(width, 400)),
+            width=max(10, min(width, 400)),
             sparks=sparks,
             services=services_now,
         )
