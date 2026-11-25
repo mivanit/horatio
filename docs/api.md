@@ -133,7 +133,9 @@ password protects writing them, not reading them.
 
 Mark existing journal or BMC event evidence as reviewed, using
 `{source, key, since, evidence, password, note?}`. Copy `evidence`, an array of
-opaque entry identifiers, from the current alarm. The optional note has the same
+1–256 nonempty opaque entry identifiers (each at most 128 characters), from the
+current alarm. Only source `state` with a `journal/*`, `sel/memory`, or
+`sel/hardware` key is eligible. The optional note has the same
 limit as retirement. The server checks the occurrence and fresh evidence before
 saving; a changed occurrence or evidence returns 409. Live conditions such as a
 stopped fan cannot be reviewed away. Reviewed evidence stays in history and is
@@ -172,6 +174,24 @@ evidence remained unavailable. `reviewed` records an operator review;
 `reopened` records new evidence after review, or
 review becoming inapplicable because complete evidence is unavailable
 (`reason: "evidence_unavailable"`).
+
+| Event | Additional meaning or fields |
+|---|---|
+| `raised` | First recorded observation of this occurrence; `initial` distinguishes an already-present finding. |
+| `changed` | Updated reading (`value`, with previous `was`) or new underlying entries (`reason: "new_evidence"`). |
+| `cleared` | No longer reported after the required checks; `active_for_s` is observed elapsed time, not proof of an uninterrupted fault. |
+| `retired` | Explicit closure, with `unchecked_since` and optional operator `note`. |
+| `expired` | Held too long without a re-check; includes `unchecked_since`. |
+| `reviewed` | Operator reviewed this `evidence`, with optional `note`. |
+| `reopened` | Review no longer applies; `reason` is `new_evidence` or `evidence_unavailable`. |
+| `boot`, `gap` | Source/tracker context rather than a specific alarm. Gap events include `from` and `to`. |
+
+Events have an ISO timestamp and `source`; alarm-specific events also have `key`
+and `text`, with occurrence fields such as `since` when known. Use
+`(source, key, since)` to associate events with an occurrence; `(source, key)`
+groups recurrences. File-action events additionally have `action_id`, matching
+their request/receipt filename. API actions do not supply that field.
+
 These are observations, not a continuous health trace. `initial: true` means
 the fault was already present when first observed, and `after_boot: true` on a
 clear event indicates it cleared after a reboot.

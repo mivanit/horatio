@@ -16,8 +16,10 @@ Both paths re-check the occurrence before changing it and preserve event history
 Review accepts only source `state`, with a `journal/*`, `sel/memory`, or
 `sel/hardware` key and a complete `evidence` array. New underlying entries bring
 reviewed evidence back to attention. Older entries aging out do not require a
-new review. If evidence becomes unavailable, the review no longer hides the
-alarm. An older collector or an incomplete/oversized capture may supply no
+new review. If a reported alarm's evidence becomes unavailable, the review no
+longer hides the alarm. A journal group omitted from the collector's limited
+displayed rows retains its stored review; omission alone is not new evidence
+or clearing. An older collector or an incomplete/oversized capture may supply no
 reviewable evidence; update the collector if needed, and never invent tokens.
 
 Both actions accept an optional `note` string of at most 2,000 characters;

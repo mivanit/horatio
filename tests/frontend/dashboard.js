@@ -703,7 +703,7 @@ function testHardwareSince() {
   const odd = context.hardwareAlarmHistoryHTML();
   assert(odd.includes(' cleared: x') && !odd.includes('booted') && !odd.includes('sde'));
   assert(!odd.includes('undefined') && !odd.includes('NaN') && !odd.includes('after -') && !odd.includes('no such date'), odd);
-  assert.equal((odd.match(/class="hw-row /g) || []).length, 1, 'only readable lifecycle events are previewed');
+  assert.equal((odd.match(/class="hw-row"/g) || []).length, 1, 'only readable lifecycle events are previewed');
   // Historical facts remain visible when a refresh has not succeeded recently.
   context.dataCache.alarms.lastUpdate = now - 6 * 60 * 1000;
   context.renderHardware({ status: 'ok', age_sec: 30, alarms: [] });
@@ -713,6 +713,7 @@ function testHardwareSince() {
   assert(html().includes('Error loading hardware health') && html().includes(' cleared: x'));
   assert(html().includes('class="history-settings-btn" data-history-metric="alarms"'));
   assert.equal(header(), '--', 'cached history does not imply current health');
+  assert.equal(context.statuses.hardware, false, 'failed current health retains the error state');
   assert.equal(context.elements.get('hardware-content').onclick, null);
   assert.deepEqual(context.errors, []);
 }
