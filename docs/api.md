@@ -88,12 +88,13 @@ Current concerns and when they began:
 
 | Field | Meaning |
 |---|---|
+| `now` | Server time in epoch seconds when this response was assembled; individual sources have their own observation times. |
 | `active` | `{source, key, text, value, since, initial}` rows from the sources below. |
 | `sources` | Each source's `status`. A status other than `ok` means unknown, never clear. |
 | `held` | Previously observed alarms that could not be re-checked, such as a failing drive that is asleep. |
 | `reviewed` | Journal or BMC event evidence already reviewed by an operator. New evidence returns it to `active`. |
 | `notes` | The server's setup hints and other notes, such as a reboot pending under a week or a scrub in progress. |
-| `recent` | The newest 50 lines of `logs/events.jsonl`. |
+| `recent` | Up to 50 parsed events from the last 256 KiB of `logs/events.jsonl`, in file order. An unreadable or missing log returns an empty list; use `/api/alarms/history` for explicit read errors and completeness flags. |
 | `retirement` | Metadata advertising whether retirement is supported and a password is configured. |
 | `review` | Metadata advertising whether evidence review is supported and a password is configured. |
 

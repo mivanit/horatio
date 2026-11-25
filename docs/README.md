@@ -13,7 +13,13 @@ time, so live charts move and the history charts show the last 30 days of the sa
 series (a training job on GPU 0 in multi-hour stretches, a nightly backup at 02:00).
 The Fans card includes chassis RPM and GPU percentages on separate axes, in both
 the live view and history.
-The settings dialog loads but refuses to save.
+Alarm history includes recurring fan faults, GPU heat, an unchecked fan, an
+expired alarm, operator closure with a note, reviewed BMC evidence, and new
+journal evidence after review. Incidents are anchored when the page loads so
+their timestamps stay fixed across refreshes; corresponding fan/GPU metric
+history shows the same incidents. Reloading the page creates a new timeline.
+The settings dialog loads but refuses to save. Alarm closure/review controls
+are unavailable, and their API routes also refuse writes: the demo is read-only.
 
 - `demo/fake-api.js`: the fake backend. Its responses follow the shapes in
   `python/server.py`; a new endpoint in the frontend needs a route here, or

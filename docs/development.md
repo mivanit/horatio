@@ -28,7 +28,10 @@ Tests are grouped by responsibility:
 - `tests/unit/`: history recovery, metrics, privacy, authentication, and text/TUI rendering.
 - `tests/integration/`: HTTP contracts against a real dashboard and Glances.
 - `tests/installers/` and `tests/collector/`: isolated service and hardware fixtures.
-- `tests/frontend/`: Node.js fixtures for browser behavior and history caching.
+- `tests/frontend/`: Node.js fixtures for frontend behavior and history caching,
+  plus static-demo checks. These simulate DOM behavior; they do not run a browser
+  or verify CSS layout. Check responsive layout and keyboard interaction in a
+  browser when changing the UI.
 - `tests/lua/`: native Lua checks, including history under UTC and America/New_York.
 
 Pytest fixtures copy application code and `config.example.json` into temporary

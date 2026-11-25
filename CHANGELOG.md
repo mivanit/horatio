@@ -20,10 +20,15 @@ Planned release: **0.3.0**.
   Journal/BMC evidence can be marked reviewed; new evidence restores attention
   while old entries aging out do not. Web edits require the dashboard password;
   local agents can submit JSON action files and read result receipts.
-- Alarm history uses readable durations, labeled operator notes and a colored
-  event legend. Keyboard focus follows the same alarm when refreshes reorder
-  rows. Long lane labels and action dialogs fit small screens; Drive Health
-  tiles use two rows on mobile and wrap long paths and diagnostic notes.
+- Alarm history shows compact event/time rows with notes visible. Expand an
+  event for its original reading, occurrence time and observed duration; the
+  symbol key and technical identity are also expandable. Expanded details survive
+  refreshes, and keyboard focus follows the same alarm lane when rows reorder.
+  Recent events and unchecked alarms use relative ages in the Hardware card,
+  with exact timestamps available in tooltips and history details. Diagnostic
+  commands are under Hardware details. Long lane labels and action dialogs fit
+  small screens; Drive Health tiles use two rows on mobile and wrap long paths
+  and diagnostic notes.
 - The [alarm agent guide](docs/alarm-actions.md) covers HTTP and local-file
   inspection, occurrence selection, review and closure, notes, receipts and
   conflict/retry handling. The API reference documents evidence limits, event
@@ -80,7 +85,9 @@ Planned release: **0.3.0**.
   clients close after background tasks finish, including on startup failure.
 - **Upgrade requirement:** run `./install.sh` after pulling this release and
   before restarting the Python service. The service now launches
-  `python/server.py`; there is no root-level compatibility launcher.
+  `python/server.py`; there is no root-level compatibility launcher. Reinstall
+  existing collectors too (the installer does this automatically) so journal/SEL
+  alarms include the evidence needed for review.
 - Held alarms can be manually retired with the dashboard password. Retirement
   is recorded in the event history, survives restarts and does not suppress a
   newly observed fault. Active alarms cannot be retired.
@@ -157,10 +164,10 @@ Planned release: **0.3.0**.
   target: when its current outage began.
 - Dashboard: the Hardware health card says since when each issue has been there
   (`since 2026-11-21 17:50 (2 d)`, or `seen since …` when it predates the alarm
-  history), keeps showing an alarm that could not be re-checked (`not re-checked since
-  …`; the header then reads `N unchecked` instead of `all clear`), and lists the last
+  history), keeps showing an alarm that could not be re-checked (`Not re-checked
+  for …`; the header then reads `N unchecked` instead of `all clear`), and lists the last
   three lifecycle or new-evidence events under "Alarm history". Several lines of
-  one kind in a row share one `check:` hint. The Services card shows when an outage began
+  one kind in a row share one `check:` hint under Hardware details. The Services card shows when an outage began
   (`down (timeout) since …`). All of it appears once the collectors and the server are
   updated; an older one of either simply shows what it showed before.
 - OpenWrt installer (apk): `apk update` runs first (its index is lost at every reboot; a

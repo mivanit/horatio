@@ -19,7 +19,9 @@ reviewed evidence back to attention. Older entries aging out do not require a
 new review. If a reported alarm's evidence becomes unavailable, the review no
 longer hides the alarm. A journal group omitted from the collector's limited
 displayed rows retains its stored review; omission alone is not new evidence
-or clearing. An older collector or an incomplete/oversized capture may supply no
+or clearing. It cannot be reviewed again while its full evidence is omitted;
+when it returns to the displayed rows, its evidence is compared with the stored
+review. An older collector or an incomplete/oversized capture may supply no
 reviewable evidence; update the collector if needed, and never invent tokens.
 
 Both actions accept an optional `note` string of at most 2,000 characters;

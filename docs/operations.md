@@ -201,10 +201,10 @@ each gives in `alarm_items`) and the server's own fan rules and host checks. Eac
 | `event` | when | other fields |
 |---|---|---|
 | `raised` | an alarm appears | `key`, `text`, `value`, `since`; `initial: true` when it was already there the first time its source was seen |
-| `changed` | its `value` differs from the last snapshot (reallocated sectors `8 -> 9`) | the same, plus `was` |
+| `changed` | its reading changes, or new journal/SEL evidence arrives | occurrence fields, plus `was` for a value change or `reason: "new_evidence"` and `evidence` for new entries |
 | `cleared` | it is gone, and the snapshot says it `checked` for it | the same, plus `active_for_s`; `after_boot: true` when the box rebooted in between (counters that reset at boot) |
 | `expired` | it could not be re-checked for 30 days and at least 3 snapshots (a drive that is gone) | the same, plus `unchecked_since` |
-| `retired` | an authenticated user explicitly retires a held alarm | the same, plus `unchecked_since`; this records retirement, not proof of recovery |
+| `retired` | an operator or local agent explicitly closes a held alarm | occurrence fields, `unchecked_since`, optional `note`, and `action_id` for file actions; this records closure, not proof of recovery |
 | `reviewed` | an operator marks journal/BMC evidence as reviewed | occurrence identifiers, reviewed evidence and optional `note` |
 | `reopened` | new evidence arrives, or complete evidence becomes unavailable after review | occurrence identifiers and reason; the alarm needs attention again |
 | `boot` | the 15-min snapshot shows a new boot | `id`, `kernel`, `previous: {clean, ended, kernel}` |
@@ -258,10 +258,18 @@ out of the collector's window do not require another review. Incomplete captures
 or evidence groups larger than 256 entries cannot be reviewed; their alarms
 remain visible. Review and closure through the dashboard require its password.
 
-The **H** button on Hardware health opens the full-width **Alarm history** card.
-It shares time-range controls with the other history cards. Select an alarm lane
-to read its dated events, outcomes and notes. Markers show recorded events, not
-continuous healthy/unhealthy intervals. Current concerns are shown separately,
+The **H** or **Alarm history** button on Hardware health opens the full-width
+history card. It shares time-range controls with the other history cards.
+Select an alarm lane to read its dated events and notes. Expand an event for its
+original reading, first-observed time and observed duration. Notes stay visible;
+the symbol key and technical identifiers are expandable. The small Hardware
+card shows three recent events with relative ages; tooltips and history details
+retain exact timestamps. Diagnostic commands are under **Hardware details**.
+
+The history card is a fetched snapshot, not a live view: its concerns show an
+**As of** time and update when you refresh the card. The small Hardware card
+continues to follow live polling. Markers show recorded events, not continuous
+healthy/unhealthy intervals. Concerns are shown separately from the timeline,
 including those first observed before the selected range. Clearing, operator
 closure, expiry without a check, and review have different meanings. **Cleared**
 means the source checked the alarm and no longer reported it under the current
@@ -276,11 +284,13 @@ same occurrence/evidence checks. The guide includes examples and conflict/retry
 handling. Submit request files rather than editing the server-owned state or
 history; a closure's note survives in the event log after its state entry is gone.
 
-Each line's `timestamp` is when the thing was observed: for a collector's alarm, the time of
-the snapshot that showed it, which can be up to 30 s before the line was written. So lines
-from different sources are close to, but not strictly in, time order. A pass is written in
-one piece; the one way to see a line twice is the server dying between writing it and
-saving `alarms-state.json`.
+Each event's `timestamp` is its observation time: collector events use the
+snapshot's timestamp, while operator actions use the action time. The tracker
+normally checks every 30 seconds, but delayed processing or startup can record
+an older observation. Lines from different sources need not be in time order.
+A pass is appended in one write. An interruption or failed state save after the
+append can repeat an event; the log and `alarms-state.json` are not one atomic
+transaction.
 
 ```bash
 tail logs/events.jsonl                                   # what changed lately

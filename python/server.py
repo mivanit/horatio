@@ -7690,9 +7690,9 @@ JSON API (machine-readable; prefer these for exact values)
   GET /api/alarms/history?hours=24 recorded hardware/host alarm events in a time range
   POST /api/alarms/retire        close an unchecked alarm, password and optional note
   POST /api/alarms/review        review exact journal/SEL evidence, password and optional note
-  GET /api/alarms                everything wrong now in one list, since when, and the
-                                 newest alarm changes: {sources, active, held, recent,
-                                 notes}
+  GET /api/alarms                current concerns, reviewed evidence and recent changes:
+                                 {now, sources, active, held, reviewed, recent, notes,
+                                 retirement, review}; source status reports stale data
   GET /api/storage-health        drive SMART/RAID/ECC snapshot (root collector)
   GET /api/4/sensors             temperatures, fans, power from hwmon (the server's own)
   GET /api/4/<plugin>            live Glances metrics, raw (rates not capped): cpu,
