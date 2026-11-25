@@ -5393,6 +5393,7 @@ def track_alarms(
             event("raised", entry)
         else:
             entry["since"] = old["since"]
+            old_evidence = _alarm_evidence(old.get("evidence"))
             if old.get("initial"):
                 entry["initial"] = True
             if _review_still_applies(old, evidence):
@@ -5403,9 +5404,9 @@ def track_alarms(
                     entry,
                     reason="new_evidence" if evidence else "evidence_unavailable",
                 )
-            elif evidence and set(evidence) - set(
-                _alarm_evidence(old.get("evidence")) or []
-            ):
+            # Missing metadata (an upgrade or incomplete capture) is an unknown
+            # baseline, not proof that every returning log entry is new.
+            elif evidence and old_evidence and set(evidence) - set(old_evidence):
                 event("changed", entry, reason="new_evidence")
             elif "value" in entry and "value" in old and entry["value"] != old["value"]:
                 event("changed", entry, was=old["value"])
@@ -5418,14 +5419,16 @@ def track_alarms(
         gone: dict[str, Any] = {
             k: old[k] for k in (*_ALARM_FIELDS, "boot", "requires") if k in old
         }
+        # Retaining an occurrence must retain its investigation and comparison
+        # baseline, even while it is held or awaiting enough clear checks.
+        retained = gone | {
+            k: old[k] for k in ("evidence", "reviewed") if k in old
+        }
         if key in hidden:
             # Hidden means positively present, so earlier failed checks and
             # absences no longer apply to this occurrence. Keep the evidence
             # and review while the collector's display limit hides its details.
-            for field in ("evidence", "reviewed"):
-                if field in old:
-                    gone[field] = old[field]
-            after[key] = gone
+            after[key] = retained
             continue
         absent: int = int(old.get("absent", 0))
         if _covered(key, checked) or (
@@ -5433,7 +5436,7 @@ def track_alarms(
         ):
             absent += 1
             if absent < clear_after:
-                after[key] = {**gone, "absent": absent}
+                after[key] = {**retained, "absent": absent}
                 continue
             # A clock that stepped back must not give a negative duration.
             more: dict[str, Any] = {"active_for_s": max(0, int(now - gone["since"]))}
@@ -5451,7 +5454,7 @@ def track_alarms(
             else:
                 # Unknown observations break the consecutive healthy streak.
                 after[key] = {
-                    **gone,
+                    **retained,
                     "unchecked_since": unchecked_since,
                     "unchecked": unchecked,
                 }
@@ -6364,7 +6367,7 @@ async def process_alarm_actions(directory: Path = ALARM_ACTIONS_DIR) -> None:
     for path in paths:
         try:
             body = await asyncio.to_thread(_read_alarm_action, path)
-        except (OSError, ValueError, UnicodeError) as error:
+        except (OSError, ValueError, UnicodeError, RecursionError) as error:
             response = _alarm_response(400, error=f"Invalid action file: {error}")
         else:
             action = body.get("action") if isinstance(body, dict) else None

@@ -671,8 +671,11 @@ function renderHardware(data) {
     const since = sinceText(item?.since);
     if (since) issues.push(hwRow('hw-note', `${item.initial ? 'seen since' : 'since'} ${since}`));
     if (review?.supported && alarmReviewable({ ...item, source: rows[i].source })) {
-      issues.push(`<button class="history-settings-btn" data-review-alarm="${i}" ${review.password_configured ? '' : 'disabled'}
-        title="${review.password_configured ? 'Mark this evidence reviewed; new evidence will appear again' : 'Configure the settings password to review evidence'}">Mark reviewed</button>`);
+      const enabled = data.status === 'ok' && review.password_configured === true;
+      const title = data.status !== 'ok' ? 'Fresh evidence is required to review this alarm' :
+        review.password_configured ? 'Mark this evidence reviewed; new evidence will appear again' : 'Configure the settings password to review evidence';
+      issues.push(`<button class="history-settings-btn" data-review-alarm="${i}" ${enabled ? '' : 'disabled'}
+        title="${title}">Mark reviewed</button>`);
     }
     // Several lines of one kind in a row (journal messages) share one hint, after the last.
     const hint = hwHint(text, data);
@@ -853,7 +856,7 @@ async function submitAlarmRetirement(popup = alarmRetirementPopup) {
       if (alarmRetirementPopup !== popup) return;
       if (response.ok && refreshed) { closeAlarmRetirement(popup); return; }
       status.textContent = response.ok ? 'Saved. Refresh failed; the next poll will retry.' :
-        'This alarm changed. Close this dialog and review its current state before trying again.';
+        `${body.error || 'This alarm changed.'} Close this dialog and review its current state before trying again.`;
       popup.querySelector('#ar-cancel').textContent = 'Close';
     } else if (alarmRetirementPopup === popup) {
       status.textContent = body.error || 'Could not save this action';
@@ -1127,8 +1130,14 @@ function alarmHistoryHTML(entry, width) {
   if (data.skipped) notice.push(`${data.skipped} unreadable event record${data.skipped === 1 ? '' : 's'} skipped.`);
   const unknown = Object.entries(current?.sources || {}).filter(([source, value]) => source !== 'services' && value?.status !== 'ok');
   if (unknown.length) notice.push(`Checks unavailable or stale: ${unknown.map(([source]) => source).join(', ')}.`);
+  // Unkeyed findings are real concerns, but cannot be linked across snapshots
+  // or acted on. Show them without inventing a timeline identity.
+  const untracked = (Array.isArray(current?.active) ? current.active : [])
+    .filter(row => typeof row?.source === 'string' && row.source !== 'services' &&
+      typeof row.key !== 'string' && typeof row.text === 'string')
+    .map(row => `<div class="alarm-current-row alarm-current-active"><span>Active</span> ${escapeHtml(row.text)}</div>`).join('');
   const currentRows = groups.map((group, i) => group.current && group.current.kind !== 'reviewed' ?
-    `<button class="alarm-current-row alarm-current-${group.current.kind}" data-alarm-lane="${i}" aria-pressed="${group.id === entry.alarmSelection}"><span>${escapeHtml(group.current.status)}</span> ${escapeHtml(group.text)}${group.current.since < from ? ' <small>First observed before this range</small>' : ''}</button>` : '').join('');
+    `<button class="alarm-current-row alarm-current-${group.current.kind}" data-alarm-lane="${i}" aria-pressed="${group.id === entry.alarmSelection}"><span>${escapeHtml(group.current.status)}</span> ${escapeHtml(group.text)}${Number.isFinite(group.current.since) && group.current.since < from ? ' <small>First observed before this range</small>' : ''}</button>` : '').join('') + untracked;
   const reviewed = groups.map((group, i) => group.current?.kind === 'reviewed' ?
     `<button class="alarm-current-row" data-alarm-lane="${i}" aria-pressed="${group.id === entry.alarmSelection}">${escapeHtml(group.text)}</button>` : '').join('');
   const hasEvents = groups.some(group => group.events.length);
@@ -1151,9 +1160,10 @@ function alarmHistoryHTML(entry, width) {
     const row = selected.current;
     const capability = row?.kind === 'held' ? current?.retirement : current?.review;
     const action = row?.kind === 'held' ? 'retire' : row?.kind === 'active' && alarmReviewable(row) ? 'review' : null;
-    const enabled = !entry.alarmCurrentStale && capability?.password_configured === true;
+    const evidenceFresh = action !== 'review' || current?.sources?.[row.source]?.status === 'ok';
+    const enabled = !entry.alarmCurrentStale && evidenceFresh && capability?.password_configured === true;
     const button = action && capability?.supported ? `<button class="history-settings-btn" data-alarm-action="${action}" ${enabled ? '' : 'disabled'}
-      title="${enabled ? 'Requires the settings password' : 'Refresh current concerns and configure the settings password to make changes'}">${action === 'review' ? 'Mark reviewed' : 'Close unchecked alarm'}</button>` : '';
+      title="${!evidenceFresh ? 'Fresh evidence is required to review this alarm' : enabled ? 'Requires the settings password' : 'Refresh current concerns and configure the settings password to make changes'}">${action === 'review' ? 'Mark reviewed' : 'Close unchecked alarm'}</button>` : '';
     const events = [...selected.events].reverse().map(event => {
       const observed = Number.isFinite(event.since) ? `<span>First observed: ${escapeHtml(alarmTime(event.since))}${event.since < from ? ' (before this range)' : ''}</span>` : '';
       const interval = Number.isFinite(event.active_for_s) && event.active_for_s >= 0 ? `<span>Observed interval: ${alarmInterval(event.active_for_s)}</span>` : '';

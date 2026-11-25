@@ -17,13 +17,14 @@ KEY = "journal/test"
 
 @pytest.fixture
 def evidence_alarm(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     import server
 
     monkeypatch.setattr(server, "PBKDF2_ITERATIONS", 1000)
     server.PASSWORD_FILE.write_text(server._hash_password("correct"))
-    item = {"key": KEY, "text": "journal: disk read failed", "evidence": ["a", "b"]}
+    key = getattr(request, "param", KEY)
+    item = {"key": key, "text": "recorded fault", "evidence": ["a", "b"]}
     snapshot = {
         "status": "ok",
         "schema": 1,
@@ -41,7 +42,7 @@ def evidence_alarm(
     monkeypatch.setattr(server, "_get_storage_health", lambda *args: snapshot)
     body = {
         "source": "state",
-        "key": KEY,
+        "key": key,
         "since": STAMP,
         "evidence": ["a", "b"],
         "password": "correct",
@@ -178,6 +179,99 @@ def test_unavailable_evidence_does_not_suppress_alarm(
     assert events[0]["reason"] == "evidence_unavailable"
 
 
+@pytest.mark.parametrize("evidence_alarm", [KEY, "sel/memory", "sel/hardware"], indirect=True)
+@pytest.mark.parametrize("checked_absent", [False, True])
+@pytest.mark.parametrize("evidence", [["a", "b"], ["b"], ["b", "c"]])
+def test_retained_review_survives_restart_and_checks_returning_evidence(
+    evidence_alarm: tuple[dict[str, Any], dict[str, Any]],
+    checked_absent: bool,
+    evidence: list[str],
+) -> None:
+    import server
+
+    body, snapshot = evidence_alarm
+    key = body["key"]
+    assert asyncio.run(server.review_alarm(request(body))).status_code == 200
+    memory = server._load_alarm_memory()
+    original = memory["state"]["alarms"][key].copy()
+    known, events = server.track_alarms(
+        memory["state"]["alarms"], [], [key] if checked_absent else [], STAMP + 60, 3
+    )
+    assert events == []
+    assert known[key]["reviewed"] == original["reviewed"]
+    assert known[key]["evidence"] == original["evidence"]
+    memory["state"]["alarms"] = known
+    server._save_alarm_memory(memory)
+    memory = server._load_alarm_memory()
+    if not checked_absent:
+        held = server.held_rows("state", None, memory)
+        assert len(held) == 1 and held[0]["key"] == key
+        assert held[0]["unchecked_since"] == STAMP + 60
+
+    item = snapshot["alarm_items"][0] | {"evidence": evidence}
+    known, events = server.track_alarms(
+        memory["state"]["alarms"], [item], [key], STAMP + 120, 3
+    )
+    assert known[key]["since"] == STAMP
+    assert "unchecked_since" not in known[key] and "absent" not in known[key]
+    if "c" in evidence:
+        assert "reviewed" not in known[key]
+        assert [(event["event"], event["reason"]) for event in events] == [
+            ("reopened", "new_evidence")
+        ]
+    else:
+        assert known[key]["reviewed"] == original["reviewed"]
+        assert events == []
+
+
+def test_unchecked_unreviewed_alarm_keeps_its_evidence_baseline(
+    evidence_alarm: tuple[dict[str, Any], dict[str, Any]],
+) -> None:
+    import server
+
+    _, snapshot = evidence_alarm
+    known, events = server.track_alarms(
+        server._alarm_memory["state"]["alarms"], [], [], STAMP + 60, 1
+    )
+    assert events == []
+    known, events = server.track_alarms(
+        known, snapshot["alarm_items"], ["journal"], STAMP + 120, 1
+    )
+    assert events == []
+    assert "reviewed" not in known[KEY]
+    item = snapshot["alarm_items"][0] | {"evidence": ["b", "c"]}
+    _, events = server.track_alarms(known, [item], ["journal"], STAMP + 180, 1)
+    assert [(event["event"], event["reason"]) for event in events] == [
+        ("changed", "new_evidence")
+    ]
+
+
+@pytest.mark.parametrize("partial_capture", [False, True])
+def test_unknown_evidence_baseline_does_not_claim_new_entries(partial_capture: bool) -> None:
+    import server
+
+    item = {"key": KEY, "text": "journal: disk read failed"}
+    known, _ = server.track_alarms(
+        None, [item | {"evidence": ["a", "b"]}] if partial_capture else [item],
+        ["journal"], STAMP, 1
+    )
+    if partial_capture:
+        known, events = server.track_alarms(known, [item], [], STAMP + 60, 1)
+        assert events == []
+    # Both an old collector and a partial capture leave no comparison baseline.
+    known, events = server.track_alarms(
+        known, [item | {"evidence": ["a", "b"]}], ["journal"], STAMP + 120, 1
+    )
+    assert events == []
+    assert known[KEY]["since"] == STAMP
+    _, events = server.track_alarms(
+        known, [item | {"evidence": ["b", "c"]}], ["journal"], STAMP + 180, 1
+    )
+    assert [(event["event"], event["reason"]) for event in events] == [
+        ("changed", "new_evidence")
+    ]
+
+
 def test_review_rejects_new_or_stale_evidence(
     evidence_alarm: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
@@ -295,6 +389,28 @@ def test_bad_file_commands_get_receipts_without_changing_state(
             == 400
         )
     assert json.dumps(server._alarm_memory) == before
+
+
+def test_nested_json_rejected_without_blocking_later_actions(
+    evidence_alarm: tuple[dict[str, Any], dict[str, Any]], tmp_path: Path
+) -> None:
+    import server
+
+    body, _ = evidence_alarm
+    nested = "[" * 30000 + "0" + "]" * 30000
+    assert len(nested) < server.ALARM_ACTION_MAX_BYTES
+    (tmp_path / "a-nested.json").write_text(nested)
+    body = {key: value for key, value in body.items() if key != "password"}
+    (tmp_path / "z-review.json").write_text(json.dumps(body | {"action": "review"}))
+    asyncio.run(server.process_alarm_actions(tmp_path))
+    rejected = json.loads((tmp_path / "a-nested.result.json").read_text())
+    assert rejected["status_code"] == 400
+    assert rejected["error"].startswith("Invalid action file:")
+    accepted = json.loads((tmp_path / "z-review.result.json").read_text())
+    assert accepted["status_code"] == 200 and accepted["status"] == "reviewed"
+    before = server.EVENTS_FILE.read_bytes()
+    asyncio.run(server.process_alarm_actions(tmp_path))
+    assert server.EVENTS_FILE.read_bytes() == before
 
 
 def test_concurrent_review_requests_record_one_operator_action(

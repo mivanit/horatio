@@ -552,12 +552,13 @@ h1 {
 .alarm-current { margin-bottom: 10px; }
 .alarm-current-row {
   display: block; width: 100%; border: 0; background: transparent; color: inherit;
-  text-align: left; padding: 5px 0; cursor: pointer; font: inherit; overflow-wrap: anywhere;
+  text-align: left; padding: 5px 0; font: inherit; overflow-wrap: anywhere;
 }
+button.alarm-current-row { cursor: pointer; }
 .alarm-current-row span { color: var(--color-warning); margin-right: 6px; }
 .alarm-current-active span { color: var(--color-error-light); }
 .alarm-current-row small { display: block; color: var(--text-muted); }
-.alarm-current-row:hover { text-decoration: underline; }
+button.alarm-current-row:hover { text-decoration: underline; }
 .alarm-timeline-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; margin: 18px 0 8px; }
 .alarm-timeline-heading h3 { margin: 0; }
 .alarm-timeline-heading details { color: var(--text-muted); }
