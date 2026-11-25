@@ -15,7 +15,8 @@ Planned release: **0.3.0**.
   later requests. Alarm review controls require fresh source evidence, and
   conflict dialogs preserve the server's explanation.
 - Alarm history includes unkeyed findings as non-actionable current concerns and
-  no longer labels unknown start times as predating the selected range.
+  no longer labels unknown start times as predating the selected range. Its
+  empty-timeline message stays below the concerns instead of overlapping them.
 - Alarm history labels its concerns with the snapshot time and a refresh hint,
   making clear that they do not update with the live dashboard.
 - Reviewed journal alarms retain their review while omitted from the collector's

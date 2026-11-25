@@ -1194,7 +1194,7 @@ function alarmHistoryHTML(entry, width) {
       <div class="alarm-legend">${[['raised', 'Raised'], ['cleared', 'Cleared'], ['retired', 'Closed'], ['expired', 'Expired'], ['reviewed', 'Reviewed'], ['reopened', 'Review reopened'], ['changed', 'Updated']].map(([event, label]) =>
         `<span><span class="alarm-marker-${event}" aria-hidden="true">${ALARM_EVENT_LABELS[event][0]}</span> ${label}</span>`).join('')}</div></details></div>
     ${hasEvents ? `<div class="alarm-lanes">${lanes}</div>
-      <div class="alarm-axis" style="margin-left:${HISTORY_AXIS_WIDTH}px;margin-right:${HISTORY_PLOT_INSET}px">${ticks}</div>` : '<p class="no-history-data">No alarm events recorded in this range.</p>'}
+      <div class="alarm-axis" style="margin-left:${HISTORY_AXIS_WIDTH}px;margin-right:${HISTORY_PLOT_INSET}px">${ticks}</div>` : '<p class="hw-note">No alarm events recorded in this range.</p>'}
     <div class="alarm-detail">${details}</div>${context}
   </div>`;
 }

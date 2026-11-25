@@ -29,6 +29,8 @@ If a source cannot re-check an alarm and omits it, the alarm appears under
 server restarts. When readable again, identical evidence or a subset returns
 to `reviewed`; new evidence reopens it. This differs from a reported alarm with
 incomplete evidence, which explicitly invalidates the review as described above.
+If an older version already lost a review, inspect the current evidence and mark
+it reviewed again; the fix does not reconstruct past review state.
 An existing occurrence with no previous evidence metadata establishes a baseline
 when evidence first becomes available; that alone is not a "New evidence" event.
 
@@ -74,8 +76,8 @@ Copy fields exactly from the selected row:
 
 A null `key` or `since` cannot identify an actionable occurrence. Unkeyed findings
 still appear in the history card's current concerns, but have no timeline or
-action controls. Fresh source
-data can also arrive before the tracker has recorded it; a conflict may require
+action controls. Fresh source data can also arrive before the tracker has
+recorded it; a conflict may require
 waiting for the next tracker pass and fetching again. Always re-evaluate the
 finding rather than automatically applying an old decision to a new occurrence.
 

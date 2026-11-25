@@ -2176,6 +2176,7 @@ async function testAlarmHistory() {
   assert(!html.includes('No concerns reported') && !html.includes('Service belongs elsewhere'));
   assert(!html.includes('First observed before this range'));
   assert(!html.includes('data-alarm-lane=') && !html.includes('data-alarm-action='), 'unkeyed concerns have no invented timeline or actions');
+  assert(!html.includes('class="no-history-data"'), 'the empty timeline must not use the chart-centered overlay over current concerns');
   assert.equal(entry.alarmGroups.length, 0);
   entry.alarmCurrent.active = [];
   assert(context.alarmHistoryHTML(entry, 800).includes('No concerns reported'), 'unkeyed findings do not persist beyond their snapshot');
