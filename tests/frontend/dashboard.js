@@ -1944,6 +1944,14 @@ function testHardwareIndependentSources() {
   assert(!context.elements.get('hardware-value').className.includes('text-success'));
   assert(!html().includes('no alarms') && html().includes('No unreviewed issues'));
   assert(!context.statuses.critical && !context.statuses.warning, 'reviewed evidence is neutral, not recovered or critical');
+  const reviewable = { key: 'journal/test', text: 'Journal fault', since: ts, evidence: ['a'] };
+  context.dataCache.alarms.data.review = { supported: true, password_configured: true };
+  for (const status of ['ok', 'stale']) {
+    context.renderHardware({ status, age_sec: 0, alarms: [reviewable.text], alarm_items: [reviewable] });
+    const button = html().match(/<button[^>]*data-review-alarm="0"[^>]*>/)?.[0];
+    assert(button, 'reviewable evidence keeps its action visible');
+    assert.equal(button.includes('disabled'), status !== 'ok', 'review requires a fresh source');
+  }
 }
 
 async function testPowerHistoryPerRecord() {
@@ -2136,6 +2144,14 @@ async function testAlarmHistory() {
   assert(html.includes('data-alarm-action="review" disabled'));
   assert(html.includes(snapshotNote), 'a failed refresh keeps the original snapshot time');
   entry.alarmCurrentStale = false;
+  for (const status of ['stale', 'missing', undefined]) {
+    entry.alarmCurrent.sources.state.status = status;
+    html = context.alarmHistoryHTML(entry, 800);
+    assert(html.includes('data-alarm-action="review" disabled'), 'a successful GET does not make source evidence fresh');
+    assert(html.includes('Fresh evidence is required'));
+  }
+  entry.alarmCurrent.sources.state.status = 'ok';
+  assert(!context.alarmHistoryHTML(entry, 800).includes('data-alarm-action="review" disabled'));
   entry.alarmSelection = group('dashboard', 'fan/removed').id;
   assert(context.alarmHistoryHTML(entry, 800).includes('data-alarm-action="retire"'));
   entry.alarmHistory.events = [];
@@ -2146,6 +2162,23 @@ async function testAlarmHistory() {
   assert(html.includes('Snapshot time unavailable. Refresh to update.'), 'missing timestamps are not replaced by the current clock');
   assert(html.includes('No concerns reported in this snapshot.'));
   assert.equal(entry.alarmSelection, null, 'selection clears when no longer present');
+
+  entry.alarmCurrent = { active: [{ source: 'dashboard', key: 'fan/new', text: 'New fan fault', since: null }] };
+  html = context.alarmHistoryHTML(entry, 800);
+  assert(html.includes('New fan fault') && !html.includes('First observed before this range'), 'unknown onset is not an old onset');
+  entry.alarmCurrent.active = [
+    { source: 'dashboard', key: null, text: 'Unidentified <fan>', since: null },
+    { source: 'dashboard', key: null, text: 'Another unidentified fan', since: null },
+    { source: 'services', key: null, text: 'Service belongs elsewhere', since: null },
+  ];
+  html = context.alarmHistoryHTML(entry, 800);
+  assert(html.includes('Unidentified &lt;fan>') && html.includes('Another unidentified fan'));
+  assert(!html.includes('No concerns reported') && !html.includes('Service belongs elsewhere'));
+  assert(!html.includes('First observed before this range'));
+  assert(!html.includes('data-alarm-lane=') && !html.includes('data-alarm-action='), 'unkeyed concerns have no invented timeline or actions');
+  assert.equal(entry.alarmGroups.length, 0);
+  entry.alarmCurrent.active = [];
+  assert(context.alarmHistoryHTML(entry, 800).includes('No concerns reported'), 'unkeyed findings do not persist beyond their snapshot');
 
   let handler, recordings = 0;
   const opened = [], closed = [], cards = new Map();
@@ -2297,7 +2330,7 @@ async function testAlarmRetirement() {
   await h.finishRead(1, { status: 'ok', alarm_held: [] });
   await h.finishRead(2, { status: 'ok', sensor_alarm_held: [], sensor_alarms: ['Fan failed again'] });
   await pending;
-  assert(field('status').textContent.includes('alarm changed'));
+  assert(field('status').textContent.includes('Alarm changed'));
   assert(field('confirm').disabled && field('password').value === '', 'a conflict needs a fresh selection');
   assert.equal(rendered.at(-1).sensor_alarms[0], 'Fan failed again');
   field('cancel').click();
@@ -2335,6 +2368,19 @@ async function testAlarmRetirement() {
   await h.finishRead(7, { status: 'ok' }); await h.finishRead(8, { status: 'ok' });
   await pending;
   assert.equal(current(), null);
+
+  // A source can become stale after the dialog opens. Keep the server's reason.
+  h.context.openAlarmReview(evidence);
+  popup = current(); field('password').value = 'test';
+  pending = h.context.submitAlarmRetirement(popup);
+  h.finishWrite(4, { error: 'Current evidence is unavailable or stale' }, false, 409);
+  await new Promise(setImmediate);
+  await h.finishRead(9, { active: [evidence], sources: { state: { status: 'stale' } } });
+  await h.finishRead(10, { status: 'ok' }); await h.finishRead(11, { status: 'stale' });
+  await pending;
+  assert(field('status').textContent.startsWith('Current evidence is unavailable or stale'));
+  assert(!field('status').textContent.includes('This alarm changed'));
+  assert(field('confirm').disabled && field('password').value === '');
 }
 
 // The Fans header never compares RPM with a GPU fan's percent.

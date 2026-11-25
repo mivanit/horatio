@@ -120,6 +120,17 @@ identity to the sensor name where available; display aliases still use the name.
 Other history records keep the sensor's own name. `temp_labels` is the older
 setting and is still read; `sensor_labels` wins where both name a sensor.
 
+Aliases also apply to historical series. Equal display names receive short
+distinguishing path suffixes; the underlying history keys remain separate.
+This compatibility behavior is retained so existing aliases keep working and
+distinct sensors remain distinguishable. Further label simplification is deferred
+until its handling of aliases and duplicate names is specified.
+
+A chart remembers hidden lines only while their series remain in its selected
+range. A series that leaves the range returns visible; an empty range resets all
+selections. This is an accepted limit: retaining selections for absent series
+would add separate state and rules for its lifetime and reset behavior.
+
 `temp_thresholds` sets individual limits in °C for sensors that run hot by design,
 for example `{"I350 NIC": 95}`. Use the sensor's own name or its
 `sensor_labels`/`temp_labels` name; the card's short forms “Pkg”, “NVMe”, and “Cores”

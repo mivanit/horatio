@@ -17,7 +17,8 @@ KEY = "journal/test"
 
 @pytest.fixture
 def evidence_alarm(
-    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     import server
 
@@ -179,7 +180,9 @@ def test_unavailable_evidence_does_not_suppress_alarm(
     assert events[0]["reason"] == "evidence_unavailable"
 
 
-@pytest.mark.parametrize("evidence_alarm", [KEY, "sel/memory", "sel/hardware"], indirect=True)
+@pytest.mark.parametrize(
+    "evidence_alarm", [KEY, "sel/memory", "sel/hardware"], indirect=True
+)
 @pytest.mark.parametrize("checked_absent", [False, True])
 @pytest.mark.parametrize("evidence", [["a", "b"], ["b"], ["b", "c"]])
 def test_retained_review_survives_restart_and_checks_returning_evidence(
@@ -247,13 +250,18 @@ def test_unchecked_unreviewed_alarm_keeps_its_evidence_baseline(
 
 
 @pytest.mark.parametrize("partial_capture", [False, True])
-def test_unknown_evidence_baseline_does_not_claim_new_entries(partial_capture: bool) -> None:
+def test_unknown_evidence_baseline_does_not_claim_new_entries(
+    partial_capture: bool,
+) -> None:
     import server
 
     item = {"key": KEY, "text": "journal: disk read failed"}
     known, _ = server.track_alarms(
-        None, [item | {"evidence": ["a", "b"]}] if partial_capture else [item],
-        ["journal"], STAMP, 1
+        None,
+        [item | {"evidence": ["a", "b"]}] if partial_capture else [item],
+        ["journal"],
+        STAMP,
+        1,
     )
     if partial_capture:
         known, events = server.track_alarms(known, [item], [], STAMP + 60, 1)

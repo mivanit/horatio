@@ -1203,6 +1203,9 @@ function renderAlarmHistory(entry) {
   const box = entry.card.querySelector('.chart-container');
   const scroll = box.querySelector('.alarm-lanes')?.scrollTop || 0;
   const focused = box.querySelector('[data-alarm-lane]:focus');
+  // Accepted limitation: refresh restores lane focus, not disclosure-summary
+  // focus. Expansion survives; defer broader focus tracking until it can be
+  // exercised with browser keyboard tests rather than adding fragile selectors.
   const focusedId = focused ? entry.alarmGroups?.[Number(focused.dataset.alarmLane)]?.id : null;
   const focusedClass = focused?.classList.contains('alarm-lane') ? 'alarm-lane' : 'alarm-current-row';
   const reviewed = box.querySelector('.alarm-reviewed');

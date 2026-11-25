@@ -24,6 +24,22 @@ when it returns to the displayed rows, its evidence is compared with the stored
 review. An older collector or an incomplete/oversized capture may supply no
 reviewable evidence; update the collector if needed, and never invent tokens.
 
+If a source cannot re-check an alarm and omits it, the alarm appears under
+`held` ("Not re-checked"). Its stored review, note and evidence survive, including
+server restarts. When readable again, identical evidence or a subset returns
+to `reviewed`; new evidence reopens it. This differs from a reported alarm with
+incomplete evidence, which explicitly invalidates the review as described above.
+An existing occurrence with no previous evidence metadata establishes a baseline
+when evidence first becomes available; that alone is not a "New evidence" event.
+
+The collector displays only the eight oldest distinct journal groups. Reviewing
+them does not free display slots. The `journal-more` summary cannot be reviewed,
+and groups outside the limit cannot be reviewed through HTTP or action files
+until their full evidence is displayed. Ongoing messages can keep the overflow
+present beyond 24 hours. This limit remains for this release: dismissing a summary
+would hide uninspected evidence. Supporting review of overflow groups requires
+exposing their complete evidence, rather than bypassing validation.
+
 Both actions accept an optional `note` string of at most 2,000 characters;
 leading/trailing whitespace is trimmed. Record what you checked or changed.
 Notes are readable by anyone who can read dashboard history. There is no
@@ -56,7 +72,9 @@ Copy fields exactly from the selected row:
 | `evidence` | Required for review; copy the full current array of opaque tokens. Do not use the display text, count, or an older review's tokens. |
 | `initial` | If true, the fault was already present when tracking began; `since` is not its known physical onset. Not an action parameter. |
 
-A null `key` or `since` cannot identify an actionable occurrence. Fresh source
+A null `key` or `since` cannot identify an actionable occurrence. Unkeyed findings
+still appear in the history card's current concerns, but have no timeline or
+action controls. Fresh source
 data can also arrive before the tracker has recorded it; a conflict may require
 waiting for the next tracker pass and fetching again. Always re-evaluate the
 finding rather than automatically applying an old decision to a new occurrence.

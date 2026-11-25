@@ -244,6 +244,14 @@ belonged to.
 Held alarms also expire after 30 days without a check and at least three
 unchecked snapshots. Expiry records missing evidence, not recovery.
 
+These are intentionally separate rules: a successful check resets the unchecked
+expiry period, and an unchecked observation breaks the consecutive clearing
+checks. Alternating checked-absent and unchecked observations can therefore retain
+a sensor alarm indefinitely. We keep this conservative behavior rather than
+infer recovery from scattered successful checks or expire an alarm that is still
+being checked. Investigate a flaky source; use explicit closure while the alarm
+is held when repair or removal has been confirmed.
+
 This is intentional even when a repair removes the original evidence. Removing
 a faulty disk or DIMM, or uninstalling a GPU driver, does not by itself tell the
 tracker that the fault was fixed. Confirm the repair before retiring the old

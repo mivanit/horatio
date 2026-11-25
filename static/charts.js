@@ -494,6 +494,8 @@ function tempDisplayLabel(label, originalLabel = sensorOriginalLabel(label)) {
 }
 
 // Qualify only colliding display names. History values remain keyed by identity.
+// Keep aliases and disambiguation for compatibility; further simplification
+// needs an explicit rule for existing aliases and equal names (configuration.md).
 function sensorDisplayLabels(keys, originals = []) {
   const labels = keys.map((key, i) => tempDisplayLabel(key, originals[i]));
   const counts = new Map();

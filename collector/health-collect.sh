@@ -807,6 +807,9 @@ def journal():
         g["lines"].append(l)
     # Oldest first: the order, and so which ones are shown, does not change as
     # new messages arrive. One transient error keeps its line for 24 h: intended.
+    # TODO: expose complete evidence for overflow groups before offering review
+    # of them. Reviewing visible groups cannot free collector slots, and simply
+    # dismissing journal-more would hide evidence the operator has not seen.
     shown = sorted(groups.items(), key=lambda kv: kv[1]["first"])
     for digest, g in shown[:JOURNAL_MAX]:
         when = f"at {g['first']}" if g["n"] == 1 else f"first {g['first']}, last {g['last']}"

@@ -5421,9 +5421,7 @@ def track_alarms(
         }
         # Retaining an occurrence must retain its investigation and comparison
         # baseline, even while it is held or awaiting enough clear checks.
-        retained = gone | {
-            k: old[k] for k in ("evidence", "reviewed") if k in old
-        }
+        retained = gone | {k: old[k] for k in ("evidence", "reviewed") if k in old}
         if key in hidden:
             # Hidden means positively present, so earlier failed checks and
             # absences no longer apply to this occurrence. Keep the evidence

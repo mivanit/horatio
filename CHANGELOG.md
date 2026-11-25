@@ -7,6 +7,15 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 
 Planned release: **0.3.0**.
 
+- Unchecked alarms retain stored evidence and reviews across collection failures
+  and restarts. Identical or aging evidence stays reviewed when checks resume;
+  new evidence reopens the review. Establishing a missing evidence baseline no
+  longer creates a false "New evidence" event.
+- Deeply nested JSON action files receive rejection receipts without blocking
+  later requests. Alarm review controls require fresh source evidence, and
+  conflict dialogs preserve the server's explanation.
+- Alarm history includes unkeyed findings as non-actionable current concerns and
+  no longer labels unknown start times as predating the selected range.
 - Alarm history labels its concerns with the snapshot time and a refresh hint,
   making clear that they do not update with the live dashboard.
 - Reviewed journal alarms retain their review while omitted from the collector's
@@ -24,6 +33,8 @@ Planned release: **0.3.0**.
   event for its original reading, occurrence time and observed duration; the
   symbol key and technical identity are also expandable. Expanded details survive
   refreshes, and keyboard focus follows the same alarm lane when rows reorder.
+  Focus inside event and symbol disclosures is still lost on refresh; this minor
+  limitation is accepted pending browser keyboard coverage for a broader fix.
   Recent events and unchecked alarms use relative ages in the Hardware card,
   with exact timestamps available in tooltips and history details. Diagnostic
   commands are under Hardware details. Long lane labels and action dialogs fit
