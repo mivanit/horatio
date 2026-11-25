@@ -5,6 +5,8 @@ Releases are `vX.Y.Z` git tags (see [versions and updates](docs/operations.md#ve
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-25
+
 ### Upgrade requirements
 
 - **Python service and collectors:** after updating the source, run
