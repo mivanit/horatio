@@ -177,9 +177,20 @@ are different things: one is a bulky sample on a schedule, the other a rare, sma
 | `alarm-actions/` | local agent action requests and result receipts; see [file interface](alarm-actions.md) | requests submitted by agents; results written by the server |
 | `server.log`, `glances.log` | the server's own messages | rotated at 5 MiB |
 
-The Python backend does not rotate these JSON-lines files. The Lua backend
+**Permanent history retention is an intentional design choice.** Measurement,
+service-check, and alarm-event history is kept forever; Horatio does not
+automatically delete or expire old records, including under storage pressure.
+Capacity monitoring should report storage use without purging history. Any manual
+removal is an explicit operator decision, not a scheduled retention policy.
+
+The Python backend does not rotate these history JSON-lines files. The Lua backend
 [rotates history into gzip archives](../lua/README.md#openwrt). `/var/lib/horatio/` holds only the collectors'
 two current snapshots, not history.
+
+Compression preserves old records. Dashboard time ranges, bounded reads, and
+`history.max_hours` limit what a request displays or reads, not what is retained.
+The rotating diagnostic logs (`server.log` and `glances.log`) and replaceable
+current-state files are separate from this permanent historical record.
 
 Every Python server start logs the Horatio version and installed Git build in
 `logs/server.log` and, under systemd, the service journal. This records when an

@@ -160,6 +160,11 @@ differences. [Themes](themes/README.md) explains adding a stylesheet. For retain
 alarms, event logs, or moving history to another box, see
 [operations](docs/operations.md#logs-and-history).
 
+**History is kept forever by design.** Horatio never automatically deletes old
+measurement, service-check, or alarm-event history. Lua may compress older
+measurements into archives, preserving the records. Display and read limits do
+not expire stored history. See the [retention policy](docs/operations.md#logs-and-history).
+
 ## API
 
 The [API reference](docs/api.md) covers metrics, alarms, services, history,

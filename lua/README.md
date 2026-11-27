@@ -99,6 +99,11 @@ on install, and uninstall leaves both in place.
 
 ### History
 
+History is kept forever by design. Rotation compresses old measurements into
+archives without discarding records; archives do not expire. Read limits only
+bound what the dashboard loads, and storage pressure does not trigger deletion.
+See the [retention policy](../docs/operations.md#logs-and-history).
+
 A cron job requests `/api/history/tick` every 5 minutes and the tick that finds a record due takes it, so no dashboard request waits for the
 second of sampling; if cron stops, records are taken on ordinary requests instead, up to two
 minutes late. A `history.record_interval` under 5 minutes is finer than the tick, so

@@ -60,6 +60,11 @@ those values. Its timer/cron scheduling is described in the
 
 ### Read limits and rotation
 
+History is kept forever by design. There is no automatic deletion or expiry of
+measurement, service-check, or alarm-event history. The limits below control
+reads and compression, not retention; neither an age limit nor storage pressure
+causes Horatio to purge old history. See the [retention policy](operations.md#logs-and-history).
+
 On Python, `history.max_hours` accepts 0.1–8760 hours and clamps larger requests to
 `/api/history`, `/api/history/field/<name>`, and `/text`. Lower it on a small box:
 a year-long window parses up to the 64 MB history tail into memory.
